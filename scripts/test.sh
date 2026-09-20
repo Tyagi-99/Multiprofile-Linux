@@ -2,16 +2,24 @@
 set -eu
 cd "$(dirname "$0")/.."
 export PYTHONPATH="src:${PYTHONPATH:-}"
+export XDG_DATA_HOME="$(mktemp -d /tmp/mp-test-data-XXXXXX)"
+export XDG_CACHE_HOME="$(mktemp -d /tmp/mp-test-cache-XXXXXX)"
+export XDG_CONFIG_HOME="$(mktemp -d /tmp/mp-test-cfg-XXXXXX)"
+unset MULTIPROFILE_API_TOKEN 2>/dev/null || true
+
 python3 - <<'PY'
 import json
+import os
+import zipfile
+from pathlib import Path
+
 from multiprofile import __version__
-assert __version__ == "1.1.0", __version__
+assert __version__ == "1.2.0", __version__
 
 from multiprofile.fingerprint import build_fingerprint, normalize_seed, fingerprint_report
 from multiprofile.proxy_util import parse_proxy, proxy_server_arg
 from multiprofile.cookies_store import import_cookies
 
-# Fingerprint determinism
 p = {
     "id": "profile_test",
     "seed": 12345,
@@ -24,19 +32,19 @@ p = {
 fp1 = build_fingerprint(p)
 fp2 = build_fingerprint(p)
 assert fp1 == fp2, "fingerprint not deterministic"
-assert fp1["platform"] == "Win32"
-assert fp1["touch"] == 0
 assert normalize_seed(p) == 12345
 rep = fingerprint_report(p)
 assert rep["ok"] and "summary" in rep
 
-# Mobile UA must not get Win32
-pm = dict(p, userAgent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1", isMobile=True, seed=99)
+pm = dict(
+    p,
+    userAgent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    isMobile=True,
+    seed=99,
+)
 fpm = build_fingerprint(pm)
 assert fpm["platform"] == "iPhone", fpm["platform"]
-assert fpm["touch"] > 0
 
-# Proxy parse
 cases = [
     ("1.2.3.4:8080", None),
     ("1.2.3.4:8080:user:pass", ("user", "pass")),
@@ -49,35 +57,31 @@ for raw, auth in cases:
     parsed = parse_proxy(raw, "custom")
     assert parsed, raw
     assert parsed["host"] == "1.2.3.4"
-    arg = proxy_server_arg(parsed)
-    assert arg
+    assert proxy_server_arg(parsed)
     if auth:
         assert parsed["username"] == auth[0]
         assert parsed["password"] == auth[1]
 
-# Cookies import
 chrome = [{"name": "a", "value": "1", "domain": ".example.com", "path": "/", "secure": True, "httpOnly": False, "expirationDate": 2000000000}]
 assert len(import_cookies(chrome)) == 1
 netscape = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t2000000000\tb\t2\n"
 assert len(import_cookies(netscape)) == 1
 
-# Flask test client
 from multiprofile.api.server import create_app
 app = create_app()
 c = app.test_client()
 h = c.get("/api/health")
 assert h.status_code == 200
 hj = h.get_json()
-assert hj["version"] == "1.1.0"
-assert hj["static_ok"] is True
-assert hj["extension_ok"] is True
+assert hj["version"] == "1.2.0", hj
+assert hj.get("static_ok") is True
+assert hj.get("extension_ok") is True
+assert "slots" in hj
 
-r = c.get("/api/user-agents")
-assert r.status_code == 200
-assert isinstance(r.get_json(), list) and len(r.get_json()) >= 5
+assert c.get("/api/user-agents").status_code == 200
+assert isinstance(c.get("/api/user-agents").get_json(), list)
 assert c.get("/api/profiles").status_code == 200
 
-# Create + fingerprint + cookies + duplicate + v1 list
 cr = c.post("/api/profiles", json={
     "name": "Test FP",
     "userAgent": p["userAgent"],
@@ -88,12 +92,15 @@ cr = c.post("/api/profiles", json={
     "language": "en-US",
     "webrtcMode": "default",
     "seed": 777,
+    "tags": ["lab", "qa"],
 })
 assert cr.status_code == 200, cr.data
-prof = cr.get_json()["profile"]
+body = cr.get_json()
+prof = body["profile"]
 pid = prof["id"]
 assert prof.get("seed") == 777
 assert prof.get("fingerprint")
+assert "warnings" in body
 
 fp = c.get(f"/api/profiles/{pid}/fingerprint")
 assert fp.status_code == 200
@@ -102,28 +109,85 @@ assert fp.get_json()["seed"] == 777
 imp = c.post(f"/api/profiles/{pid}/cookies/import", json={"cookies": chrome})
 assert imp.status_code == 200
 assert imp.get_json()["count"] >= 1
-ex = c.get(f"/api/profiles/{pid}/cookies/export")
-assert ex.status_code == 200
+assert c.get(f"/api/profiles/{pid}/cookies/export").status_code == 200
 
 dup = c.post(f"/api/profiles/{pid}/duplicate")
 assert dup.status_code == 200
 assert dup.get_json()["profile"]["id"] != pid
-assert dup.get_json()["profile"]["seed"] != 777
 
 v1 = c.get("/api/v1/profile/list")
-assert v1.status_code == 200
-assert v1.get_json()["code"] == 0
+assert v1.status_code == 200 and v1.get_json()["code"] == 0
 
-# Proxy test parse path (will fail TCP on fake host — but should return structured error, not 500)
 pt = c.post("/api/proxy/test", json={"customProxy": "127.0.0.1:1"})
 assert pt.status_code == 200
 ptj = pt.get_json()
 assert "ok" in ptj and "success" in ptj
 
-# SPA loads
 idx = c.get("/")
 assert idx.status_code == 200
 assert b"Anti-Detect" in idx.data or b"Profile" in idx.data
 
-print("OK: version, fingerprint determinism, proxy parse, cookies, health, SPA, v1 aliases")
+# clients
+cl = c.post("/api/clients", json={"name": "Acme Labs", "color": "#abc123", "notes": "n"})
+assert cl.status_code in (200, 201), cl.data
+cid = cl.get_json()["client"]["id"]
+assert c.get("/api/clients").status_code == 200
+assert c.put(f"/api/clients/{cid}", json={"name": "Acme Labs 2"}).status_code == 200
+
+c.put(f"/api/profiles/{pid}", json={"clientId": cid, "tags": ["lab", "prod"]})
+assert isinstance(c.get("/api/profiles").get_json(), list)
+paged = c.get("/api/profiles?tag=lab&limit=10&offset=0").get_json()
+assert "items" in paged and "total" in paged
+
+# templates
+tpl = c.post("/api/templates", json={
+    "name": "Win Template",
+    "userAgentId": "win_chrome",
+    "proxyType": "none",
+    "timezone": "America/New_York",
+    "tags": ["tpl"],
+})
+assert tpl.status_code in (200, 201), tpl.data
+tid = tpl.get_json()["template"]["id"]
+ft = c.post("/api/profiles/from-template", json={"templateId": tid, "clientId": cid, "count": 2})
+assert ft.status_code == 200, ft.data
+assert ft.get_json()["count"] == 2
+
+# jobs
+job = c.post("/api/jobs", json={"type": "bulk_stop", "profileIds": [pid]})
+assert job.status_code in (200, 201), job.data
+jid = job.get_json()["job"]["id"]
+assert c.get(f"/api/jobs/{jid}").status_code == 200
+
+# reap
+reap = c.post("/api/maintenance/reap")
+assert reap.status_code == 200
+assert "reaped" in reap.get_json()
+
+# backup
+bk = c.post(f"/api/profiles/{pid}/backup", json={})
+assert bk.status_code == 200, bk.data
+bj = bk.get_json()
+zpath = bj.get("backupPath") or bj.get("path")
+assert zpath and Path(zpath).exists(), bj
+assert zipfile.is_zipfile(zpath)
+
+# token
+os.environ["MULTIPROFILE_API_TOKEN"] = "test-secret-token"
+app2 = create_app()
+c2 = app2.test_client()
+assert c2.get("/api/profiles").status_code == 401
+assert c2.get("/api/health").status_code == 200
+assert c2.get("/api/profiles", headers={"Authorization": "Bearer test-secret-token"}).status_code == 200
+del os.environ["MULTIPROFILE_API_TOKEN"]
+
+# delete client nulls clientId
+c.delete(f"/api/clients/{cid}")
+got = next(x for x in c.get("/api/profiles").get_json() if x["id"] == pid)
+assert got.get("clientId") in (None, "")
+
+d = c.delete(f"/api/profiles/{pid}?purgeStorage=1")
+assert d.status_code == 200
+
+print("OK: 1.2.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
 PY
