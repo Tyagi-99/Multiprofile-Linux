@@ -1,29 +1,33 @@
-# Multiprofile Linux 1.1.0
+# Multiprofile Linux 1.2.0
 
 Native Ubuntu/Linux multi-profile browser manager (personal/lab use).
 
 Clean-room host for authorized UI/extension assets. No Wine. No AdsPower proprietary code.
 
-## What's in 1.1.0
+## What's in 1.2.0
 
-### Phase 1 — Solid manager
-- Isolated Chromium/Chrome profiles (`--user-data-dir`)
-- Custom proxy parse + `--proxy-server` + extension auth (`proxy.json`)
-- Real `POST /api/proxy/test` (TCP + optional HTTP egress)
-- Cookies import/export (Chrome JSON + Netscape) under XDG `cookies/`
-- WebRTC modes: `default` | `disable_non_proxied_udp` | `disable`
-- Deep `/api/health`, duplicate profile, thin `/api/v1/profile/*` aliases
+### Ops / safety
+- Job queue + concurrency gate (`MAX_CONCURRENT_PROFILES=3`) so RAM stays bounded
+- Orphan reaper for dead Chrome PIDs
+- Safe delete with optional storage purge
+- Optional `MULTIPROFILE_API_TOKEN` for `/api/*` (health stays open)
+- Plaintext zip backups + sha256 checksums under XDG `backups/`
+- Append-only audit log
 
-### Phase 2 — Fingerprint consistency foundation
-- Deterministic `build_fingerprint(profile)` from seed + UA/isMobile
-- Platform pools (Win/Mac/Linux desktop, Android/iPhone mobile) keep UA ↔ platform ↔ touch ↔ screen aligned
-- Extension `evasion.js` overrides hardware/GPU/screen/languages/client-hints from Python config
-- `GET /api/profiles/<id>/fingerprint` human-readable report + mismatch warnings
+### Organization
+- Clients (`clients.json`) and profile `clientId`
+- Tags + search/pagination on profiles
+- Templates + create-from-template (1..N)
+
+### Consistency
+- Fingerprint warnings on create/update
+- Launch blocked (409) on CRITICAL mismatches unless `?force=1`
+- Optional CDP debugging port on launch (`cdp: true`)
 
 ## Honest limits
 - **Same egress IP correlates profiles** if you do not use distinct proxies.
-- Spoofing is **JS-level + Chrome flags**, not a Chromium fork — advanced detectors can still find gaps.
-- GitHub Cloud Runner proxy type is a UI stub (not implemented natively).
+- Spoofing is **JS-level + Chrome flags**, not a Chromium fork.
+- Backups are **plaintext zip** (no encryption in MVP).
 - Not a ban-evasion playbook; for personal/lab multi-profile isolation only.
 
 ## Stack
@@ -40,19 +44,27 @@ python -m multiprofile --server-only
 # open http://127.0.0.1:8765/
 ```
 
+## Env vars
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MAX_CONCURRENT_PROFILES` | `3` | Max simultaneous Chrome launches |
+| `MULTIPROFILE_API_TOKEN` | unset | If set, require `Authorization: Bearer <token>` on `/api/*` except GET `/api/health` |
+| `MULTIPROFILE_STATIC` | auto | Override static UI path |
+| `MULTIPROFILE_EXTENSION` | auto | Override extension path |
+
 ## Tests
 ```bash
 ./scripts/test.sh
 ```
 
-## Build .deb
+## Build / install .deb
 ```bash
 ./build-deb.sh
-# => dist/multiprofile-native_1.1.0_amd64.deb
-sudo dpkg -i dist/multiprofile-native_1.1.0_amd64.deb
+# => dist/multiprofile-native_1.2.0_amd64.deb
+sudo dpkg -i dist/multiprofile-native_1.2.0_amd64.deb
 ```
 
 ## XDG paths
 - `~/.config/multiprofile/`
-- `~/.local/share/multiprofile/` (profiles.json, cookies/, chrome-profiles/)
-- `~/.cache/multiprofile/`
+- `~/.local/share/multiprofile/` — `profiles.json`, `clients.json`, `templates.json`, `cookies/`, `chrome-profiles/`, `backups/`, `audit.jsonl`
+- `~/.cache/multiprofile/` — `runtime.json`
