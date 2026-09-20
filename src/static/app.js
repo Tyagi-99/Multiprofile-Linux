@@ -1,3 +1,13 @@
+
+async function refreshHealthBadge() {
+  try {
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    const el = document.getElementById("healthVersionText");
+    if (el && data.version) el.textContent = `v${data.version}` + (data.chrome_ok ? " · Chrome OK" : " · No Chrome");
+  } catch (e) {}
+}
+
 let allProfiles = [];
 let allUserAgents = [];
 let allGithubAccounts = [];
@@ -41,6 +51,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await loadUserAgents();
   await loadGithubAccounts();
+  await refreshHealthBadge();
   await loadProfiles();
   await loadAds();
   setupEventListeners();
@@ -532,6 +543,14 @@ function openCreateModal() {
   const badge = document.getElementById("proxyTestStatusBadge");
   if (badge) badge.style.display = "none";
   document.getElementById("formTimezone").value = "America/New_York";
+  const fl = document.getElementById("formLanguage");
+  if (fl) fl.value = "en-US";
+  const fw = document.getElementById("formWebrtcMode");
+  if (fw) fw.value = "default";
+  const fs = document.getElementById("formSeed");
+  if (fs) fs.value = "";
+  const fg = document.getElementById("formFingerprintGroup");
+  if (fg) fg.style.display = "none";
   document.getElementById("formStartUrl").value = "https://studio.youtube.com";
 
   const autoGroup = document.getElementById("formAutoLaunchGroup");
@@ -601,6 +620,14 @@ function openEditModal(id) {
   }
 
   document.getElementById("formTimezone").value = p.timezone || "America/New_York";
+  const flE = document.getElementById("formLanguage");
+  if (flE) flE.value = p.language || "en-US";
+  const fwE = document.getElementById("formWebrtcMode");
+  if (fwE) fwE.value = p.webrtcMode || "default";
+  const fsE = document.getElementById("formSeed");
+  if (fsE) fsE.value = p.seed != null ? p.seed : "";
+  const fgE = document.getElementById("formFingerprintGroup");
+  if (fgE) fgE.style.display = "block";
   document.getElementById("formStartUrl").value = p.startUrl || "https://studio.youtube.com";
   document.getElementById("profileModal").style.display = "flex";
 }
@@ -777,6 +804,22 @@ function setupEventListeners() {
   if (btnTestProxy) {
     btnTestProxy.addEventListener("click", handleTestProxyConnection);
   }
+  const btnFp = document.getElementById("btnShowFingerprint");
+  if (btnFp) {
+    btnFp.addEventListener("click", async () => {
+      const id = document.getElementById("formProfileId")?.value;
+      if (!id) { alert("Save the profile first to view its fingerprint."); return; }
+      try {
+        const res = await fetch(`/api/profiles/${id}/fingerprint`);
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        const warns = (data.warnings || []).length ? "\n\nWarnings:\n- " + data.warnings.join("\n- ") : "\n\nNo mismatch warnings.";
+        alert("Fingerprint Report\n\n" + (data.summary || "") + warns + "\n\nSeed: " + data.seed);
+      } catch (e) {
+        alert("Fingerprint fetch failed: " + e.message);
+      }
+    });
+  }
 
   // User-Agent select change
   document.getElementById("formUserAgentSelect").addEventListener("change", (e) => {
@@ -810,6 +853,7 @@ function setupEventListeners() {
       isMobile = uaObj.isMobile || false;
     }
 
+    const seedRaw = document.getElementById("formSeed")?.value;
     const payload = {
       name: document.getElementById("formName").value.trim(),
       color: document.getElementById("formColor").value,
@@ -820,9 +864,18 @@ function setupEventListeners() {
       proxyType: document.querySelector('input[name="proxyType"]:checked').value,
       githubAccountId: document.getElementById("formGithubAccountSelect").value || "default",
       customProxy: document.getElementById("formCustomProxy").value.trim(),
+      proxyHost: document.getElementById("formProxyHost")?.value?.trim() || "",
+      proxyPort: document.getElementById("formProxyPort")?.value ? parseInt(document.getElementById("formProxyPort").value, 10) : null,
+      proxyUser: document.getElementById("formProxyUser")?.value?.trim() || "",
+      proxyPass: document.getElementById("formProxyPass")?.value || "",
       timezone: document.getElementById("formTimezone").value || "America/New_York",
+      language: document.getElementById("formLanguage")?.value?.trim() || "en-US",
+      webrtcMode: document.getElementById("formWebrtcMode")?.value || "default",
       startUrl: document.getElementById("formStartUrl").value.trim() || "https://studio.youtube.com"
     };
+    if (seedRaw !== undefined && seedRaw !== null && String(seedRaw).trim() !== "") {
+      payload.seed = parseInt(seedRaw, 10);
+    }
 
     if (payload.proxyType === "github" && (!allGithubAccounts || allGithubAccounts.length === 0)) {
       alert("⚠️ GitHub Account Required!\n\nAapne 'GitHub Cloud Runner' proxy chuna hai, lekin koi GitHub account connected nahi hai.\n\nYa to Settings me jaakar apna GitHub account jodiye, ya phir 'Direct Connection' ya 'Custom Proxy' select kijiye.");
@@ -1502,14 +1555,15 @@ async function handleTestProxyConnection() {
         host: host,
         port: parseInt(port, 10),
         username: user,
-        password: pass
+        password: pass,
+        customProxy: document.getElementById("formCustomProxy")?.value?.trim() || ""
       })
     });
     const data = await res.json();
-    if (data.success) {
+    if (data.success || data.ok) {
       if (badge) {
         badge.style.color = "#22c55e";
-        badge.innerHTML = `✅ Connected (${data.latencyMs}ms)`;
+        badge.innerHTML = `✅ Connected (${data.latencyMs != null ? data.latencyMs : '?'}ms)`;
       }
       if (diagCard && diagContent) {
         diagCard.style.display = "block";

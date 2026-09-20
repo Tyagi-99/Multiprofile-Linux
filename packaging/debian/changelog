@@ -1,3 +1,11 @@
+multiprofile-native (1.1.0) unstable; urgency=medium
+
+  * Phase 1 solid manager + Phase 2 fingerprint consistency foundation.
+  * Deterministic fingerprints, cookies import/export, real proxy test/apply.
+  * WebRTC mode flags, AdsPower-style thin API aliases.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Mon, 21 Sep 2026 02:00:00 +0530
+
 multiprofile-native (1.0.0) unstable; urgency=medium
 
   * Initial native Linux release (no Wine).

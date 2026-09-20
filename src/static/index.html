@@ -73,9 +73,9 @@
         <button id="btnAutoUpdateToggle" class="btn-text" style="font-size: 11.5px; color: var(--accent-emerald, #10b981); background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; padding: 5px 12px; font-weight: 600; cursor: pointer;" title="Turn automatic update notifications on or off">
           🔄 Auto-Update: <span id="autoUpdateState">ON</span>
         </button>
-        <span class="status-indicator">
+        <span class="status-indicator" id="healthVersionBadge" title="API health">
           <span class="pulse-dot"></span>
-          System Online
+          <span id="healthVersionText">System Online</span>
         </span>
       </div>
     </div>
@@ -319,6 +319,32 @@
           <span style="font-size: 11px; color: var(--text-muted); margin-top: 4px; display: block;">
             Websites aur CreepJS ko aapka real Windows Indian timezone (IST) kabhi reveal nahi hoga.
           </span>
+        </div>
+
+
+        <!-- Language / WebRTC / Seed (v1.1.0) -->
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Language</label>
+            <input type="text" id="formLanguage" value="en-US" placeholder="en-US">
+          </div>
+          <div class="form-group flex-2">
+            <label>WebRTC Mode</label>
+            <select id="formWebrtcMode" class="form-select">
+              <option value="default" selected>Default (browser)</option>
+              <option value="disable_non_proxied_udp">Disable non-proxied UDP</option>
+              <option value="disable">Disable WebRTC</option>
+            </select>
+          </div>
+          <div class="form-group flex-1">
+            <label>Seed</label>
+            <input type="number" id="formSeed" placeholder="auto" min="1" step="1">
+          </div>
+        </div>
+        <div class="form-group" id="formFingerprintGroup" style="display:none;">
+          <button type="button" class="btn-secondary" id="btnShowFingerprint" style="font-size:12px;font-weight:600;cursor:pointer;">
+            🧬 View Fingerprint Report
+          </button>
         </div>
 
         <!-- Start URL -->

@@ -68,17 +68,68 @@
 
   // Target Timezone (injected per-profile or default America/New_York)
   let rawTz = "__PROFILE_TIMEZONE__";
-  const TARGET_TIMEZONE = (rawTz && !rawTz.startsWith("__")) ? rawTz : "America/New_York";
+  let TARGET_TIMEZONE = (rawTz && !rawTz.startsWith("__")) ? rawTz : "America/New_York";
   let rawIp = "__PROFILE_ALLOCATED_IP__";
   const TARGET_IP = (rawIp && !rawIp.startsWith("__")) ? rawIp : "";
   let rawSeed = "__PROFILE_SEED__";
-  const PROFILE_SEED = (rawSeed && !rawSeed.startsWith("__")) ? parseInt(rawSeed, 10) : 1;
+  let PROFILE_SEED = (rawSeed && !rawSeed.startsWith("__")) ? parseInt(rawSeed, 10) : 1;
 
-  const TARGET_PLATFORM = isAndroid ? "Linux armv8l" : (isIPhone ? "iPhone" : (isMac ? "MacIntel" : "Win32"));
-  const TARGET_TOUCH = (isAndroid || isIPhone) ? 5 : 0;
+  let TARGET_PLATFORM = isAndroid ? "Linux armv8l" : (isIPhone ? "iPhone" : (isMac ? "MacIntel" : "Win32"));
+  let TARGET_TOUCH = (isAndroid || isIPhone) ? 5 : 0;
+  let TARGET_LANGUAGES = ["en-US", "en"];
+  let TARGET_LANGUAGE = "en-US";
+  let TARGET_DPR = 1;
+  let MP_WEBRTC_MODE = "default";
+  let MP_CLIENT_HINTS = null;
+
+  // Optional marker replaced by launcher with a JSON object literal; also accept window.__MP_PROFILE__
+  // Placeholder token (string form kept for detection); launcher replaces whole null/*__PROFILE_CONFIG_JSON__*/ expr
+  let MP_CFG = null; /*__PROFILE_CONFIG_JSON__*/
+  try {
+    if (typeof window !== "undefined" && window.__MP_PROFILE__ && typeof window.__MP_PROFILE__ === "object") {
+      MP_CFG = window.__MP_PROFILE__;
+    }
+  } catch (e) { /* keep MP_CFG */ }
+  // If launcher inlined: var __MP_INLINE_CFG__ = {...}; prefer it
+  try {
+    if (typeof __MP_INLINE_CFG__ !== "undefined" && __MP_INLINE_CFG__) {
+      MP_CFG = __MP_INLINE_CFG__;
+    }
+  } catch (e) {}
+
+  // Python seed-driven fingerprint wins over UA heuristics
+  if (MP_CFG) {
+    try {
+      if (MP_CFG.cores != null) TARGET_CORES = MP_CFG.cores;
+      if (MP_CFG.memory !== undefined) TARGET_MEMORY = MP_CFG.memory;
+      if (MP_CFG.gpu) {
+        if (MP_CFG.gpu.vendor) TARGET_GPU_VENDOR = MP_CFG.gpu.vendor;
+        if (MP_CFG.gpu.renderer) TARGET_GPU_RENDERER = MP_CFG.gpu.renderer;
+      }
+      if (MP_CFG.screen) {
+        if (MP_CFG.screen.w) SCREEN_W = MP_CFG.screen.w;
+        if (MP_CFG.screen.h) SCREEN_H = MP_CFG.screen.h;
+        if (MP_CFG.screen.availH) SCREEN_AVAIL_H = MP_CFG.screen.availH;
+        if (MP_CFG.screen.dpr) TARGET_DPR = MP_CFG.screen.dpr;
+      }
+      if (MP_CFG.platform) TARGET_PLATFORM = MP_CFG.platform;
+      if (MP_CFG.touch != null) TARGET_TOUCH = MP_CFG.touch;
+      if (MP_CFG.timezone) TARGET_TIMEZONE = MP_CFG.timezone;
+      if (MP_CFG.seed != null) PROFILE_SEED = parseInt(MP_CFG.seed, 10) || PROFILE_SEED;
+      if (Array.isArray(MP_CFG.languages) && MP_CFG.languages.length) {
+        TARGET_LANGUAGES = MP_CFG.languages.slice();
+        TARGET_LANGUAGE = MP_CFG.language || MP_CFG.languages[0];
+      } else if (MP_CFG.language) {
+        TARGET_LANGUAGE = MP_CFG.language;
+        TARGET_LANGUAGES = [MP_CFG.language];
+      }
+      MP_WEBRTC_MODE = MP_CFG.webrtcMode || MP_CFG.webrtcPolicy || "default";
+      if (MP_CFG.clientHints) MP_CLIENT_HINTS = MP_CFG.clientHints;
+    } catch (e) {}
+  }
 
   try {
-    console.log(`%c[🛡️ Anti-Detect Defender Active] Device: ${isAndroid ? 'Android' : (isIPhone ? 'iPhone' : 'Desktop')} | Platform: ${TARGET_PLATFORM} | GPU: ${TARGET_GPU_RENDERER} | CPU: ${TARGET_CORES} Cores | RAM: ${TARGET_MEMORY || 8}GB | TZ: ${TARGET_TIMEZONE} | IP: ${TARGET_IP || 'Direct'} | Screen: ${SCREEN_W}x${SCREEN_H}`, 'color: #10b981; font-weight: bold;');
+    console.log(`%c[🛡️ Anti-Detect Defender Active] Device: ${TARGET_TOUCH > 0 ? 'Mobile' : 'Desktop'} | Platform: ${TARGET_PLATFORM} | GPU: ${TARGET_GPU_RENDERER} | CPU: ${TARGET_CORES} Cores | RAM: ${TARGET_MEMORY || 8}GB | TZ: ${TARGET_TIMEZONE} | IP: ${TARGET_IP || 'Direct'} | Screen: ${SCREEN_W}x${SCREEN_H} | seed=${PROFILE_SEED}`, 'color: #10b981; font-weight: bold;');
   } catch(e) {}
 
   // Deterministic noise generator
@@ -161,6 +212,28 @@
   }
 
   applyHardwareSpoofs(navigator, window.Navigator ? Navigator.prototype : null);
+
+  // Languages spoof from profile config
+  try {
+    const langGetter = makeNative(function() { return TARGET_LANGUAGE; }, 'get language');
+    const langsGetter = makeNative(function() { return TARGET_LANGUAGES.slice(); }, 'get languages');
+    if (window.Navigator && Navigator.prototype) {
+      Object.defineProperty(Navigator.prototype, 'language', { get: langGetter, configurable: true, enumerable: true });
+      Object.defineProperty(Navigator.prototype, 'languages', { get: langsGetter, configurable: true, enumerable: true });
+    }
+    Object.defineProperty(navigator, 'language', { get: langGetter, configurable: true, enumerable: true });
+    Object.defineProperty(navigator, 'languages', { get: langsGetter, configurable: true, enumerable: true });
+  } catch(e) {}
+
+  // devicePixelRatio from fingerprint screen.dpr
+  try {
+    if (TARGET_DPR) {
+      Object.defineProperty(window, 'devicePixelRatio', {
+        get: makeNative(function() { return TARGET_DPR; }, 'get devicePixelRatio'),
+        configurable: true
+      });
+    }
+  } catch(e) {}
 
   // ==========================================
   // 2. SCREEN RESOLUTION SPOOFING
@@ -430,6 +503,66 @@
           get: makeNative(function() { return undefined; }, 'get userAgentData'),
           configurable: true
         });
+      }
+    }
+  } catch(e) {}
+
+  // Override client hints from Python fingerprint when present
+  try {
+    if (MP_CLIENT_HINTS && navigator.userAgentData) {
+      const ch = MP_CLIENT_HINTS;
+      const brands = ch.brands || [
+        { brand: "Chromium", version: (ch.uaFullVersion || "131").split(".")[0] },
+        { brand: "Google Chrome", version: (ch.uaFullVersion || "131").split(".")[0] },
+        { brand: "Not-A.Brand", version: "99" }
+      ];
+      const uaData = {
+        brands: brands,
+        mobile: !!ch.mobile,
+        platform: ch.platform || TARGET_PLATFORM,
+        getHighEntropyValues: makeNative(function getHighEntropyValues(hints) {
+          return Promise.resolve({
+            brands: brands,
+            mobile: !!ch.mobile,
+            platform: ch.platform || "",
+            platformVersion: ch.platformVersion || "",
+            architecture: ch.architecture || "",
+            bitness: ch.bitness || "",
+            model: ch.model || "",
+            uaFullVersion: ch.uaFullVersion || "",
+            fullVersionList: brands.map(b => ({ brand: b.brand, version: ch.uaFullVersion || b.version }))
+          });
+        }, 'getHighEntropyValues'),
+        toJSON: makeNative(function toJSON() {
+          return { brands: brands, mobile: !!ch.mobile, platform: ch.platform || "" };
+        }, 'toJSON')
+      };
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: makeNative(function() { return uaData; }, 'get userAgentData'),
+        configurable: true
+      });
+    }
+  } catch(e) {}
+
+  // WebRTC hardening when profile requests disable modes
+  try {
+    if (MP_WEBRTC_MODE === "disable") {
+      const StubPC = makeNative(function RTCPeerConnection() {
+        throw new DOMException("WebRTC disabled for this profile", "NotSupportedError");
+      }, 'RTCPeerConnection');
+      window.RTCPeerConnection = StubPC;
+      if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = StubPC;
+    } else if (MP_WEBRTC_MODE === "disable_non_proxied_udp") {
+      // Light candidate filter — strip host candidates when possible
+      if (window.RTCPeerConnection) {
+        const OrigPC = window.RTCPeerConnection;
+        window.RTCPeerConnection = makeNative(function RTCPeerConnection(config, constraints) {
+          const cfg = Object.assign({}, config || {});
+          if (!cfg.iceTransportPolicy) cfg.iceTransportPolicy = "relay";
+          return new OrigPC(cfg, constraints);
+        }, 'RTCPeerConnection');
+        window.RTCPeerConnection.prototype = OrigPC.prototype;
+        try { Object.keys(OrigPC).forEach(k => { try { window.RTCPeerConnection[k] = OrigPC[k]; } catch(e){} }); } catch(e){}
       }
     }
   } catch(e) {}
