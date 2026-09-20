@@ -1,1 +1,52 @@
-__LOAD_FROM__/tmp/mp12-fix/INDEX_CONTENT_RAW.txt
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anti-Detect Studio — Multi-Profile Browser Manager</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="top-nav">
+      <div class="nav-brand"><h2>Anti-Detect Studio</h2><span class="brand-badge">Multi-Profile Manager</span></div>
+      <div class="nav-controls">
+        <input type="text" id="searchInput" placeholder="Search profiles, channels, UA...">
+        <button class="btn-donate" id="btnDonate">Donate</button>
+        <button class="btn-secondary" id="btnGithubAccounts">GitHub Accounts</button>
+        <button class="btn-primary" id="btnNewProfile">Create Profile</button>
+      </div>
+    </header>
+    <div class="toolbar">
+      <div class="filter-pills">
+        <button class="pill active" data-filter="all">All (<span id="countAll">0</span>)</button>
+        <button class="pill" data-filter="running">Running (<span id="countRunning">0</span>)</button>
+        <button class="pill" data-filter="mobile">Mobile Devices (<span id="countMobile">0</span>)</button>
+        <button class="pill" data-filter="github">GitHub Cloud IP (<span id="countGithub">0</span>)</button>
+      </div>
+      <div class="toolbar-stats">
+        <button id="btnSwitchAllDirect">All Direct</button>
+        <button id="btnAutoUpdateToggle">Auto-Update: <span id="autoUpdateState">ON</span></button>
+        <select id="clientFilter" title="Filter by client"><option value="">All clients</option></select>
+        <button id="btnBulkLaunch">Launch selected</button>
+        <button id="btnBulkStop">Stop selected</button>
+        <input id="apiTokenInput" type="password" placeholder="API token" title="Saved to localStorage as mp_api_token">
+        <span id="healthVersionBadge"><span id="healthVersionText">System Online</span></span>
+      </div>
+    </div>
+    <main class="main-content">
+      <div id="updateNoticeBar" style="display:none"></div>
+      <div id="adBannerContainer" style="display:none"></div>
+      <div class="profiles-grid" id="profilesGrid"></div>
+      <div class="empty-state" id="emptyState" style="display:none"><h3>No profiles found</h3><button id="btnEmptyCreate">+ Create Profile</button></div>
+    </main>
+  </div>
+  <div class="modal-overlay" id="profileModal" style="display:none"></div>
+  <div class="modal-overlay" id="githubModal" style="display:none"></div>
+  <div class="modal-overlay" id="adPopupModal" style="display:none"></div>
+  <div class="modal-overlay" id="mandatoryUpdateModal" style="display:none"></div>
+  <div class="modal-overlay" id="donateModal" style="display:none"></div>
+  <script src="app.js"></script>
+</body>
+</html>
