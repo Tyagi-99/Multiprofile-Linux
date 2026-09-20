@@ -8,5 +8,5 @@ venv/
 .ruff_cache/
 *.log
 .DS_Store
-# Keep release .deb artifacts in dist/
+# Keep release .deb artifacts tracked
 !dist/*.deb

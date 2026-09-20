@@ -1,10 +1,10 @@
 # Multiprofile Linux
 
-Native Linux multi-profile Chromium manager (Python/Flask + anti-detect extension).
+Native Linux multi-profile Chromium manager (Python / Flask + profile extension).
 
-This repository tracks source, packaging, docs, and release `.deb` artifacts.
+This private repo is the source of truth for upcoming changes: app source, packaging, docs, and release `.deb` artifacts.
 
-## Quick start (dev)
+## Dev
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -27,4 +27,4 @@ sudo apt install ./dist/multiprofile-native_1.0.0_amd64.deb
 multiprofile
 ```
 
-Version: **1.0.0**
+**Version:** 1.0.0
