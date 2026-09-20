@@ -1,0 +1,1 @@
+"""XDG storage helpers."""
