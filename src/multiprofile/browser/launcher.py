@@ -4,6 +4,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ from ..fingerprint import build_fingerprint, normalize_seed
 from ..proxy_util import parse_proxy, proxy_server_arg
 from ..storage.profiles import get_profile, set_runtime, update_profile
 from ..storage.xdg import chrome_profile_dir
+from . import manager as browser_manager
 
 log = logging.getLogger("multiprofile.browser")
 
@@ -133,10 +135,20 @@ def _prepare_extension(profile: dict[str, Any], fingerprint: dict[str, Any]) -> 
     return dest
 
 
-def launch_profile(profile_id: str, url: str | None = None, direct: bool = False) -> dict[str, Any]:
+def launch_profile(profile_id: str, url: str | None = None, direct: bool = False, cdp: bool = False, _slot_held: bool = False) -> dict[str, Any]:
     profile = get_profile(profile_id)
     if not profile:
-        return {"error": f"Profile not found: {profile_id}", "errors": ["profile_not_found"]}
+        return {"error": f"Profile not found: {profile_id}", "errors": ["profile_not_found"], "ok": False}
+
+    slot_held = _slot_held
+    if not slot_held:
+        if not browser_manager.acquire_slot(profile_id, timeout=120.0):
+            return {
+                "ok": False,
+                "error": "Too many profiles running; wait for a free concurrency slot",
+                "errors": ["concurrency_limit"],
+            }
+        slot_held = True
 
     # Ensure fingerprint cached
     fingerprint = profile.get("fingerprint") if isinstance(profile.get("fingerprint"), dict) else None
@@ -152,7 +164,9 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
         chrome = find_chrome()
         ext = _prepare_extension(profile, fingerprint)
     except FileNotFoundError as e:
-        return {"error": str(e), "errors": ["dependency_missing"]}
+        if slot_held:
+            browser_manager.release_slot(profile_id)
+        return {"ok": False, "error": str(e), "errors": ["dependency_missing"]}
 
     user_dir = chrome_profile_dir(profile_id) / "user-data"
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -206,20 +220,31 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
 
     if ua:
         cmd.append(f"--user-agent={ua}")
+
+    debug_port = None
+    if cdp:
+        debug_port = _allocate_debug_port()
+        cmd.append(f"--remote-debugging-port={debug_port}")
+        notes.append(f"CDP enabled on port {debug_port}")
     cmd.append(start)
 
     env = os.environ.copy()
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except OSError as e:
-        return {"error": f"Failed to spawn Chrome: {e}", "errors": ["spawn_failed"], "cmd": cmd}
+        if slot_held:
+            browser_manager.release_slot(profile_id)
+        return {"ok": False, "error": f"Failed to spawn Chrome: {e}", "errors": ["spawn_failed"], "cmd": cmd}
 
     time.sleep(1.2)
     rc = proc.poll()
     if rc is not None:
         err = (proc.stderr.read() or b"").decode("utf-8", "ignore")[-2500:]
         set_runtime(profile_id, "idle", None)
+        if slot_held:
+            browser_manager.release_slot(profile_id)
         return {
+            "ok": False,
             "error": f"Chrome exited immediately with code {rc}",
             "errors": ["chrome_exit_immediate"],
             "stderr": err,
@@ -233,6 +258,7 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
         }
 
     set_runtime(profile_id, "running", proc.pid)
+    browser_manager.mark_running(profile_id)
     log.info("launched profile %s pid=%s url=%s", profile_id, proc.pid, start)
     try:
         if proc.stderr:
@@ -240,7 +266,7 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     except Exception:
         pass
 
-    return {
+    out = {
         "ok": True,
         "pid": proc.pid,
         "url": start,
@@ -260,6 +286,9 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
             "webrtcMode": webrtc_mode,
         },
     }
+    if debug_port is not None:
+        out["debugPort"] = debug_port
+    return out
 
 
 def stop_profile(profile_id: str) -> dict[str, Any]:
@@ -267,6 +296,7 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     pid = (profile or {}).get("pid")
     if not pid:
         set_runtime(profile_id, "idle", None)
+        browser_manager.release_slot(profile_id)
         return {"ok": True, "stopped": None, "note": "No running pid recorded"}
     try:
         os.kill(pid, signal.SIGTERM)
@@ -275,4 +305,12 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     except PermissionError as e:
         return {"error": f"Cannot stop pid {pid}: {e}", "errors": ["permission"]}
     set_runtime(profile_id, "idle", None)
+    browser_manager.release_slot(profile_id)
     return {"ok": True, "stopped": pid}
+
+
+def _allocate_debug_port() -> int:
+    """Bind to port 0 to discover a free TCP port for Chrome remote debugging."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
