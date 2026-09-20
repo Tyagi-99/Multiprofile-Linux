@@ -1,1 +1,1 @@
-@/tmp/mp12-batches/server.py.txt
+@file:/tmp/mp12-batches/server.pymin2.py
