@@ -1,0 +1,5 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: multiprofile-native
+Files: *
+Copyright: 2026 Multiprofile Native contributors
+License: Apache-2.0

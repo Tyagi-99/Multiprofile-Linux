@@ -1,0 +1,25 @@
+[project]
+name = "multiprofile-native"
+version = "1.0.0"
+description = "Native Linux Multiprofile manager (clean-room host for authorized UI/extension assets)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "flask>=3.0.0",
+]
+
+[project.optional-dependencies]
+ui = ["pywebview>=5.0"]
+
+[project.scripts]
+multiprofile = "multiprofile.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+multiprofile = ["../static/*", "../extension/*"]

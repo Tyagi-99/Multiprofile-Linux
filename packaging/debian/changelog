@@ -1,0 +1,5 @@
+multiprofile-native (1.0.0) unstable; urgency=medium
+
+  * Initial native Linux release (no Wine).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Mon, 21 Sep 2026 00:00:00 +0000
