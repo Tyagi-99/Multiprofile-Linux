@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import shutil
 import random
 import threading
 import uuid
@@ -35,6 +36,8 @@ DEFAULT_PROFILES = [
         "createdAt": "2026-09-20",
         "status": "idle",
         "pid": None,
+        "clientId": None,
+        "tags": [],
     }
 ]
 
@@ -74,6 +77,16 @@ def _normalize_fields(profile: dict[str, Any]) -> dict[str, Any]:
     profile.setdefault("proxyPass", profile.get("proxyPass") or "")
     profile.setdefault("proxyType", profile.get("proxyType") or "none")
     profile.setdefault("timezone", profile.get("timezone") or "America/New_York")
+    profile.setdefault("clientId", profile.get("clientId"))
+    tags = profile.get("tags")
+    if tags is None:
+        profile["tags"] = []
+    elif isinstance(tags, str):
+        profile["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+    elif isinstance(tags, list):
+        profile["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+    else:
+        profile["tags"] = []
     # Sync structured proxy fields from customProxy if host empty
     if profile.get("customProxy") and not profile.get("proxyHost"):
         try:
@@ -164,6 +177,8 @@ def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
     profile.setdefault("proxyPort", None)
     profile.setdefault("proxyUser", "")
     profile.setdefault("proxyPass", "")
+    profile.setdefault("clientId", payload.get("clientId"))
+    profile.setdefault("tags", payload.get("tags") or [])
     if "seed" not in profile or profile.get("seed") is None:
         profile["seed"] = _new_seed()
     profile["status"] = "idle"
@@ -195,12 +210,33 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
     return None
 
 
-def delete_profile(profile_id: str) -> bool:
+def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
+    """Remove profile metadata; optionally purge chrome-profiles/<id> and cookies."""
     items = load_profiles()
     new_items = [p for p in items if p.get("id") != profile_id]
     if len(new_items) == len(items):
         return False
     save_profiles(new_items)
+    with _lock:
+        runtime = _read_json(runtime_state_path(), {})
+        if profile_id in runtime:
+            runtime.pop(profile_id, None)
+            _write_json(runtime_state_path(), runtime)
+    if purge_storage:
+        from .xdg import data_dir
+        chrome_root = data_dir() / "chrome-profiles" / profile_id
+        if chrome_root.exists():
+            try:
+                shutil.rmtree(chrome_root)
+            except Exception:
+                pass
+        try:
+            from ..cookies_store import cookies_path
+            cp = cookies_path(profile_id)
+            if cp.exists():
+                cp.unlink(missing_ok=True)
+        except Exception:
+            pass
     return True
 
 
@@ -219,3 +255,81 @@ def duplicate_profile(profile_id: str) -> dict[str, Any] | None:
     if not name.endswith(" (copy)"):
         payload["name"] = f"{name} (copy)"
     return create_profile(payload)
+
+
+def filter_profiles(
+    *,
+    q: str | None = None,
+    client_id: str | None = None,
+    status: str | None = None,
+    tag: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    items = load_profiles()
+    filtered = items
+    if q:
+        ql = q.lower().strip()
+        filtered = [
+            p
+            for p in filtered
+            if ql in (p.get("name") or "").lower()
+            or ql in (p.get("notes") or "").lower()
+            or ql in (p.get("userAgent") or "").lower()
+            or any(ql in str(t).lower() for t in (p.get("tags") or []))
+        ]
+    if client_id:
+        filtered = [p for p in filtered if p.get("clientId") == client_id]
+    if status:
+        st = status.lower().strip()
+        if st == "running":
+            filtered = [p for p in filtered if p.get("status") == "running" or p.get("isRunning")]
+        elif st == "idle":
+            filtered = [p for p in filtered if not (p.get("status") == "running" and p.get("pid"))]
+        else:
+            filtered = [p for p in filtered if (p.get("status") or "").lower() == st]
+    if tag:
+        tl = tag.lower().strip()
+        filtered = [p for p in filtered if any(tl == str(t).lower() for t in (p.get("tags") or []))]
+    total = len(filtered)
+    limit = max(1, min(int(limit or 50), 500))
+    offset = max(0, int(offset or 0))
+    page = filtered[offset : offset + limit]
+    return {"items": page, "total": total, "limit": limit, "offset": offset}
+
+
+def pid_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        import os
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def reap_orphans() -> list[dict[str, Any]]:
+    """Mark profiles idle when status=running but pid is dead."""
+    try:
+        from ..browser import manager as browser_manager
+    except Exception:
+        browser_manager = None  # type: ignore
+
+    reaped: list[dict[str, Any]] = []
+    for p in load_profiles():
+        if p.get("status") == "running":
+            pid = p.get("pid")
+            if not pid_alive(pid):
+                set_runtime(p["id"], "idle", None)
+                if browser_manager is not None:
+                    try:
+                        browser_manager.release_slot(p["id"])
+                    except Exception:
+                        pass
+                reaped.append({"profileId": p["id"], "oldPid": pid})
+    return reaped

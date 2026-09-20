@@ -22,6 +22,20 @@ def cache_dir() -> Path:
 def profiles_path() -> Path:
     return data_dir() / "profiles.json"
 
+def clients_path() -> Path:
+    return data_dir() / "clients.json"
+
+def templates_path() -> Path:
+    return data_dir() / "templates.json"
+
+def audit_path() -> Path:
+    return data_dir() / "audit.jsonl"
+
+def backups_dir() -> Path:
+    p = data_dir() / "backups"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
 def runtime_state_path() -> Path:
     return cache_dir() / "runtime.json"
 
