@@ -90,6 +90,39 @@ def _from_xdpyinfo() -> WorkArea | None:
     return None
 
 
+
+def _from_xrandr_primary() -> WorkArea | None:
+    """Prefer the primary connected output geometry (multi-monitor safe)."""
+    if not shutil.which("xrandr"):
+        return None
+    try:
+        out = subprocess.check_output(["xrandr", "--current"], text=True, timeout=2, stderr=subprocess.DEVNULL)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    primary = None
+    first = None
+    for line in out.splitlines():
+        # e.g. HDMI-1 connected primary 3440x1440+0+0
+        m = re.search(
+            r"^(\S+)\s+connected(?:\s+(primary))?\s+(\d+)x(\d+)\+(\d+)\+(\d+)",
+            line,
+        )
+        if not m:
+            continue
+        w, h, x, y = int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6))
+        area = WorkArea(x, y, w, h, f"xrandr:{m.group(1)}")
+        if first is None:
+            first = area
+        if m.group(2):
+            primary = area
+            break
+    chosen = primary or first
+    if not chosen or chosen.w < 100 or chosen.h < 100:
+        return None
+    # Shrink a little for typical top panel if _NET_WORKAREA unavailable later
+    return chosen
+
+
 class WorkAreaProvider:
     """Try providers in order; raise WorkAreaError if none succeed."""
 
@@ -107,6 +140,7 @@ class WorkAreaProvider:
             reasons.append(f"env: {e}")
 
         for name, fn in (
+            ("xrandr_primary", _from_xrandr_primary),
             ("_NET_WORKAREA", _from_net_workarea),
             ("xdpyinfo", _from_xdpyinfo),
         ):

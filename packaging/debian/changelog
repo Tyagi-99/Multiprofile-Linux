@@ -1,4 +1,4 @@
-multiprofile-native (1.4.0) unstable; urgency=medium
+multiprofile-native (1.4.1) unstable; urgency=medium
 
   * CDP window tiling (Approach A): localhost-only Browser.setWindowBounds,
     WindowLayoutManager sole geometry owner, fail-loud WorkAreaProvider,

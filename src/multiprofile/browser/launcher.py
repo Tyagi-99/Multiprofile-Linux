@@ -241,6 +241,7 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     # Always enable localhost-only CDP for tiling (never bind 0.0.0.0).
     debug_port = allocate_localhost_port()
     cmd.append("--remote-debugging-address=127.0.0.1")
+    cmd.append("--remote-allow-origins=*")
     cmd.append(f"--remote-debugging-port={debug_port}")
     notes.append(f"CDP localhost-only on 127.0.0.1:{debug_port}")
     if cdp:

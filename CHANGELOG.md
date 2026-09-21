@@ -1,3 +1,9 @@
+## 1.4.1
+
+- Fix window tiling on Chrome 131+: add `--remote-allow-origins=*` (CDP was 403 Forbidden).
+- Prefer primary monitor via `xrandr` so multi-monitor setups do not get a 5000px-wide work area.
+- Ensure `python3-websocket` / `websocket-client` is available for CDP.
+
 # Changelog
 
 ## 1.4.0 — 2026-09-21
