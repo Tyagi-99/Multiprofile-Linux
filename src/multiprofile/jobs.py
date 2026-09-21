@@ -10,6 +10,7 @@ from typing import Any
 
 from .audit import audit_log
 from .browser import manager as browser_manager
+from .browser.grid import slot_rect_map
 from .browser.layout_manager import get_layout_manager
 from .browser.work_area import WorkAreaError
 from .config import get_settings
@@ -164,30 +165,37 @@ def _run_job(job_id: str) -> None:
         settings = get_settings()
         tile_required = bool(job.get("tileRequired"))
         layout_mgr = get_layout_manager()
+        slot_rects: dict[str, Any] = {}
         # Fail-closed: validate work area + plan BEFORE any launch when required.
-        if tile_required and settings.window_tiling_enabled:
-            try:
-                layout_mgr.build_plan(ids)
-            except WorkAreaError as e:
-                with _lock:
-                    job["status"] = "failed"
-                    job["error"] = "work_area_unavailable"
-                    job["tile"] = {
-                        "ok": False,
-                        "error": "work_area_unavailable",
-                        "message": str(e),
-                        "reasons": e.reasons,
-                        "results": [],
-                    }
-                    job["finishedAt"] = _now()
-                return
-            except ValueError as e:
-                with _lock:
-                    job["status"] = "failed"
-                    job["error"] = "grid_unavailable"
-                    job["tile"] = {"ok": False, "error": "grid_unavailable", "message": str(e), "results": []}
-                    job["finishedAt"] = _now()
-                return
+        # Best-effort: still pass slot geometry as Chrome --window-position hints.
+        if settings.window_tiling_enabled:
+            if tile_required:
+                try:
+                    pre_plan = layout_mgr.build_plan(ids)
+                except WorkAreaError as e:
+                    with _lock:
+                        job["status"] = "failed"
+                        job["error"] = "work_area_unavailable"
+                        job["tile"] = {
+                            "ok": False,
+                            "error": "work_area_unavailable",
+                            "message": str(e),
+                            "reasons": e.reasons,
+                            "results": [],
+                        }
+                        job["finishedAt"] = _now()
+                    return
+                except ValueError as e:
+                    with _lock:
+                        job["status"] = "failed"
+                        job["error"] = "grid_unavailable"
+                        job["tile"] = {"ok": False, "error": "grid_unavailable", "message": str(e), "results": []}
+                        job["finishedAt"] = _now()
+                    return
+                slot_rects = slot_rect_map(pre_plan)
+            else:
+                pre_plan, _meta = layout_mgr.best_effort_plan(ids)
+                slot_rects = slot_rect_map(pre_plan)
         launched_ids: list[str] = []
         for i, pid in enumerate(ids):
             if _is_cancelled(job_id):
@@ -211,7 +219,12 @@ def _run_job(job_id: str) -> None:
             else:
                 try:
                     result = launch_profile(
-                        pid, url=url, direct=direct, cdp=cdp, _slot_held=True, window_rect=None
+                        pid,
+                        url=url,
+                        direct=direct,
+                        cdp=cdp,
+                        _slot_held=True,
+                        window_rect=slot_rects.get(pid),
                     )
                     result = {**result, "profileId": pid}
                     results.append(result)

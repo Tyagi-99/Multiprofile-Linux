@@ -26,6 +26,19 @@ from .window_layout import chrome_geometry_args  # weak hint only; no x11 place
 log = logging.getLogger("multiprofile.browser")
 
 
+def chrome_window_platform_args() -> list[str]:
+    """Force X11/XWayland so CDP Browser.setWindowBounds actually moves windows.
+
+    On Wayland, getWindowBounds echoes the values we just set while the
+    compositor leaves windows in the default cascade.
+    """
+    return ["--ozone-platform=x11", "--ozone-platform-hint=x11"]
+
+
+def chrome_disable_features_arg() -> str:
+    return "--disable-features=ChromeWhatsNewUI,WaylandWindowDecorations"
+
+
 def extension_src() -> Path:
     candidates = [
         Path(__file__).resolve().parents[2] / "extension",
@@ -205,10 +218,11 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
         f"--load-extension={ext}",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-features=ChromeWhatsNewUI",
+        chrome_disable_features_arg(),
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--new-window",
+        *chrome_window_platform_args(),
     ])
     if window_rect is not None and settings.window_tiling_enabled:
         cmd.extend(chrome_geometry_args(window_rect))
@@ -249,6 +263,7 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     cmd.append(start)
 
     env = os.environ.copy()
+    env["OZONE_PLATFORM"] = "x11"
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except OSError as e:

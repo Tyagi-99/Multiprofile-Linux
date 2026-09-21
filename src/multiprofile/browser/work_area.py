@@ -123,6 +123,18 @@ def _from_xrandr_primary() -> WorkArea | None:
     return chosen
 
 
+def intersect_work_areas(a: WorkArea, b: WorkArea, source: str) -> WorkArea | None:
+    """Usable rectangle that is on the primary output AND outside panels/docks."""
+    x = max(a.x, b.x)
+    y = max(a.y, b.y)
+    r = min(a.x + a.w, b.x + b.w)
+    btm = min(a.y + a.h, b.y + b.h)
+    w, h = r - x, btm - y
+    if w < 100 or h < 100:
+        return None
+    return WorkArea(x, y, w, h, source)
+
+
 class WorkAreaProvider:
     """Try providers in order; raise WorkAreaError if none succeed."""
 
@@ -139,19 +151,40 @@ class WorkAreaProvider:
         except Exception as e:
             reasons.append(f"env: {e}")
 
-        for name, fn in (
-            ("xrandr_primary", _from_xrandr_primary),
-            ("_NET_WORKAREA", _from_net_workarea),
-            ("xdpyinfo", _from_xdpyinfo),
-        ):
-            try:
-                area = fn()
-                if area:
-                    log.info("work area from %s: %s", name, area)
-                    return area
-                reasons.append(f"{name}: unavailable")
-            except Exception as e:
-                reasons.append(f"{name}: {e}")
+        xrandr = None
+        net = None
+        try:
+            xrandr = _from_xrandr_primary()
+        except Exception as e:
+            reasons.append(f"xrandr_primary: {e}")
+        try:
+            net = _from_net_workarea()
+        except Exception as e:
+            reasons.append(f"_NET_WORKAREA: {e}")
+
+        if xrandr and net:
+            clipped = intersect_work_areas(xrandr, net, f"{xrandr.source}+{net.source}")
+            if clipped:
+                log.info("work area from primary∩_NET_WORKAREA: %s", clipped)
+                return clipped
+            reasons.append("primary∩_NET_WORKAREA: empty")
+        if xrandr:
+            log.info("work area from xrandr_primary: %s", xrandr)
+            return xrandr
+        if net:
+            log.info("work area from _NET_WORKAREA: %s", net)
+            return net
+        reasons.append("xrandr_primary: unavailable" if xrandr is None else "xrandr_primary: skipped")
+        reasons.append("_NET_WORKAREA: unavailable" if net is None else "_NET_WORKAREA: skipped")
+
+        try:
+            area = _from_xdpyinfo()
+            if area:
+                log.info("work area from xdpyinfo: %s", area)
+                return area
+            reasons.append("xdpyinfo: unavailable")
+        except Exception as e:
+            reasons.append(f"xdpyinfo: {e}")
 
         reasons.append(
             "no reliable work area (set MULTIPROFILE_WORKAREA=x,y,w,h). "

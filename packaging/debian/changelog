@@ -1,3 +1,11 @@
+multiprofile-native (1.4.2) unstable; urgency=medium
+
+  * Force X11/XWayland so CDP window tiling actually moves Chrome windows
+    on Ubuntu Wayland (setWindowBounds was a no-op on the compositor).
+    Pass tile geometry at launch, then verify via CDP.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Mon, 21 Sep 2026 13:10:00 +0530
+
 multiprofile-native (1.4.1) unstable; urgency=medium
 
   * CDP window tiling (Approach A): localhost-only Browser.setWindowBounds,

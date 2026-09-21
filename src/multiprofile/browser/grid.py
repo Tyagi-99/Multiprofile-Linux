@@ -39,6 +39,12 @@ class SlotPlan:
         return [s.rect for s in self.slots]
 
 
+def slot_rect_map(plan: SlotPlan | None) -> dict[str, Rect]:
+    if plan is None:
+        return {}
+    return {s.profile_id: s.rect for s in plan.slots}
+
+
 def _overlap(a: Rect, b: Rect) -> bool:
     return not (a.x + a.w <= b.x or b.x + b.w <= a.x or a.y + a.h <= b.y or b.y + b.h <= a.y)
 

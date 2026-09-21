@@ -1,6 +1,6 @@
 [project]
 name = "multiprofile-native"
-version = "1.4.1"
+version = "1.4.2"
 description = "Native Linux Multiprofile manager (clean-room host for authorized UI/extension assets)"
 readme = "README.md"
 requires-python = ">=3.11"

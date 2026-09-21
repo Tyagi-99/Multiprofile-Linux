@@ -1,3 +1,9 @@
+## 1.4.2
+
+- Force Chrome onto X11/XWayland (`--ozone-platform=x11`) so `Browser.setWindowBounds` actually tiles windows. On Wayland, CDP reported success while the compositor left windows cascaded.
+- Pass grid slot geometry at launch (`--window-position/--window-size`) then re-apply via CDP.
+- Merge `--disable-features` into a single flag (ChromeWhatsNewUI + WaylandWindowDecorations).
+
 ## 1.4.1
 
 - Fix window tiling on Chrome 131+: add `--remote-allow-origins=*` (CDP was 403 Forbidden).
