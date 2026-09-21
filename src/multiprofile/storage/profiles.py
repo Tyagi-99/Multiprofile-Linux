@@ -140,6 +140,8 @@ def load_profiles() -> list[dict[str, Any]]:
             p["pid"] = st.get("pid")
             # SPA compatibility: isRunning
             p["isRunning"] = p.get("status") == "running" and bool(p.get("pid"))
+            p["isQueued"] = p.get("status") == "queued"
+            p["isFailed"] = p.get("status") == "failed"
         return items
 
 

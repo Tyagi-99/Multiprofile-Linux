@@ -1,10 +1,11 @@
 """Concurrency gate for Chrome profile launches (RAM safety)."""
 from __future__ import annotations
 
-import os
 import threading
 import time
 from typing import Any
+
+from ..config import get_settings
 
 _lock = threading.Lock()
 _cv = threading.Condition(_lock)
@@ -12,10 +13,7 @@ _active: set[str] = set()  # profile ids currently holding a slot
 
 
 def max_concurrent() -> int:
-    try:
-        return max(1, int(os.environ.get("MAX_CONCURRENT_PROFILES", "3")))
-    except (TypeError, ValueError):
-        return 3
+    return get_settings().max_concurrent_profiles
 
 
 def active_count() -> int:
@@ -66,5 +64,6 @@ def slot_status() -> dict[str, Any]:
         return {
             "max": max_concurrent(),
             "active": len(_active),
+            "available": max(0, max_concurrent() - len(_active)),
             "profileIds": list(_active),
         }

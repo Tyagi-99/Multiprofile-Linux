@@ -14,6 +14,9 @@ from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
 from ..browser import manager as browser_manager
 from ..browser.launcher import extension_src, find_chrome, launch_profile, stop_profile
+from ..browser.sandbox import probe_sandbox
+from ..browser.window_layout import detect_work_area
+from ..config import get_settings
 from ..cookies_store import (
     export_cookies_json,
     import_cookies,
@@ -134,6 +137,29 @@ def create_app() -> Flask:
         except FileNotFoundError:
             pass
 
+        settings = get_settings()
+        sandbox_info = None
+        work_area_info = None
+        try:
+            if chrome_path:
+                st = probe_sandbox(chrome_path)
+                sandbox_info = {
+                    "ok": st.ok,
+                    "useNoSandbox": st.use_no_sandbox,
+                    "reason": st.reason,
+                    "chromeSandboxPath": st.chrome_sandbox_path,
+                    "chromeSandboxSuid": st.chrome_sandbox_suid,
+                    "unprivilegedUserns": st.unprivileged_userns,
+                    "runningAsRoot": st.running_as_root,
+                }
+        except Exception as e:
+            sandbox_info = {"ok": False, "reason": f"probe_failed: {e}"}
+        try:
+            wa = detect_work_area()
+            work_area_info = {"x": wa.x, "y": wa.y, "w": wa.w, "h": wa.h, "source": wa.source}
+        except Exception as e:
+            work_area_info = {"error": str(e)}
+
         static_ok = False
         try:
             static_ok = (static_dir() / "index.html").exists()
@@ -177,6 +203,12 @@ def create_app() -> Flask:
                 "count": len(items),
                 "data_dir": str(data_dir()),
                 "slots": browser_manager.slot_status(),
+                "maxConcurrentProfiles": settings.max_concurrent_profiles,
+                "allowWebstoreExtensions": settings.allow_webstore_extensions,
+                "antiDetectExclusivity": (not settings.allow_webstore_extensions),
+                "windowTilingEnabled": settings.window_tiling_enabled,
+                "sandbox": sandbox_info,
+                "workArea": work_area_info,
                 "reaped": reaped,
             }
         )

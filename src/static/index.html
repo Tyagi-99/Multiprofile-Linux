@@ -5,19 +5,59 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Anti-Detect Studio — Multi-Profile Browser Manager</title>
   <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <div class="app-shell">
+    <!-- Top Navigation Bar -->
     <header class="top-nav">
-      <div class="nav-brand"><h2>Anti-Detect Studio</h2><span class="brand-badge">Multi-Profile Manager</span></div>
+      <div class="nav-brand">
+        <div class="brand-logo" style="background: transparent; box-shadow: none;">
+          <img src="/app_icon.png" width="36" height="36" alt="Anti-Detect Studio Logo" style="border-radius: 8px; filter: drop-shadow(0 0 8px rgba(14,165,233,0.5));">
+        </div>
+        <div class="brand-text">
+          <h2>Anti-Detect Studio</h2>
+          <span class="brand-badge">Multi-Profile Manager</span>
+        </div>
+      </div>
+
       <div class="nav-controls">
-        <input type="text" id="searchInput" placeholder="Search profiles, channels, UA...">
-        <button class="btn-donate" id="btnDonate">Donate</button>
-        <button class="btn-secondary" id="btnGithubAccounts">GitHub Accounts</button>
-        <button class="btn-primary" id="btnNewProfile">Create Profile</button>
+        <div class="search-box">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+          <input type="text" id="searchInput" placeholder="Search profiles, channels, UA...">
+        </div>
+
+        <button class="btn-donate" id="btnDonate" style="display: flex; align-items: center; gap: 7px; padding: 8px 14px; background: linear-gradient(135deg, rgba(236, 72, 153, 0.16), rgba(168, 85, 247, 0.16)); border: 1px solid rgba(236, 72, 153, 0.45); border-radius: var(--radius-md); color: #f472b6; font-size: 13px; font-weight: 700; cursor: pointer; transition: all 0.2s; box-shadow: 0 0 12px rgba(236, 72, 153, 0.15);" title="Support Anti-Detect Studio Development">
+          <span style="font-size: 14px;">💖</span>
+          <span>Donate</span>
+        </button>
+
+        
+
+        <button class="btn-secondary" id="btnGithubAccounts" style="display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); color: var(--text-primary); font-size: 13px; font-weight: 600; cursor: pointer;">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+          </svg>
+          <span>GitHub Accounts</span>
+        </button>
+
+        <button class="btn-primary" id="btnNewProfile">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          <span>Create Profile</span>
+        </button>
       </div>
     </header>
+
+    <!-- Filter & Stats Bar -->
     <div class="toolbar">
       <div class="filter-pills">
         <button class="pill active" data-filter="all">All (<span id="countAll">0</span>)</button>
@@ -25,28 +65,599 @@
         <button class="pill" data-filter="mobile">Mobile Devices (<span id="countMobile">0</span>)</button>
         <button class="pill" data-filter="github">GitHub Cloud IP (<span id="countGithub">0</span>)</button>
       </div>
-      <div class="toolbar-stats">
-        <button id="btnSwitchAllDirect">All Direct</button>
-        <button id="btnAutoUpdateToggle">Auto-Update: <span id="autoUpdateState">ON</span></button>
-        <select id="clientFilter" title="Filter by client"><option value="">All clients</option></select>
-        <button id="btnBulkLaunch">Launch selected</button>
-        <button id="btnBulkStop">Stop selected</button>
-        <input id="apiTokenInput" type="password" placeholder="API token" title="Saved to localStorage as mp_api_token">
-        <span id="healthVersionBadge"><span id="healthVersionText">System Online</span></span>
+
+      <div class="toolbar-stats" style="display: flex; align-items: center; gap: 10px;">
+        <button id="btnSwitchAllDirect" class="btn-text" style="font-size: 11.5px; color: var(--accent-cyan); background: rgba(14, 165, 233, 0.1); border: 1px solid rgba(14, 165, 233, 0.25); border-radius: 6px; padding: 5px 12px; font-weight: 600; cursor: pointer;" title="Make all profiles open instantly in 0.2s with full Anti-Detect stealth">
+          ⚡ All Direct (Instant Launch)
+        </button>
+        <button id="btnAutoUpdateToggle" class="btn-text" style="font-size: 11.5px; color: var(--accent-emerald, #10b981); background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; padding: 5px 12px; font-weight: 600; cursor: pointer;" title="Turn automatic update notifications on or off">
+          🔄 Auto-Update: <span id="autoUpdateState">ON</span>
+        </button>
+        <select id="clientFilter" title="Filter by client" style="font-size:12px;padding:5px 8px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);">
+          <option value="">All clients</option>
+        </select>
+        <button id="btnBulkLaunch" class="btn-text" style="font-size:11.5px;color:#38bdf8;background:rgba(56,189,248,.1);border:1px solid rgba(56,189,248,.3);border-radius:6px;padding:5px 10px;font-weight:600;cursor:pointer;" title="Launch selected via job queue">▶ Launch selected</button>
+        <button id="btnBulkStop" class="btn-text" style="font-size:11.5px;color:#f87171;background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);border-radius:6px;padding:5px 10px;font-weight:600;cursor:pointer;" title="Stop selected via job queue">■ Stop selected</button>
+        <input id="apiTokenInput" type="password" placeholder="API token" title="Saved to localStorage as mp_api_token" style="width:110px;font-size:11px;padding:5px 8px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border-color);color:var(--text-primary);">
+        <span class="status-indicator" id="healthVersionBadge" title="API health">
+          <span class="pulse-dot"></span>
+          <span id="healthVersionText">System Online</span>
+        </span>
       </div>
     </div>
+
+    <!-- Main Content Area: Profiles Grid -->
     <main class="main-content">
-      <div id="updateNoticeBar" style="display:none"></div>
-      <div id="adBannerContainer" style="display:none"></div>
-      <div class="profiles-grid" id="profilesGrid"></div>
-      <div class="empty-state" id="emptyState" style="display:none"><h3>No profiles found</h3><button id="btnEmptyCreate">+ Create Profile</button></div>
+      <!-- Remote-Controlled Software Update Announcement Bar -->
+      <div id="updateNoticeBar" class="update-notice-bar" style="display: none;">
+        <div class="update-notice-content">
+          <span class="update-badge">UPDATE</span>
+          <div class="update-text">
+            <strong id="updateNoticeTitle">Anti-Detect Studio Update Available!</strong>
+            <span id="updateNoticeChangelog">Click update to get the latest features and anti-detect patches.</span>
+          </div>
+        </div>
+        <div class="update-actions">
+          <button type="button" class="btn-primary update-btn" id="updateNoticeBtn">
+            <span id="updateNoticeBtnText">Download Update 🚀</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Remote-Controlled Banner Ad (Only appears in Profile Manager UI) -->
+      <div id="adBannerContainer" class="ad-banner-container" style="display: none;">
+        <div class="ad-banner-card">
+          <div class="ad-banner-content">
+            <div class="ad-badge-tag" id="adBannerBadge">SPONSORED</div>
+            <h4 class="ad-banner-title" id="adBannerTitle">Loading recommendation...</h4>
+            <p class="ad-banner-desc" id="adBannerDesc"></p>
+          </div>
+          <div class="ad-banner-action">
+            <a href="#" target="_blank" rel="noopener noreferrer" class="btn-ad-action" id="adBannerBtn">
+              <span id="adBannerBtnText">Learn More</span>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="profiles-grid" id="profilesGrid">
+        <!-- Profile cards rendered dynamically by app.js -->
+      </div>
+
+      <!-- Empty State -->
+      <div class="empty-state" id="emptyState" style="display: none;">
+        <div class="empty-icon">📁</div>
+        <h3>No profiles found</h3>
+        <p>Create your first isolated browser profile to get started.</p>
+        <button class="btn-primary" id="btnEmptyCreate">+ Create Profile</button>
+      </div>
     </main>
   </div>
-  <div class="modal-overlay" id="profileModal" style="display:none"></div>
-  <div class="modal-overlay" id="githubModal" style="display:none"></div>
-  <div class="modal-overlay" id="adPopupModal" style="display:none"></div>
-  <div class="modal-overlay" id="mandatoryUpdateModal" style="display:none"></div>
-  <div class="modal-overlay" id="donateModal" style="display:none"></div>
+
+  <!-- Modal: Create / Edit Profile -->
+  <div class="modal-overlay" id="profileModal" style="display: none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modalTitle">Create New Profile</h3>
+        <button class="modal-close" id="modalCloseBtn">&times;</button>
+      </div>
+
+      <form id="profileForm" class="modal-body">
+        <input type="hidden" id="formProfileId">
+
+        <!-- Name & Color -->
+        <div class="form-row">
+          <div class="form-group flex-3">
+            <label>Profile Name / Channel Name *</label>
+            <input type="text" id="formName" placeholder="e.g. Channel 1 — Ancient Rome Shorts" required>
+          </div>
+          <div class="form-group flex-1">
+            <label>Color</label>
+            <div class="color-picker-wrap">
+              <input type="color" id="formColor" value="#0ea5e9">
+            </div>
+          </div>
+        </div>
+
+        <!-- Notes -->
+        <div class="form-group">
+          <label>Notes / Tags</label>
+          <input type="text" id="formNotes" placeholder="e.g. Main Shorts account, upload at 6 PM">
+        </div>
+
+        <!-- User-Agent / Device Fingerprint -->
+        <div class="form-group">
+          <div class="label-with-action">
+            <label>Device / User-Agent Fingerprint *</label>
+            <button type="button" class="btn-text" id="btnFormRandomUa">🎲 Randomize Device</button>
+          </div>
+          <select id="formUserAgentSelect" class="form-select" required>
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+
+        <!-- Custom User-Agent Input (Hidden unless Custom is selected) -->
+        <div class="form-group" id="formCustomUaGroup" style="display: none;">
+          <label>Custom User-Agent String</label>
+          <textarea id="formCustomUaInput" rows="2" placeholder="Mozilla/5.0..."></textarea>
+        </div>
+
+        <!-- Proxy Configuration -->
+        <div class="form-group">
+          <label>Proxy Connection</label>
+          <div class="radio-cards">
+            <label class="radio-card">
+              <input type="radio" name="proxyType" value="github" checked>
+              <div class="radio-card-content">
+                <span class="card-icon">☁️</span>
+                <span class="card-title">GitHub Cloud Runner</span>
+                <span class="card-sub">Fresh Microsoft Azure Datacenter IP on launch</span>
+              </div>
+            </label>
+
+            <label class="radio-card">
+              <input type="radio" name="proxyType" value="custom">
+              <div class="radio-card-content">
+                <span class="card-icon">🔒</span>
+                <span class="card-title">Custom Proxy</span>
+                <span class="card-sub">SOCKS5 / HTTP proxy of your choice</span>
+              </div>
+            </label>
+
+            <label class="radio-card">
+              <input type="radio" name="proxyType" value="none">
+              <div class="radio-card-content">
+                <span class="card-icon">🌐</span>
+                <span class="card-title">Direct Connection</span>
+                <span class="card-sub">Uses your regular network without proxy</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- GitHub Account Selector for this profile -->
+        <div class="form-group" id="formGithubAccountGroup">
+          <label style="font-size: 12px; color: var(--text-muted); display: flex; justify-content: space-between; align-items: center;">
+            <span>GitHub Account for Cloud Runner</span>
+            <button type="button" class="btn-text" id="btnOpenGhModalFromForm" style="font-size: 11px;">+ Add New Account</button>
+          </label>
+          <select id="formGithubAccountSelect" class="form-select">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+
+        <!-- ixBrowser-Style Easy Custom Proxy Section -->
+        <div id="formCustomProxyGroup" style="display: none; background: rgba(14, 165, 233, 0.04); border: 1px solid rgba(14, 165, 233, 0.25); border-radius: var(--radius-md); padding: 14px; margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <label style="font-weight: 700; color: var(--accent-cyan); display: flex; align-items: center; gap: 6px; font-size: 13px; margin: 0;">
+              <span>⚡</span> Custom Proxy Manager (ixBrowser Style)
+            </label>
+            <span style="font-size: 11px; color: var(--text-muted);">HTTP / HTTPS / SOCKS5</span>
+          </div>
+
+          <!-- Quick Paste Auto-Fill Box -->
+          <div style="margin-bottom: 12px;">
+            <div style="display: flex; gap: 8px;">
+              <input type="text" id="formProxyQuickPaste" placeholder="⚡ Quick Paste: ip:port:user:pass or user:pass@ip:port (auto-fills all)" style="flex: 1; font-size: 12px; font-family: 'JetBrains Mono', monospace; padding: 8px 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff;">
+              <button type="button" id="btnAutoFillProxy" class="btn-secondary" style="padding: 6px 14px; font-size: 12px; white-space: nowrap; font-weight: 600; cursor: pointer;">
+                Auto-Fill
+              </button>
+            </div>
+            <span style="font-size: 10.5px; color: var(--text-muted); margin-top: 4px; display: block;">
+              Works with all proxy formats: <code>ip:port</code>, <code>ip:port:user:pass</code>, <code>user:pass@ip:port</code>, <code>socks5://...</code>
+            </span>
+          </div>
+
+          <!-- Structured Proxy Inputs Grid -->
+          <div style="display: grid; grid-template-columns: 105px 1fr 90px; gap: 8px; margin-bottom: 10px;">
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); margin-bottom: 3px; display: block;">Protocol</label>
+              <select id="formProxyProtocol" class="form-select" style="padding: 7px 8px; font-size: 12px; font-weight: 600;">
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5" selected>SOCKS5</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); margin-bottom: 3px; display: block;">Proxy Host / IP</label>
+              <input type="text" id="formProxyHost" placeholder="e.g. 185.220.101.5" style="padding: 7px 10px; font-size: 12px; font-family: 'JetBrains Mono', monospace;">
+            </div>
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); margin-bottom: 3px; display: block;">Port</label>
+              <input type="number" id="formProxyPort" placeholder="8080" style="padding: 7px 10px; font-size: 12px; font-family: 'JetBrains Mono', monospace;">
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); margin-bottom: 3px; display: block;">Username (Optional)</label>
+              <input type="text" id="formProxyUser" placeholder="Leave blank if no auth" style="padding: 7px 10px; font-size: 12px;">
+            </div>
+            <div>
+              <label style="font-size: 11px; color: var(--text-muted); margin-bottom: 3px; display: block;">Password (Optional)</label>
+              <input type="password" id="formProxyPass" placeholder="Leave blank if no auth" style="padding: 7px 10px; font-size: 12px;">
+            </div>
+          </div>
+
+          <!-- Hidden input that holds the assembled customProxy string -->
+          <input type="hidden" id="formCustomProxy">
+
+          <!-- 1-Click Test Proxy Button & Status Banner -->
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+            <button type="button" id="btnTestProxyConn" class="btn-secondary" style="padding: 7px 14px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px; background: rgba(14, 165, 233, 0.15); border-color: rgba(14, 165, 233, 0.4); color: var(--accent-cyan); cursor: pointer;">
+              <span>⚡</span>
+              <span id="btnTestProxyText">Check / Test Proxy</span>
+            </button>
+            <span id="proxyTestStatusBadge" style="font-size: 11.5px; font-weight: 600; display: none;"></span>
+          </div>
+
+          <!-- Diagnostic Result Box -->
+          <div id="proxyDiagnosticCard" style="display: none; margin-top: 10px; background: rgba(0,0,0,0.35); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 12px; font-size: 12px;">
+            <div id="proxyDiagContent" style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center;"></div>
+            <button type="button" id="btnApplyProxyTimezone" style="display: none; margin-top: 8px; font-size: 11px; background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 4px; padding: 5px 10px; cursor: pointer; font-weight: 700;">
+              🕒 Auto-Set Profile Timezone to Match Proxy
+            </button>
+          </div>
+        </div>
+
+        <!-- Timezone Configuration -->
+        <div class="form-group">
+          <label>Timezone (Anti-Detect Spoofing) 🕒</label>
+          <select id="formTimezone" class="form-select">
+            <option value="America/New_York" selected>🇺🇸 America/New_York (US Eastern Time - EDT/EST)</option>
+            <option value="America/Chicago">🇺🇸 America/Chicago (US Central Time - CDT/CST)</option>
+            <option value="America/Denver">🇺🇸 America/Denver (US Mountain Time)</option>
+            <option value="America/Los_Angeles">🇺🇸 America/Los_Angeles (US Pacific Time - PDT/PST)</option>
+            <option value="Europe/London">🇬🇧 Europe/London (UK GMT/BST)</option>
+            <option value="Europe/Paris">🇫🇷 Europe/Paris (France CET/CEST)</option>
+            <option value="Europe/Berlin">🇩🇪 Europe/Berlin (Germany CET/CEST)</option>
+            <option value="Asia/Dubai">🇦🇪 Asia/Dubai (UAE GST +4)</option>
+            <option value="Asia/Singapore">🇸🇬 Asia/Singapore (Singapore SGT +8)</option>
+            <option value="Asia/Tokyo">🇯🇵 Asia/Tokyo (Japan JST +9)</option>
+            <option value="Asia/Kolkata">🇮🇳 Asia/Kolkata (India IST +5:30)</option>
+            <option value="UTC">🌐 UTC (Universal Coordinated Time)</option>
+          </select>
+          <span style="font-size: 11px; color: var(--text-muted); margin-top: 4px; display: block;">
+            Websites aur CreepJS ko aapka real Windows Indian timezone (IST) kabhi reveal nahi hoga.
+          </span>
+        </div>
+
+
+        <!-- Language / WebRTC / Seed (v1.1.0) -->
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label>Language</label>
+            <input type="text" id="formLanguage" value="en-US" placeholder="en-US">
+          </div>
+          <div class="form-group flex-2">
+            <label>WebRTC Mode</label>
+            <select id="formWebrtcMode" class="form-select">
+              <option value="default" selected>Default (browser)</option>
+              <option value="disable_non_proxied_udp">Disable non-proxied UDP</option>
+              <option value="disable">Disable WebRTC</option>
+            </select>
+          </div>
+          <div class="form-group flex-1">
+            <label>Seed</label>
+            <input type="number" id="formSeed" placeholder="auto" min="1" step="1">
+          </div>
+        </div>
+        <div class="form-group" id="formFingerprintGroup" style="display:none;">
+          <button type="button" class="btn-secondary" id="btnShowFingerprint" style="font-size:12px;font-weight:600;cursor:pointer;">
+            🧬 View Fingerprint Report
+          </button>
+        </div>
+
+        <!-- Start URL -->
+        <div class="form-group">
+          <label>Default Launch URL</label>
+          <input type="url" id="formStartUrl" value="https://studio.youtube.com">
+        </div>
+
+        <!-- Launch Immediately Checkbox -->
+        <div class="form-group" id="formAutoLaunchGroup" style="margin-top: 4px;">
+          <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; text-transform: none; font-size: 13px; font-weight: 500; color: var(--text-primary);">
+            <input type="checkbox" id="formAutoLaunch" checked style="width: 17px; height: 17px; cursor: pointer; accent-color: var(--accent);">
+            <span>🚀 Launch browser window immediately after creation</span>
+          </label>
+        </div>
+
+        <!-- Modal Footer -->
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" id="btnCancelModal">Cancel</button>
+          <button type="submit" class="btn-primary" id="btnSaveProfile">Save Profile</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: GitHub Accounts Manager -->
+  <div class="modal-overlay" id="githubModal" style="display: none;">
+    <div class="modal-card" style="max-width: 600px;">
+      <div class="modal-header">
+        <h3 style="display: flex; align-items: center; gap: 8px;">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+          </svg>
+          <span>GitHub Cloud Accounts</span>
+        </h3>
+        <button class="modal-close" id="githubModalCloseBtn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 16px;">
+          Cloud Runner proxies use GitHub Actions (2,000 free minutes/mo per account). Connect multiple accounts so different profiles run from separate quotas and dedicated runner pools.
+        </p>
+
+        <div style="font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px;">
+          Connected Accounts
+        </div>
+        <div id="githubAccountsList" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">
+          <!-- Loaded dynamically -->
+        </div>
+
+        <div style="background: rgba(14, 165, 233, 0.05); border: 1px dashed var(--border-highlight); border-radius: var(--radius-md); padding: 16px;">
+          <h4 style="font-size: 13px; font-weight: 700; margin-bottom: 12px; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+            <span>+ Connect Another GitHub Account</span>
+          </h4>
+
+          <!-- Direct Token Generation Link Card -->
+          <div style="background: rgba(14, 165, 233, 0.08); border: 1px solid rgba(14, 165, 233, 0.25); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <span style="font-size: 12px; font-weight: 700; color: var(--accent-cyan); display: flex; align-items: center; gap: 6px;">
+                <span>⚡ 1-Click Direct Token Link:</span>
+              </span>
+              <div style="display: flex; gap: 6px;">
+                <button type="button" id="btnCopyGhLink" class="btn-text" style="font-size: 11px; background: rgba(255,255,255,0.06); padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border-color); color: var(--text-primary); cursor: pointer;">
+                  📋 Copy Link
+                </button>
+                <a id="btnOpenGhLink" href="https://github.com/settings/tokens/new?description=AntiDetect-Studio-Proxy&scopes=repo,workflow" target="_blank" style="font-size: 11px; background: var(--accent-cyan); color: #fff; text-decoration: none; padding: 4px 10px; border-radius: 4px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px;">
+                  <span>Open Link ↗</span>
+                </a>
+              </div>
+            </div>
+            <p style="font-size: 11.5px; color: var(--text-secondary); line-height: 1.45; margin: 0;">
+              Yeh link aap jis bhi browser mein kholenge, wahan GitHub account login karne ke baad <strong>repo & workflow</strong> permissions pehle se select milengi. Bas neeche <strong>"Generate token"</strong> dabayein aur token copy karke yahan daal dein!
+            </p>
+          </div>
+
+          <form id="addGhAccountForm">
+            <div class="form-group">
+              <label style="font-size: 12px;">Personal Access Token (PAT) *</label>
+              <input type="password" id="ghTokenInput" placeholder="ghp_... or gho_..." required style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">
+              <span style="font-size: 11px; color: var(--text-muted); margin-top: 4px; display: block;">
+                Token generated via link above (scopes: <code>repo</code> & <code>workflow</code>).
+              </span>
+            </div>
+            <div class="form-row" style="margin-bottom: 12px;">
+              <div class="form-group flex-2">
+                <label style="font-size: 12px;">Account Label (Optional)</label>
+                <input type="text" id="ghLabelInput" placeholder="e.g. Channel 2 Dedicated Account">
+              </div>
+              <div class="form-group flex-1" style="display: flex; align-items: flex-end; padding-bottom: 6px;">
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: var(--text-primary);">
+                  <input type="checkbox" id="ghIsDefaultInput" style="width: 15px; height: 15px; accent-color: var(--accent-cyan);">
+                  <span>Default</span>
+                </label>
+              </div>
+            </div>
+            <button type="submit" class="btn-primary" id="btnSubmitGhAccount" style="width: 100%; justify-content: center;">
+              <span>Verify & Connect Account</span>
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Remote-Controlled Popup Ad (Only in Profile Manager UI) -->
+  <div class="modal-overlay" id="adPopupModal" style="display: none;">
+    <div class="modal-card ad-popup-card">
+      <div class="modal-header ad-popup-header">
+        <span class="ad-badge-tag" id="adPopupBadge">SPECIAL PROMOTION</span>
+        <button class="modal-close" id="adPopupCloseBtn">&times;</button>
+      </div>
+      <div class="ad-popup-body">
+        <div class="ad-popup-icon" id="adPopupIcon">📢</div>
+        <h3 class="ad-popup-title" id="adPopupTitle">Special Announcement</h3>
+        <p class="ad-popup-message" id="adPopupMessage"></p>
+        <div class="ad-popup-actions">
+          <a href="#" target="_blank" rel="noopener noreferrer" class="btn-primary ad-popup-cta" id="adPopupBtn">
+            <span id="adPopupBtnText">Open Now</span>
+          </a>
+          <button type="button" class="btn-secondary" id="adPopupDismissBtn">Dismiss</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Mandatory Update Required (Locks UI if critical update is forced) -->
+  <div class="modal-overlay" id="mandatoryUpdateModal" style="display: none; background: rgba(5, 8, 15, 0.92); backdrop-filter: blur(8px); z-index: 9999;">
+    <div class="modal-card" style="max-width: 480px; text-align: center; padding: 28px; border: 1px solid rgba(239, 68, 68, 0.4); box-shadow: 0 0 35px rgba(239, 68, 68, 0.2);">
+      <div style="font-size: 42px; margin-bottom: 12px;">🚨</div>
+      <h3 style="font-size: 20px; font-weight: 800; color: #f87171; margin-bottom: 8px;" id="mandatoryTitle">Update Required to Continue</h3>
+      <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;" id="mandatoryDesc">
+        A critical update is available. To keep your channels secure and prevent detection, please install the latest version.
+      </p>
+      <div id="mandatoryChangelog" style="background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); padding: 12px 14px; border-radius: var(--radius-md); font-size: 12px; text-align: left; margin-bottom: 20px; white-space: pre-line; color: var(--text-primary); max-height: 120px; overflow-y: auto;">
+      </div>
+      <div id="updateInstallProgress" class="update-install-progress" hidden>
+        <div class="update-progress-track"><div id="updateProgressFill" class="update-progress-fill"></div></div>
+        <div id="updateProgressText" class="update-progress-text">Preparing update…</div>
+      </div>
+      <button type="button" class="btn-primary" id="mandatoryUpdateBtn" style="width: 100%; justify-content: center; padding: 14px; font-size: 14px; font-weight: 700; text-decoration: none; background: linear-gradient(135deg, #ef4444, #f97316);">
+        <span id="mandatoryBtnText">Download Latest Version Now 🚀</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Modal: Donate / Support -->
+  <div class="modal-overlay" id="donateModal" style="display: none;">
+    <div class="modal-card" style="max-width: 520px;">
+      <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <div class="modal-title-group" style="display: flex; align-items: center; gap: 12px;">
+          <div style="width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(168, 85, 247, 0.2)); display: flex; align-items: center; justify-content: center; font-size: 20px; border: 1px solid rgba(236, 72, 153, 0.45); box-shadow: 0 0 15px rgba(236, 72, 153, 0.25);">
+            💖
+          </div>
+          <div>
+            <h3 id="donateModalTitle" style="margin: 0; font-size: 17px; font-weight: 800; background: linear-gradient(135deg, #f472b6, #c084fc); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Support Anti-Detect Studio</h3>
+            <p id="donateModalSubtitle" style="margin: 3px 0 0 0; font-size: 12px; color: var(--text-secondary);">Help keep this tool free, updated, and maintain high-speed cloud runners.</p>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <button id="btnToggleDonateEdit" type="button" style="display: none; align-items: center; gap: 6px; background: rgba(14, 165, 233, 0.15); border: 1px solid rgba(14, 165, 233, 0.45); color: var(--accent-cyan); font-size: 11.5px; font-weight: 700; padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.2s;">
+            <span>✏️</span><span id="btnToggleDonateEditText">Edit Wallets</span>
+          </button>
+          <button class="modal-close" id="btnDonateClose">&times;</button>
+        </div>
+
+      </div>
+
+      <div class="modal-body" style="padding-top: 12px;">
+        <!-- 1. Normal View Section -->
+        <div id="donateViewSection">
+          <!-- Tabs -->
+          <div style="display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
+            <button class="donate-tab-btn active" data-tab="crypto" id="tabBtnCrypto" style="flex: 1; padding: 10px 14px; font-size: 12.5px; font-weight: 700; border-radius: 8px; border: 1px solid rgba(14,165,233,0.4); background: rgba(14,165,233,0.12); color: var(--accent-cyan); cursor: pointer;">
+              ⚡ Crypto (USDT)
+            </button>
+            <button class="donate-tab-btn" data-tab="custom" id="tabBtnCustom" style="flex: 1; padding: 10px 14px; font-size: 12.5px; font-weight: 700; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); color: var(--text-secondary); cursor: pointer;">
+              ☕ Online / Coffee
+            </button>
+          </div>
+
+          <!-- Tab: Crypto -->
+          <div id="donateTabCrypto" class="donate-tab-content">
+            <div style="display: flex; flex-direction: column; gap: 10px; padding: 6px 0;">
+              <!-- USDT TRC-20 -->
+              <div id="donateCardUsdtTrc" style="background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 12px 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span style="font-size: 12px; font-weight: 700; color: #22c55e; display: flex; align-items: center; gap: 6px;">
+                    <span>₮</span> USDT (TRC-20)
+                  </span>
+                  <button id="btnCopyUsdtTrc" type="button" class="btn-text" style="font-size: 11px; background: rgba(34, 197, 94, 0.12); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.3); border-radius: 4px; padding: 4px 10px; cursor: pointer; font-weight: 700;">
+                    Copy Address
+                  </button>
+                </div>
+                <div id="donateUsdtTrcText" style="font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-secondary); word-break: break-all;">
+                  TYDzsYUEW6v1bwsbvW43eB3V1iUuKz7q8v
+                </div>
+              </div>
+
+              <!-- USDT BEP-20 -->
+              <div id="donateCardUsdtBep" style="background: rgba(255,255,255,0.04); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 12px 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                  <span style="font-size: 12px; font-weight: 700; color: #eab308; display: flex; align-items: center; gap: 6px;">
+                    <span>₮</span> USDT (BEP-20 / BNB Chain)
+                  </span>
+                  <button id="btnCopyUsdtBep" type="button" class="btn-text" style="font-size: 11px; background: rgba(234, 179, 8, 0.12); color: #eab308; border: 1px solid rgba(234, 179, 8, 0.3); border-radius: 4px; padding: 4px 10px; cursor: pointer; font-weight: 700;">
+                    Copy Address
+                  </button>
+                </div>
+                <div id="donateUsdtBepText" style="font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-secondary); word-break: break-all;">
+                  0x58c0c46b5a3d76b1f2e1a3d4f5c6b7e8a9d0e1f2
+                </div>
+              </div>
+
+              <!-- Empty state shown when the owner has hidden every crypto item -->
+              <div id="donateCryptoEmpty" style="display: none; text-align: center; color: var(--text-muted); font-size: 12px; padding: 18px 8px;">
+                No crypto wallets are currently listed.
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 3: Custom / Coffee -->
+          <div id="donateTabCustom" class="donate-tab-content" style="display: none;">
+            <div style="text-align: center; padding: 22px 12px; display: flex; flex-direction: column; align-items: center; gap: 14px;">
+              <div style="font-size: 40px;">☕</div>
+              <p style="font-size: 13px; color: var(--text-secondary); margin: 0; line-height: 1.5;" id="donateCustomNote">
+                Thank you for supporting continuous development and high-speed residential runner infrastructure!
+              </p>
+              <a id="donateCoffeeLink" href="https://buymeacoffee.com" target="_blank" rel="noopener noreferrer" class="btn-primary" style="padding: 12px 24px; font-size: 13px; font-weight: 700; background: linear-gradient(135deg, #f59e0b, #ec4899); text-decoration: none; border-radius: 8px;">
+                Buy Me a Coffee ☕
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2. Owner Edit Section -->
+        <div id="donateEditSection" style="display: none; padding-top: 4px;">
+          <div style="background: rgba(14, 165, 233, 0.08); border: 1px dashed rgba(14, 165, 233, 0.35); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px; color: var(--accent-cyan); display: flex; align-items: center; justify-content: space-between;">
+            <span>✏️ <strong>Edit Wallets</strong> — Changes update immediately</span>
+            <a href="http://127.0.0.1:5099" target="_blank" style="color: #38bdf8; text-decoration: underline; font-weight: 600;">Open Admin Center ↗</a>
+          </div>
+
+          <div style="display: flex; flex-direction: column; gap: 10px;">
+            <div>
+              <label style="font-size: 11.5px; color: var(--text-secondary); margin-bottom: 4px; display: block; font-weight: 600;">Title</label>
+              <input type="text" id="editDonationTitle" style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff; font-size: 12px;">
+            </div>
+
+            <div>
+              <label style="font-size: 11.5px; color: var(--text-secondary); margin-bottom: 4px; display: block; font-weight: 600;">Subtitle Description</label>
+              <input type="text" id="editDonationSubtitle" style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff; font-size: 12px;">
+            </div>
+
+            <div>
+              <label style="font-size: 11.5px; color: #eab308; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; font-weight: 700;">
+                <span>🟡</span> USDT (BEP-20 / BNB Chain) Address
+              </label>
+              <input type="text" id="editDonationUsdtBep" placeholder="0x..." style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;">
+            </div>
+
+            <div>
+              <label style="font-size: 11.5px; color: #22c55e; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; font-weight: 700;">
+                <span>🟢</span> USDT (TRC-20 / TRON) Address
+              </label>
+              <input type="text" id="editDonationUsdtTrc" placeholder="T..." style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;">
+            </div>
+
+            <div>
+              <label style="font-size: 11.5px; color: #ec4899; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; font-weight: 700;">
+                <span>☕</span> Buy Me A Coffee / Custom Web Link
+              </label>
+              <input type="url" id="editDonationCoffee" placeholder="https://buymeacoffee.com/yourname" style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff; font-size: 12px;">
+            </div>
+
+            <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; padding: 10px 12px;">
+              <div style="font-size: 11.5px; color: var(--text-secondary); font-weight: 700; margin-bottom: 8px;">👁️ Show in Donate box</div>
+              <div style="display: flex; flex-wrap: wrap; gap: 14px;">
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #22c55e; cursor: pointer;">
+                  <input type="checkbox" id="editShowUsdtTrc" checked style="width: 15px; height: 15px; accent-color: #22c55e;"><span>USDT TRC-20</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #eab308; cursor: pointer;">
+                  <input type="checkbox" id="editShowUsdtBep" checked style="width: 15px; height: 15px; accent-color: #eab308;"><span>USDT BEP-20</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #38bdf8; cursor: pointer;">
+                  <input type="checkbox" id="editShowCoffee" checked style="width: 15px; height: 15px; accent-color: #38bdf8;"><span>Coffee / Web Link</span>
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <label style="font-size: 11.5px; color: var(--text-secondary); margin-bottom: 4px; display: block; font-weight: 600;">Custom Thank You Note</label>
+              <textarea id="editDonationNote" rows="2" placeholder="Thank you for supporting continuous development!" style="width: 100%; padding: 8px 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); border-radius: 6px; color: #fff; font-size: 12px; resize: vertical;"></textarea>
+            </div>
+
+            <div style="display: flex; gap: 10px; align-items: center; justify-content: flex-end; margin-top: 10px;">
+              <span id="donateEditMsg" style="font-size: 12px; margin-right: auto; display: none;"></span>
+              <button type="button" id="btnCancelDonationEdit" class="btn-secondary" style="padding: 8px 14px; font-size: 12px; cursor: pointer;">Cancel</button>
+              <button type="button" id="btnSaveDonationEdit" class="btn-primary" style="padding: 8px 18px; font-size: 12px; font-weight: 700; background: linear-gradient(135deg, #0ea5e9, #6366f1); cursor: pointer;">
+                💾 Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,10 +1,10 @@
-# Multiprofile Linux 1.2.0
+# Multiprofile Linux 1.3.0
 
 Native Ubuntu/Linux multi-profile browser manager (personal/lab use).
 
 Clean-room host for authorized UI/extension assets. No Wine. No AdsPower proprietary code.
 
-## What's in 1.2.0
+## What's in 1.3.0
 
 ### Ops / safety
 - Job queue + concurrency gate (`MAX_CONCURRENT_PROFILES=3`) so RAM stays bounded
@@ -47,7 +47,7 @@ python -m multiprofile --server-only
 ## Env vars
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MAX_CONCURRENT_PROFILES` | `3` | Max simultaneous Chrome launches |
+| `MAX_CONCURRENT_PROFILES` | `20` | Max simultaneous Chrome launches |
 | `MULTIPROFILE_API_TOKEN` | unset | If set, require `Authorization: Bearer <token>` on `/api/*` except GET `/api/health` |
 | `MULTIPROFILE_STATIC` | auto | Override static UI path |
 | `MULTIPROFILE_EXTENSION` | auto | Override extension path |
@@ -60,8 +60,8 @@ python -m multiprofile --server-only
 ## Build / install .deb
 ```bash
 ./build-deb.sh
-# => dist/multiprofile-native_1.2.0_amd64.deb
-sudo dpkg -i dist/multiprofile-native_1.2.0_amd64.deb
+# => dist/multiprofile-native_1.3.0_amd64.deb
+sudo dpkg -i dist/multiprofile-native_1.3.0_amd64.deb
 ```
 
 ## XDG paths

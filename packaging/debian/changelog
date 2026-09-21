@@ -1,3 +1,12 @@
+multiprofile-native (1.3.0) unstable; urgency=medium
+
+  * Phase 2 browser runtime: sandbox probe (drop hardcoded --no-sandbox when safe),
+    concurrency default 20 with queued status, window tiling from work area,
+    anti-detect extension exclusivity kept ON by default (AdsPower-class).
+    Chrome Web Store / extra extensions deferred (opt-in env only).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Mon, 21 Sep 2026 05:36:07 +0530
+
 multiprofile-native (1.2.0) unstable; urgency=medium
 
   * Phase 1-2 MVP: job queue + concurrency gate, clients, tags, templates,

@@ -10,6 +10,9 @@ from typing import Any
 
 from .audit import audit_log
 from .browser import manager as browser_manager
+from .browser.window_layout import compute_layout, detect_work_area
+from .config import get_settings
+from .storage.profiles import set_runtime
 
 log = logging.getLogger("multiprofile.jobs")
 
@@ -154,6 +157,15 @@ def _run_job(job_id: str) -> None:
     results: list[dict[str, Any]] = []
 
     if jtype in ("launch_profile", "bulk_launch"):
+        settings = get_settings()
+        tile_n = min(len(ids), settings.max_concurrent_profiles)
+        rects = []
+        if settings.window_tiling_enabled and tile_n > 0:
+            try:
+                rects = compute_layout(tile_n, detect_work_area())
+            except Exception:
+                rects = []
+        running_idx = 0
         for i, pid in enumerate(ids):
             if _is_cancelled(job_id):
                 with _lock:
@@ -161,21 +173,42 @@ def _run_job(job_id: str) -> None:
                     job["results"] = results
                     job["finishedAt"] = _now()
                 return
+            # Visible queue state while waiting for a concurrency slot
+            try:
+                set_runtime(pid, "queued", None)
+            except Exception:
+                pass
             got = browser_manager.acquire_slot(pid, timeout=180.0)
             if not got:
-                results.append({"profileId": pid, "ok": False, "error": "concurrency_timeout"})
-            else:
                 try:
-                    result = launch_profile(pid, url=url, direct=direct, cdp=cdp, _slot_held=True)
+                    set_runtime(pid, "failed", None)
+                except Exception:
+                    pass
+                results.append({"profileId": pid, "ok": False, "error": "concurrency_timeout", "status": "failed"})
+            else:
+                window_rect = rects[running_idx % len(rects)] if rects else None
+                try:
+                    result = launch_profile(
+                        pid, url=url, direct=direct, cdp=cdp, _slot_held=True, window_rect=window_rect
+                    )
                     result = {**result, "profileId": pid}
                     results.append(result)
                     if not result.get("ok"):
                         browser_manager.release_slot(pid)
+                        try:
+                            set_runtime(pid, "failed", None)
+                        except Exception:
+                            pass
                     else:
                         browser_manager.mark_running(pid)
+                        running_idx += 1
                 except Exception as e:
                     browser_manager.release_slot(pid)
-                    results.append({"profileId": pid, "ok": False, "error": str(e)})
+                    try:
+                        set_runtime(pid, "failed", None)
+                    except Exception:
+                        pass
+                    results.append({"profileId": pid, "ok": False, "error": str(e), "status": "failed"})
             with _lock:
                 job["progress"] = i + 1
                 job["results"] = list(results)

@@ -372,6 +372,8 @@ body {
 .cell-status.status-on { color: var(--accent-emerald); }
 .cell-status.status-on .pulse-dot { width: 7px; height: 7px; }
 .cell-status.status-off { color: var(--text-muted); }
+.cell-status.status-queued { color: #fbbf24; font-weight: 600; }
+.cell-status.status-failed { color: #f87171; font-weight: 600; }
 
 /* Actions on a row: compact, no top border/margin from the card version */
 .profile-row .profile-actions {

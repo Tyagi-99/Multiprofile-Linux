@@ -10,12 +10,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..config import get_settings
 from ..cookies_store import load_cookies
 from ..fingerprint import build_fingerprint, normalize_seed
 from ..proxy_util import parse_proxy, proxy_server_arg
 from ..storage.profiles import get_profile, set_runtime, update_profile
 from ..storage.xdg import chrome_profile_dir
 from . import manager as browser_manager
+from .sandbox import sandbox_chrome_args
+from .window_layout import Rect, chrome_geometry_args, place_window_by_pid
 
 log = logging.getLogger("multiprofile.browser")
 
@@ -135,7 +138,7 @@ def _prepare_extension(profile: dict[str, Any], fingerprint: dict[str, Any]) -> 
     return dest
 
 
-def launch_profile(profile_id: str, url: str | None = None, direct: bool = False, cdp: bool = False, _slot_held: bool = False) -> dict[str, Any]:
+def launch_profile(profile_id: str, url: str | None = None, direct: bool = False, cdp: bool = False, _slot_held: bool = False, window_rect: Rect | None = None) -> dict[str, Any]:
     profile = get_profile(profile_id)
     if not profile:
         return {"error": f"Profile not found: {profile_id}", "errors": ["profile_not_found"], "ok": False}
@@ -183,19 +186,30 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
             "launch with direct=true or switch to custom proxy."
         )
 
-    cmd = [
-        chrome,
-        f"--user-data-dir={user_dir}",
-        f"--disable-extensions-except={ext}",
+    settings = get_settings()
+    sandbox_args, sandbox_status = sandbox_chrome_args(chrome)
+    notes.append(f"Sandbox: {sandbox_status.reason}")
+
+    # Anti-detect exclusivity (AdsPower-class): only our extension loads by default.
+    # Web Store / extra extensions are deferred — opt-in env only, not the product default.
+    cmd = [chrome, f"--user-data-dir={user_dir}", *sandbox_args]
+    if settings.allow_webstore_extensions:
+        notes.append("Web Store extensions allowed (exclusivity OFF — opt-in only)")
+    else:
+        cmd.append(f"--disable-extensions-except={ext}")
+        notes.append("Anti-detect exclusivity ON (--disable-extensions-except)")
+    cmd.extend([
         f"--load-extension={ext}",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-features=ChromeWhatsNewUI",
-        "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--new-window",
-    ]
+    ])
+    if window_rect is not None and settings.window_tiling_enabled:
+        cmd.extend(chrome_geometry_args(window_rect))
+        notes.append(f"Window tile: {window_rect.w}x{window_rect.h}+{window_rect.x}+{window_rect.y}")
 
     if parsed_proxy:
         arg = proxy_server_arg(parsed_proxy)
@@ -260,6 +274,16 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     set_runtime(profile_id, "running", proc.pid)
     browser_manager.mark_running(profile_id)
     log.info("launched profile %s pid=%s url=%s", profile_id, proc.pid, start)
+    if window_rect is not None and settings.window_tiling_enabled:
+        try:
+            time.sleep(0.4)
+            place = place_window_by_pid(proc.pid, window_rect)
+            if place.get("ok"):
+                notes.append(f"Window placed via {place.get('method')}")
+            elif place.get("error"):
+                notes.append(f"Window place skipped: {place.get('error')}")
+        except Exception as e:
+            notes.append(f"Window place error: {e}")
     try:
         if proc.stderr:
             proc.stderr.close()
@@ -285,6 +309,11 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
             "timezone": fingerprint.get("timezone"),
             "webrtcMode": webrtc_mode,
         },
+    }
+    out["sandbox"] = {
+        "ok": sandbox_status.ok,
+        "useNoSandbox": sandbox_status.use_no_sandbox,
+        "reason": sandbox_status.reason,
     }
     if debug_port is not None:
         out["debugPort"] = debug_port
@@ -314,3 +343,4 @@ def _allocate_debug_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
+

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Anti-Detect Fingerprint Defender",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Protects against Canvas, Audio, WebGL, and User-Agent fingerprint tracking. Applies per-profile cookies and proxy auth.",
   "permissions": [
     "scripting",
@@ -20,23 +20,37 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["evasion.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "evasion.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "world": "MAIN"
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["loader.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "loader.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["evasion.js", "cookies.json", "proxy.json"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "evasion.js",
+        "cookies.json",
+        "proxy.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }

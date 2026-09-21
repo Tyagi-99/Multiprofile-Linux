@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from multiprofile import __version__
-assert __version__ == "1.2.0", __version__
+assert __version__ == "1.3.0", __version__
 
 from multiprofile.fingerprint import build_fingerprint, normalize_seed, fingerprint_report
 from multiprofile.proxy_util import parse_proxy, proxy_server_arg
@@ -73,7 +73,7 @@ c = app.test_client()
 h = c.get("/api/health")
 assert h.status_code == 200
 hj = h.get_json()
-assert hj["version"] == "1.2.0", hj
+assert hj["version"] == "1.3.0", hj
 assert hj.get("static_ok") is True
 assert hj.get("extension_ok") is True
 assert "slots" in hj
@@ -189,5 +189,59 @@ assert got.get("clientId") in (None, "")
 d = c.delete(f"/api/profiles/{pid}?purgeStorage=1")
 assert d.status_code == 200
 
-print("OK: 1.2.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
+print("OK: 1.3.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
 PY
+
+# --- Phase 2 browser runtime (anti-detect exclusivity preserved) ---
+python3 - <<'PY2'
+import os, sys
+sys.path.insert(0, "src")
+for k in list(os.environ):
+    if k.startswith("MULTIPROFILE_") or k == "MAX_CONCURRENT_PROFILES":
+        # leave PATH etc; clear overrides for defaults check
+        if k in ("MAX_CONCURRENT_PROFILES", "MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", "MULTIPROFILE_FORCE_NO_SANDBOX"):
+            os.environ.pop(k, None)
+
+from multiprofile.config import get_settings
+from multiprofile.browser.manager import max_concurrent, slot_status
+from multiprofile.browser.sandbox import probe_sandbox, sandbox_chrome_args
+from multiprofile.browser.window_layout import compute_layout, detect_work_area
+from multiprofile.browser.launcher import find_chrome
+
+s = get_settings()
+assert s.max_concurrent_profiles == 20, s
+assert s.allow_webstore_extensions is False, "anti-detect exclusivity must default ON"
+assert max_concurrent() == 20
+st = slot_status()
+assert st["max"] == 20 and st["available"] == 20, st
+
+chrome = find_chrome()
+sb = probe_sandbox(chrome)
+args, sb2 = sandbox_chrome_args(chrome)
+assert sb.ok == sb2.ok
+if sb.ok and not sb.use_no_sandbox:
+    assert "--no-sandbox" not in args, args
+print("sandbox:", sb.reason, "args:", args)
+
+area = detect_work_area()
+rects = compute_layout(4, area)
+assert len(rects) == 4
+for i, a in enumerate(rects):
+    for j, b in enumerate(rects):
+        if i >= j:
+            continue
+        ax2, ay2 = a.x + a.w, a.y + a.h
+        bx2, by2 = b.x + b.w, b.y + b.h
+        overlap = not (ax2 <= b.x or bx2 <= a.x or ay2 <= b.y or by2 <= a.y)
+        assert not overlap, (a, b)
+print("tiling ok", area.source)
+
+src = open("src/multiprofile/browser/launcher.py", encoding="utf-8").read()
+assert "--disable-extensions-except" in src
+assert "allow_webstore_extensions" in src
+print("exclusivity default ON")
+print("PHASE2_OK")
+PY2
+
+
+echo "ALL TESTS PASSED"
