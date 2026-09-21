@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
-VERSION=1.3.0
+VERSION=1.4.0
 NAME=multiprofile-native
 OUT="$ROOT/dist"
 STAGE="$OUT/${NAME}_${VERSION}_amd64"

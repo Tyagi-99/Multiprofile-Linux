@@ -31,42 +31,11 @@ class WorkArea:
 
 
 def detect_work_area() -> WorkArea:
-    """Best-effort usable desktop area (excludes panels when detectable)."""
-    # 1) xdpyinfo / xwininfo via xprop _NET_WORKAREA
-    if shutil.which("xprop"):
-        try:
-            out = subprocess.check_output(
-                ["xprop", "-root", "_NET_WORKAREA"],
-                text=True,
-                timeout=2,
-                stderr=subprocess.DEVNULL,
-            )
-            # _NET_WORKAREA(CARDINAL) = x, y, w, h [, ...]
-            if "=" in out:
-                nums = [int(x.strip()) for x in out.split("=", 1)[1].replace(",", " ").split() if x.strip().lstrip("-").isdigit()]
-                if len(nums) >= 4:
-                    return WorkArea(nums[0], nums[1], nums[2], nums[3], "xprop:_NET_WORKAREA")
-        except (subprocess.SubprocessError, ValueError, OSError):
-            pass
+    """Compatibility wrapper — delegates to WorkAreaProvider (fail-loud, no silent 1920x1080)."""
+    from .work_area import WorkAreaProvider
 
-    # 2) xdpyinfo dimensions
-    if shutil.which("xdpyinfo"):
-        try:
-            out = subprocess.check_output(["xdpyinfo"], text=True, timeout=2, stderr=subprocess.DEVNULL)
-            for line in out.splitlines():
-                line = line.strip()
-                if line.startswith("dimensions:"):
-                    # dimensions:    1920x1080 pixels
-                    part = line.split()[1]
-                    w_s, h_s = part.split("x")
-                    return WorkArea(0, 0, int(w_s), int(h_s), "xdpyinfo")
-        except (subprocess.SubprocessError, ValueError, OSError):
-            pass
-
-    # 3) env fallback
-    w = int(os.environ.get("MULTIPROFILE_SCREEN_WIDTH", "1920"))
-    h = int(os.environ.get("MULTIPROFILE_SCREEN_HEIGHT", "1080"))
-    return WorkArea(0, 0, w, h, "env-fallback")
+    area = WorkAreaProvider().detect()
+    return WorkArea(area.x, area.y, area.w, area.h, area.source)
 
 
 def choose_grid(n: int, area: WorkArea) -> tuple[int, int]:
@@ -94,6 +63,9 @@ def choose_grid(n: int, area: WorkArea) -> tuple[int, int]:
 
 
 def compute_layout(n: int, area: WorkArea | None = None, gap: int | None = None) -> list[Rect]:
+    """Deprecated for tiling authority — prefer WindowLayoutManager / GridCalculator.
+    Still used only as a pure math helper; detect_work_area() is fail-loud.
+    """
     settings = get_settings()
     area = area or detect_work_area()
     gap = settings.window_tile_gap if gap is None else gap
@@ -121,7 +93,7 @@ def chrome_geometry_args(rect: Rect) -> list[str]:
 
 
 def place_window_by_pid(pid: int, rect: Rect) -> dict:
-    """Best-effort move/resize via wmctrl/xdotool (X11 / XWayland)."""
+    """UNUSED by launch/tile path (CDP-only Approach A). Kept for emergency diagnostics only."""
     result = {"ok": False, "method": None, "error": None, "pid": pid, "rect": rect.__dict__}
     # Prefer xdotool search by pid
     if shutil.which("xdotool"):

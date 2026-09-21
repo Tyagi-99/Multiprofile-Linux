@@ -10,7 +10,8 @@ from typing import Any
 
 from .audit import audit_log
 from .browser import manager as browser_manager
-from .browser.window_layout import compute_layout, detect_work_area
+from .browser.layout_manager import get_layout_manager
+from .browser.work_area import WorkAreaError
 from .config import get_settings
 from .storage.profiles import set_runtime
 
@@ -63,6 +64,7 @@ def create_job(
     url: str | None = None,
     direct: bool = False,
     cdp: bool = False,
+    tile_required: bool = False,
 ) -> dict[str, Any]:
     if job_type not in JOB_TYPES:
         raise ValueError(f"unsupported job type: {job_type}")
@@ -78,10 +80,12 @@ def create_job(
         "url": url,
         "direct": bool(direct),
         "cdp": bool(cdp),
+        "tileRequired": bool(tile_required),
         "status": "queued",
         "progress": 0,
         "total": len(ids),
         "results": [],
+        "tile": None,
         "error": None,
         "createdAt": _now(),
         "startedAt": None,
@@ -158,14 +162,33 @@ def _run_job(job_id: str) -> None:
 
     if jtype in ("launch_profile", "bulk_launch"):
         settings = get_settings()
-        tile_n = min(len(ids), settings.max_concurrent_profiles)
-        rects = []
-        if settings.window_tiling_enabled and tile_n > 0:
+        tile_required = bool(job.get("tileRequired"))
+        layout_mgr = get_layout_manager()
+        # Fail-closed: validate work area + plan BEFORE any launch when required.
+        if tile_required and settings.window_tiling_enabled:
             try:
-                rects = compute_layout(tile_n, detect_work_area())
-            except Exception:
-                rects = []
-        running_idx = 0
+                layout_mgr.build_plan(ids)
+            except WorkAreaError as e:
+                with _lock:
+                    job["status"] = "failed"
+                    job["error"] = "work_area_unavailable"
+                    job["tile"] = {
+                        "ok": False,
+                        "error": "work_area_unavailable",
+                        "message": str(e),
+                        "reasons": e.reasons,
+                        "results": [],
+                    }
+                    job["finishedAt"] = _now()
+                return
+            except ValueError as e:
+                with _lock:
+                    job["status"] = "failed"
+                    job["error"] = "grid_unavailable"
+                    job["tile"] = {"ok": False, "error": "grid_unavailable", "message": str(e), "results": []}
+                    job["finishedAt"] = _now()
+                return
+        launched_ids: list[str] = []
         for i, pid in enumerate(ids):
             if _is_cancelled(job_id):
                 with _lock:
@@ -186,10 +209,9 @@ def _run_job(job_id: str) -> None:
                     pass
                 results.append({"profileId": pid, "ok": False, "error": "concurrency_timeout", "status": "failed"})
             else:
-                window_rect = rects[running_idx % len(rects)] if rects else None
                 try:
                     result = launch_profile(
-                        pid, url=url, direct=direct, cdp=cdp, _slot_held=True, window_rect=window_rect
+                        pid, url=url, direct=direct, cdp=cdp, _slot_held=True, window_rect=None
                     )
                     result = {**result, "profileId": pid}
                     results.append(result)
@@ -201,7 +223,7 @@ def _run_job(job_id: str) -> None:
                             pass
                     else:
                         browser_manager.mark_running(pid)
-                        running_idx += 1
+                        launched_ids.append(pid)
                 except Exception as e:
                     browser_manager.release_slot(pid)
                     try:
@@ -212,6 +234,36 @@ def _run_job(job_id: str) -> None:
             with _lock:
                 job["progress"] = i + 1
                 job["results"] = list(results)
+
+
+        # CDP tiling via WindowLayoutManager (sole geometry owner). Never kill browsers on tile failure.
+        tile_info: dict[str, Any] | None = None
+        if settings.window_tiling_enabled and launched_ids:
+            if tile_required:
+                try:
+                    plan = layout_mgr.build_plan(launched_ids)
+                    tile_info = layout_mgr.apply_plan(plan)
+                except WorkAreaError as e:
+                    tile_info = {
+                        "ok": False,
+                        "error": "work_area_unavailable",
+                        "message": str(e),
+                        "reasons": e.reasons,
+                        "results": [],
+                    }
+                except Exception as e:
+                    tile_info = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
+            else:
+                plan, meta = layout_mgr.best_effort_plan(launched_ids)
+                if plan is not None:
+                    try:
+                        tile_info = layout_mgr.apply_plan(plan)
+                    except Exception as e:
+                        tile_info = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
+                else:
+                    tile_info = meta
+        with _lock:
+            job["tile"] = tile_info
 
     elif jtype in ("stop_profile", "bulk_stop"):
         for i, pid in enumerate(ids):
@@ -233,10 +285,18 @@ def _run_job(job_id: str) -> None:
                 job["results"] = list(results)
 
     ok = all(r.get("ok") for r in results) if results else True
+    tile_info = None
+    with _lock:
+        tile_info = job.get("tile")
+    if bool(job.get("tileRequired")) and tile_info is not None and not tile_info.get("ok"):
+        ok = False
     with _lock:
         job["status"] = "completed" if ok else "failed"
         if not ok and not job.get("error"):
-            job["error"] = "one or more profiles failed"
+            if bool(job.get("tileRequired")) and tile_info is not None and not tile_info.get("ok"):
+                job["error"] = tile_info.get("error") or "tile_failed"
+            else:
+                job["error"] = "one or more profiles failed"
         job["results"] = results
         job["finishedAt"] = _now()
     audit_log(

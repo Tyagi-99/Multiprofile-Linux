@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0 — 2026-09-21
+### CDP window tiling (Approach A)
+- **Localhost-only CDP** (`--remote-debugging-address=127.0.0.1`) on every launch; ephemeral port per profile; cleared on stop.
+- **WindowLayoutManager** is the sole owner of slot geometry; `Browser.setWindowBounds` / `getWindowBounds` with ≤4px tolerance and max 3 retries.
+- **WorkAreaProvider** fail-loud (xprop `_NET_WORKAREA` → xdpyinfo → `MULTIPROFILE_WORKAREA`); never silent 1920×1080.
+- **Launch Selected** = best-effort tile; **`tileRequired`** / **`POST /api/windows/tile`** = fail-closed on missing work area; browsers are never auto-killed on tile failure.
+- **SPA**: Tile Windows button; profile rows expose `launchState` / `cdpPort` from the in-memory runtime registry (no DB migration).
+- **Exclusivity** remains ON by default (`--disable-extensions-except`).
+- Unit tests for grid N∈{1..20}, work-area fail-loud, runtime transitions, idempotent plans. Live CDP smoke gated by `MULTIPROFILE_CDP_TILE_TESTS=1`.
+
+
 ## 1.3.0 — 2026-09-21
 ### Phase 2 browser runtime (anti-detect exclusivity preserved)
 - **Exclusivity ON by default** (AdsPower-class): Chrome still launches with `--disable-extensions-except=<anti-detect>` so only the built-in anti-detect extension loads. Chrome Web Store / extra extensions are deferred (`MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS=1` opt-in only — not recommended for production fingerprinting).

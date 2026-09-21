@@ -142,6 +142,22 @@ def load_profiles() -> list[dict[str, Any]]:
             p["isRunning"] = p.get("status") == "running" and bool(p.get("pid"))
             p["isQueued"] = p.get("status") == "queued"
             p["isFailed"] = p.get("status") == "failed"
+            # Runtime registry (in-memory) — no DB migration
+            try:
+                from ..browser.runtime_state import get_runtime
+
+                rt = get_runtime(p.get("id") or "")
+                if rt:
+                    p["launchState"] = (
+                        rt.launch_state.value if hasattr(rt.launch_state, "value") else rt.launch_state
+                    )
+                    p["cdpPort"] = rt.cdp_port
+                else:
+                    p.setdefault("launchState", None)
+                    p.setdefault("cdpPort", None)
+            except Exception:
+                p.setdefault("launchState", None)
+                p.setdefault("cdpPort", None)
         return items
 
 

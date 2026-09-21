@@ -1,3 +1,11 @@
+multiprofile-native (1.4.0) unstable; urgency=medium
+
+  * CDP window tiling (Approach A): localhost-only Browser.setWindowBounds,
+    WindowLayoutManager sole geometry owner, fail-loud WorkAreaProvider,
+    Tile Windows API/UI, no xdotool/wmctrl fallback.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Mon, 21 Sep 2026 12:30:00 +0530
+
 multiprofile-native (1.3.0) unstable; urgency=medium
 
   * Phase 2 browser runtime: sandbox probe (drop hardcoded --no-sandbox when safe),

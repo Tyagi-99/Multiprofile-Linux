@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from multiprofile import __version__
-assert __version__ == "1.3.0", __version__
+assert __version__ == "1.4.0", __version__
 
 from multiprofile.fingerprint import build_fingerprint, normalize_seed, fingerprint_report
 from multiprofile.proxy_util import parse_proxy, proxy_server_arg
@@ -73,7 +73,7 @@ c = app.test_client()
 h = c.get("/api/health")
 assert h.status_code == 200
 hj = h.get_json()
-assert hj["version"] == "1.3.0", hj
+assert hj["version"] == "1.4.0", hj
 assert hj.get("static_ok") is True
 assert hj.get("extension_ok") is True
 assert "slots" in hj
@@ -189,7 +189,7 @@ assert got.get("clientId") in (None, "")
 d = c.delete(f"/api/profiles/{pid}?purgeStorage=1")
 assert d.status_code == 200
 
-print("OK: 1.3.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
+print("OK: 1.4.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
 PY
 
 # --- Phase 2 browser runtime (anti-detect exclusivity preserved) ---
@@ -245,3 +245,8 @@ PY2
 
 
 echo "ALL TESTS PASSED"
+
+
+# CDP tiling unit tests (no Chrome required)
+PYTHONPATH=src python3 -m pytest tests/test_grid_layout.py tests/test_work_area.py tests/test_runtime_state.py tests/test_tile_idempotent.py tests/test_cdp_window_smoke.py -q
+

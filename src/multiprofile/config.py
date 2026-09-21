@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 
 
-def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int = 64) -> int:
+def _env_int(name: str, default: int, *, minimum: int = 0, maximum: int = 10_000) -> int:
     raw = os.environ.get(name)
     if raw is None or str(raw).strip() == "":
         return default
@@ -31,30 +31,30 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     """Process-wide settings (immutable snapshot)."""
 
-    # Max Chrome profiles running at once (queue holds the rest).
     max_concurrent_profiles: int = 20
-    # Allow Chrome Web Store / extra extensions.
-    # DEFAULT FALSE — keep AdsPower-class anti-detect exclusivity
-    # (--disable-extensions-except). Opt-in later when we design a safe path.
+    # DEFAULT FALSE — AdsPower-class anti-detect exclusivity.
     allow_webstore_extensions: bool = False
-    # Force --no-sandbox even when probe says sandbox works (debug only).
     force_no_sandbox: bool = False
-    # Prefer real sandbox when probe succeeds.
     prefer_sandbox: bool = True
-    # Window tiling gap in pixels.
-    window_tile_gap: int = 8
-    # Enable window tiling on launch.
+    window_tile_gap: int = 6
+    window_tile_margin: int = 0
+    window_tile_tolerance_px: int = 4
+    window_tile_max_retries: int = 3
+    window_tile_settle_ms: int = 200
     window_tiling_enabled: bool = True
 
 
 def get_settings() -> Settings:
     return Settings(
         max_concurrent_profiles=_env_int("MAX_CONCURRENT_PROFILES", 20, minimum=1, maximum=64),
-        # Explicit opt-in only — exclusivity is the product default
         allow_webstore_extensions=_env_bool("MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", False),
         force_no_sandbox=_env_bool("MULTIPROFILE_FORCE_NO_SANDBOX", False),
         prefer_sandbox=_env_bool("MULTIPROFILE_PREFER_SANDBOX", True),
-        window_tile_gap=_env_int("MULTIPROFILE_WINDOW_TILE_GAP", 8, minimum=0, maximum=64),
+        window_tile_gap=_env_int("MULTIPROFILE_WINDOW_TILE_GAP", 6, minimum=0, maximum=64),
+        window_tile_margin=_env_int("MULTIPROFILE_WINDOW_TILE_MARGIN", 0, minimum=0, maximum=64),
+        window_tile_tolerance_px=_env_int("MULTIPROFILE_WINDOW_TILE_TOLERANCE_PX", 4, minimum=0, maximum=32),
+        window_tile_max_retries=_env_int("MULTIPROFILE_WINDOW_TILE_MAX_RETRIES", 3, minimum=1, maximum=10),
+        window_tile_settle_ms=_env_int("MULTIPROFILE_WINDOW_TILE_SETTLE_MS", 200, minimum=0, maximum=5000),
         window_tiling_enabled=_env_bool("MULTIPROFILE_WINDOW_TILING", True),
     )
 

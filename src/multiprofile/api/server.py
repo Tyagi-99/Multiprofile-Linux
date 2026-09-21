@@ -15,7 +15,9 @@ from ..backup import create_backup, list_backups, restore_backup
 from ..browser import manager as browser_manager
 from ..browser.launcher import extension_src, find_chrome, launch_profile, stop_profile
 from ..browser.sandbox import probe_sandbox
-from ..browser.window_layout import detect_work_area
+from ..browser.layout_manager import get_layout_manager
+from ..browser.runtime_state import get_runtime
+from ..browser.work_area import WorkAreaError, WorkAreaProvider
 from ..config import get_settings
 from ..cookies_store import (
     export_cookies_json,
@@ -103,6 +105,20 @@ def _start_reaper() -> None:
     threading.Thread(target=_loop, name="mp-reaper", daemon=True).start()
 
 
+def _with_launch_state(profiles: list) -> list:
+    out = []
+    for p in profiles:
+        q = dict(p)
+        rt = get_runtime(q.get("id") or "")
+        if rt:
+            q["launchState"] = rt.launch_state.value if hasattr(rt.launch_state, "value") else rt.launch_state
+            q["cdpPort"] = rt.cdp_port
+        else:
+            q.setdefault("launchState", None)
+            q.setdefault("cdpPort", None)
+        out.append(q)
+    return out
+
 def create_app() -> Flask:
     app = Flask(__name__)
     _start_reaper()
@@ -155,10 +171,12 @@ def create_app() -> Flask:
         except Exception as e:
             sandbox_info = {"ok": False, "reason": f"probe_failed: {e}"}
         try:
-            wa = detect_work_area()
-            work_area_info = {"x": wa.x, "y": wa.y, "w": wa.w, "h": wa.h, "source": wa.source}
+            wa = WorkAreaProvider().detect()
+            work_area_info = {"x": wa.x, "y": wa.y, "w": wa.w, "h": wa.h, "source": wa.source, "ok": True}
+        except WorkAreaError as e:
+            work_area_info = {"ok": False, "error": "work_area_unavailable", "message": str(e), "reasons": e.reasons}
         except Exception as e:
-            work_area_info = {"error": str(e)}
+            work_area_info = {"ok": False, "error": "work_area_unavailable", "message": str(e)}
 
         static_ok = False
         try:
@@ -220,7 +238,7 @@ def create_app() -> Flask:
     @app.get("/api/profiles")
     def profiles():
         if not request.args:
-            return jsonify(load_profiles())
+            return jsonify(_with_launch_state(load_profiles()))
         q = request.args.get("q")
         client_id = request.args.get("clientId")
         status = request.args.get("status")
@@ -233,8 +251,7 @@ def create_app() -> Flask:
             offset = int(request.args.get("offset", 0))
         except ValueError:
             offset = 0
-        return jsonify(
-            filter_profiles(
+        result = filter_profiles(
                 q=q,
                 client_id=client_id,
                 status=status,
@@ -242,7 +259,13 @@ def create_app() -> Flask:
                 limit=limit,
                 offset=offset,
             )
-        )
+        if isinstance(result, dict) and "items" in result:
+            result = dict(result)
+            result["items"] = _with_launch_state(result["items"])
+            return jsonify(result)
+        if isinstance(result, list):
+            return jsonify(_with_launch_state(result))
+        return jsonify(result)
 
     @app.post("/api/profiles")
     def profiles_create():
@@ -484,6 +507,11 @@ def create_app() -> Flask:
                 url=payload.get("url"),
                 direct=bool(payload.get("direct", False)),
                 cdp=bool(payload.get("cdp", False)),
+                tile_required=bool(
+                    payload.get("tileRequired")
+                    or (payload.get("options") or {}).get("tileRequired")
+                    or False
+                ),
             )
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
@@ -500,6 +528,29 @@ def create_app() -> Flask:
     def jobs_cancel(job_id: str):
         result = cancel_job(job_id)
         return jsonify(result), (200 if result.get("ok") else 404)
+
+
+    @app.post("/api/windows/tile")
+    def windows_tile():
+        """Fail-closed CDP tiling for running profiles. Never kills browsers."""
+        payload = request.get_json(force=True, silent=True) or {}
+        ids = payload.get("profileIds")
+        if isinstance(ids, str):
+            ids = [ids]
+        try:
+            result = get_layout_manager().tile_running(ids)
+        except Exception as e:
+            result = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
+        # Always 200 with ok flag — client decides; browsers stay up.
+        return jsonify(result)
+
+    @app.get("/api/windows/layout")
+    def windows_layout():
+        try:
+            snap = get_layout_manager().layout_snapshot()
+        except Exception as e:
+            snap = {"ok": False, "error": str(e), "profiles": []}
+        return jsonify(snap)
 
     @app.get("/api/backups")
     def backups_list():

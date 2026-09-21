@@ -18,7 +18,10 @@ from ..storage.profiles import get_profile, set_runtime, update_profile
 from ..storage.xdg import chrome_profile_dir
 from . import manager as browser_manager
 from .sandbox import sandbox_chrome_args
-from .window_layout import Rect, chrome_geometry_args, place_window_by_pid
+from .cdp_window import allocate_localhost_port, wait_for_cdp
+from .grid import Rect
+from .runtime_state import LaunchState, clear_runtime, set_launch_state, upsert_runtime
+from .window_layout import chrome_geometry_args  # weak hint only; no x11 place
 
 log = logging.getLogger("multiprofile.browser")
 
@@ -235,11 +238,13 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     if ua:
         cmd.append(f"--user-agent={ua}")
 
-    debug_port = None
+    # Always enable localhost-only CDP for tiling (never bind 0.0.0.0).
+    debug_port = allocate_localhost_port()
+    cmd.append("--remote-debugging-address=127.0.0.1")
+    cmd.append(f"--remote-debugging-port={debug_port}")
+    notes.append(f"CDP localhost-only on 127.0.0.1:{debug_port}")
     if cdp:
-        debug_port = _allocate_debug_port()
-        cmd.append(f"--remote-debugging-port={debug_port}")
-        notes.append(f"CDP enabled on port {debug_port}")
+        notes.append("Caller requested CDP (already allocated)")
     cmd.append(start)
 
     env = os.environ.copy()
@@ -255,6 +260,8 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     if rc is not None:
         err = (proc.stderr.read() or b"").decode("utf-8", "ignore")[-2500:]
         set_runtime(profile_id, "idle", None)
+        clear_runtime(profile_id)
+        set_launch_state(profile_id, LaunchState.LAUNCH_FAILED, error=f"chrome exit {rc}", error_code="chrome_exit_immediate")
         if slot_held:
             browser_manager.release_slot(profile_id)
         return {
@@ -273,17 +280,26 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
 
     set_runtime(profile_id, "running", proc.pid)
     browser_manager.mark_running(profile_id)
-    log.info("launched profile %s pid=%s url=%s", profile_id, proc.pid, start)
-    if window_rect is not None and settings.window_tiling_enabled:
-        try:
-            time.sleep(0.4)
-            place = place_window_by_pid(proc.pid, window_rect)
-            if place.get("ok"):
-                notes.append(f"Window placed via {place.get('method')}")
-            elif place.get("error"):
-                notes.append(f"Window place skipped: {place.get('error')}")
-        except Exception as e:
-            notes.append(f"Window place error: {e}")
+    upsert_runtime(profile_id, pid=proc.pid, cdp_port=debug_port)
+    set_launch_state(profile_id, LaunchState.LAUNCHING, pid=proc.pid, cdp_port=debug_port)
+    log.info("launched profile %s pid=%s url=%s cdp=%s", profile_id, proc.pid, start, debug_port)
+    try:
+        wait_for_cdp(debug_port, timeout_s=8.0)
+        set_launch_state(profile_id, LaunchState.CDP_READY, pid=proc.pid, cdp_port=debug_port)
+        notes.append(f"CDP ready on 127.0.0.1:{debug_port}")
+    except Exception as e:
+        set_launch_state(
+            profile_id,
+            LaunchState.CDP_FAILED,
+            pid=proc.pid,
+            cdp_port=debug_port,
+            error=str(e),
+            error_code="cdp_unreachable",
+        )
+        notes.append(f"CDP not ready: {e}")
+    # Browser stays up even if CDP failed; tiling may still fail later.
+    set_launch_state(profile_id, LaunchState.RUNNING, pid=proc.pid, cdp_port=debug_port)
+    # Geometry applied later by WindowLayoutManager via CDP (no xdotool/wmctrl).
     try:
         if proc.stderr:
             proc.stderr.close()
@@ -315,8 +331,13 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
         "useNoSandbox": sandbox_status.use_no_sandbox,
         "reason": sandbox_status.reason,
     }
-    if debug_port is not None:
-        out["debugPort"] = debug_port
+    out["debugPort"] = debug_port
+    out["cdpPort"] = debug_port
+    out["cdpHost"] = "127.0.0.1"
+    from .runtime_state import get_runtime
+    rt = get_runtime(profile_id)
+    if rt:
+        out["launchState"] = rt.launch_state.value
     return out
 
 
@@ -325,6 +346,7 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     pid = (profile or {}).get("pid")
     if not pid:
         set_runtime(profile_id, "idle", None)
+        clear_runtime(profile_id)
         browser_manager.release_slot(profile_id)
         return {"ok": True, "stopped": None, "note": "No running pid recorded"}
     try:
@@ -334,6 +356,7 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     except PermissionError as e:
         return {"error": f"Cannot stop pid {pid}: {e}", "errors": ["permission"]}
     set_runtime(profile_id, "idle", None)
+    clear_runtime(profile_id)
     browser_manager.release_slot(profile_id)
     return {"ok": True, "stopped": pid}
 

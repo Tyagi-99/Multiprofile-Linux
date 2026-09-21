@@ -1,9 +1,9 @@
 Package: multiprofile-native
-Version: 1.3.0
+Version: 1.4.0
 Section: utils
 Priority: optional
 Architecture: amd64
-Depends: python3 (>= 3.11), python3-flask, python3-pkg-resources
+Depends: python3 (>= 3.11), python3-flask, python3-pkg-resources, python3-websocket
 Recommends: chromium | chromium-browser | google-chrome-stable, python3-webview
 Maintainer: Multiprofile Native Maintainers <maintainers@localhost>
 Description: Native Linux Multiprofile manager

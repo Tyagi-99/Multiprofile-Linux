@@ -1,4 +1,22 @@
 
+async function tileWindows() {
+  showJobToast("Tiling windows via CDP…");
+  try {
+    const res = await apiFetch("/api/windows/tile", { method: "POST", body: "{}" });
+    const data = await res.json();
+    if (data.ok) {
+      const n = (data.results || []).filter((r) => r.ok).length;
+      showJobToast(`Tiled ${n} window(s) successfully`);
+    } else {
+      showJobToast(`Tile failed: ${data.error || data.message || "unknown error"}`);
+    }
+    await loadProfiles();
+  } catch (e) {
+    showJobToast(`Tile error: ${e.message || e}`);
+  }
+}
+
+
 async function refreshHealthBadge() {
   try {
     const res = await apiFetch("/api/health");
@@ -157,6 +175,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     tokInput.addEventListener("change", () => setApiToken(tokInput.value.trim()));
   }
   document.getElementById("btnBulkLaunch")?.addEventListener("click", () => bulkJob("bulk_launch"));
+  document.getElementById("btnTileWindows")?.addEventListener("click", () => tileWindows());
   document.getElementById("btnBulkStop")?.addEventListener("click", () => bulkJob("bulk_stop"));
   document.getElementById("clientFilter")?.addEventListener("change", loadProfiles);
   await loadAds();
@@ -477,6 +496,9 @@ function renderProfiles() {
       statusHtml = `<span class="cell-status status-failed" title="Last launch failed">Failed</span>`;
     } else {
       statusHtml = `<span class="cell-status status-off">Idle</span>`;
+    }
+    if (p.launchState && p.launchState !== "RUNNING" && p.launchState !== "CREATED") {
+      statusHtml += ` <span class="cell-launch-state" title="launchState" style="font-size:10px;opacity:.75;margin-left:4px;">${p.launchState}</span>`;
     }
 
     return `
