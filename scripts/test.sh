@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from multiprofile import __version__
-assert __version__ == "1.4.2", __version__
+assert __version__ == "1.4.3", __version__
 
 from multiprofile.fingerprint import build_fingerprint, normalize_seed, fingerprint_report
 from multiprofile.proxy_util import parse_proxy, proxy_server_arg
@@ -73,7 +73,7 @@ c = app.test_client()
 h = c.get("/api/health")
 assert h.status_code == 200
 hj = h.get_json()
-assert hj["version"] == "1.4.2", hj
+assert hj["version"] == "1.4.3", hj
 assert hj.get("static_ok") is True
 assert hj.get("extension_ok") is True
 assert "slots" in hj
@@ -189,7 +189,7 @@ assert got.get("clientId") in (None, "")
 d = c.delete(f"/api/profiles/{pid}?purgeStorage=1")
 assert d.status_code == 200
 
-print("OK: 1.4.2 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
+print("OK: 1.4.3 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
 PY
 
 # --- Phase 2 browser runtime (anti-detect exclusivity preserved) ---

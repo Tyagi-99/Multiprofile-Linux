@@ -1,3 +1,10 @@
+multiprofile-native (1.4.3) unstable; urgency=medium
+
+  * Edge-to-edge tiling: default gap/margin 0, remainder pixels distributed
+    so adjacent outer window bounds touch and fill the work area.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Mon, 21 Sep 2026 14:10:00 +0530
+
 multiprofile-native (1.4.2) unstable; urgency=medium
 
   * Force X11/XWayland so CDP window tiling actually moves Chrome windows

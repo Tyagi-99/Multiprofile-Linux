@@ -36,7 +36,7 @@ class Settings:
     allow_webstore_extensions: bool = False
     force_no_sandbox: bool = False
     prefer_sandbox: bool = True
-    window_tile_gap: int = 6
+    window_tile_gap: int = 0
     window_tile_margin: int = 0
     window_tile_tolerance_px: int = 4
     window_tile_max_retries: int = 3
@@ -50,7 +50,7 @@ def get_settings() -> Settings:
         allow_webstore_extensions=_env_bool("MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", False),
         force_no_sandbox=_env_bool("MULTIPROFILE_FORCE_NO_SANDBOX", False),
         prefer_sandbox=_env_bool("MULTIPROFILE_PREFER_SANDBOX", True),
-        window_tile_gap=_env_int("MULTIPROFILE_WINDOW_TILE_GAP", 6, minimum=0, maximum=64),
+        window_tile_gap=_env_int("MULTIPROFILE_WINDOW_TILE_GAP", 0, minimum=0, maximum=64),
         window_tile_margin=_env_int("MULTIPROFILE_WINDOW_TILE_MARGIN", 0, minimum=0, maximum=64),
         window_tile_tolerance_px=_env_int("MULTIPROFILE_WINDOW_TILE_TOLERANCE_PX", 4, minimum=0, maximum=32),
         window_tile_max_retries=_env_int("MULTIPROFILE_WINDOW_TILE_MAX_RETRIES", 3, minimum=1, maximum=10),

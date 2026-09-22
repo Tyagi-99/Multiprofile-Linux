@@ -1,3 +1,7 @@
+## 1.4.3
+
+- Edge-to-edge tiling: default `gap=0` / `margin=0`. Remainder pixels are distributed so adjacent outer bounds touch and the grid consumes the full work area. No overlap.
+
 ## 1.4.2
 
 - Force Chrome onto X11/XWayland (`--ozone-platform=x11`) so `Browser.setWindowBounds` actually tiles windows. On Wayland, CDP reported success while the compositor left windows cascaded.

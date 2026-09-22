@@ -67,11 +67,37 @@ def validate_within_work_area(rects: list[Rect], area: WorkArea) -> dict:
     return {"valid": not off, "offscreen": off}
 
 
-def validate_equal_sizes(rects: list[Rect]) -> bool:
+def validate_equal_sizes(rects: list[Rect], *, slack: int = 1) -> bool:
+    """Nearly equal cards. Remainder pixels may make sizes differ by 1px."""
     if not rects:
         return True
-    w0, h0 = rects[0].w, rects[0].h
-    return all(r.w == w0 and r.h == h0 for r in rects)
+    ws = [r.w for r in rects]
+    hs = [r.h for r in rects]
+    return max(ws) - min(ws) <= slack and max(hs) - min(hs) <= slack
+
+
+def split_axis(origin: int, length: int, count: int, gap: int = 0) -> list[tuple[int, int]]:
+    """Split `length` into `count` touching (or gapped) segments.
+
+    Remainder pixels are distributed by floor((i+1)*space/count) so the
+    first edge is `origin` and the last edge is `origin + length`.
+    `gap` is applied only *between* cells, never as outer margin.
+    """
+    if count <= 0 or length < count:
+        return []
+    gap = max(0, int(gap))
+    cell_space = length - gap * (count - 1)
+    if cell_space < count:
+        return []
+    out: list[tuple[int, int]] = []
+    for i in range(count):
+        start = origin + i * gap + (i * cell_space) // count
+        end = origin + i * gap + ((i + 1) * cell_space) // count
+        size = end - start
+        if size < 1:
+            return []
+        out.append((start, size))
+    return out
 
 
 def _score(cols: int, rows: int, n: int, area: WorkArea, cell_w: int, cell_h: int) -> float:
@@ -110,14 +136,19 @@ class GridCalculator:
         best: SlotPlan | None = None
         best_score = float("inf")
 
+        ox = work_area.x + margin
+        oy = work_area.y + margin
+        ow = work_area.w - 2 * margin
+        oh = work_area.h - 2 * margin
+
         for cols in range(1, n + 1):
             rows = math.ceil(n / cols)
-            inner_w = work_area.w - 2 * margin - gap * (cols + 1)
-            inner_h = work_area.h - 2 * margin - gap * (rows + 1)
-            if inner_w < n or inner_h < 1:
+            col_parts = split_axis(ox, ow, cols, gap=gap)
+            row_parts = split_axis(oy, oh, rows, gap=gap)
+            if not col_parts or not row_parts:
                 continue
-            cell_w = inner_w // cols
-            cell_h = inner_h // rows
+            cell_w = min(w for _, w in col_parts)
+            cell_h = min(h for _, h in row_parts)
             if cell_w < 80 or cell_h < 60:
                 continue
 
@@ -126,9 +157,9 @@ class GridCalculator:
             for i, pid in enumerate(profile_ids):
                 c = i % cols
                 r = i // cols
-                x = work_area.x + margin + gap + c * (cell_w + gap)
-                y = work_area.y + margin + gap + r * (cell_h + gap)
-                rect = Rect(x, y, cell_w, cell_h)
+                x, cw = col_parts[c]
+                y, ch = row_parts[r]
+                rect = Rect(x, y, cw, ch)
                 # Priority 2: fully inside
                 if (
                     rect.x < work_area.x
@@ -145,7 +176,7 @@ class GridCalculator:
             # Priority 1: no overlap
             if not validate_no_overlap(rects)["valid"]:
                 continue
-            # Priority 3: equal sizes (by construction)
+            # Priority 3: nearly equal sizes (remainder may differ by 1px)
             if not validate_equal_sizes(rects):
                 continue
             score = _score(cols, rows, n, work_area, cell_w, cell_h)

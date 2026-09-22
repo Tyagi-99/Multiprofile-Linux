@@ -8,8 +8,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from ..config import get_settings
-
 log = logging.getLogger("multiprofile.browser.window_layout")
 
 
@@ -63,26 +61,15 @@ def choose_grid(n: int, area: WorkArea) -> tuple[int, int]:
 
 
 def compute_layout(n: int, area: WorkArea | None = None, gap: int | None = None) -> list[Rect]:
-    """Deprecated for tiling authority — prefer WindowLayoutManager / GridCalculator.
-    Still used only as a pure math helper; detect_work_area() is fail-loud.
-    """
-    settings = get_settings()
+    """Deprecated for tiling authority — prefer WindowLayoutManager / GridCalculator."""
+    from .grid import GridCalculator
+    from .work_area import WorkArea as ProviderWorkArea
+
     area = area or detect_work_area()
-    gap = settings.window_tile_gap if gap is None else gap
-    n = max(1, n)
-    cols, rows = choose_grid(n, area)
-    usable_w = max(100, area.w - gap * (cols + 1))
-    usable_h = max(100, area.h - gap * (rows + 1))
-    cell_w = usable_w // cols
-    cell_h = usable_h // rows
-    rects: list[Rect] = []
-    for i in range(n):
-        c = i % cols
-        r = i // cols
-        x = area.x + gap + c * (cell_w + gap)
-        y = area.y + gap + r * (cell_h + gap)
-        rects.append(Rect(x, y, cell_w, cell_h))
-    return rects
+    provider = ProviderWorkArea(area.x, area.y, area.w, area.h, area.source)
+    ids = [str(i) for i in range(max(1, n))]
+    plan = GridCalculator().plan(ids, provider, gap=gap)
+    return [Rect(s.rect.x, s.rect.y, s.rect.w, s.rect.h) for s in plan.slots]
 
 
 def chrome_geometry_args(rect: Rect) -> list[str]:
