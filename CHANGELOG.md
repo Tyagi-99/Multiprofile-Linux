@@ -1,7 +1,34 @@
+## 1.5.0
+
+- **Network Isolation & Fail-Closed Pre-Launch Gate**:
+  - Implemented `NetworkConfig` with modes (`DIRECT`, `HTTP_PROXY`, `HTTPS_PROXY`, `SOCKS5`, `REMOTE_GATEWAY`) and policies (`DNSPolicy`, `IPv6Policy`, `WebRTCPolicy`, `ProxyFallback`).
+  - Added `ProxyHealthManager` pre-launch validation: TCP handshake + HTTP egress verification. Configured proxies fail closed (`ProxyFallback.BLOCK` default) to prevent silent host IP leaks.
+  - Transparent migration from legacy proxy fields to `NetworkConfig`.
+  - Credentials stripped from CLI flags and passed securely via per-profile extension `proxy.json` and `onAuthRequired`.
+- **Remote Gateway Architecture**:
+  - Modular `RemoteNetworkProvider` interface.
+  - Production-ready `CustomGatewayProvider` for HTTP/SOCKS5 endpoints.
+  - Transparent `AzureGatewayProvider` scaffold with explicit manual setup documentation (no false claims of automated cloud egress).
+  - Storage in `gateways.json` with strict `0600` permissions and password masking in all API responses.
+- **Identity & Fingerprint Consistency**:
+  - Dual-tier alignment: CDP `Network.setUserAgentOverride` with Client Hints (`userAgentMetadata`) synchronizes wire HTTP headers with DOM properties.
+  - Hardware GPU probing (`/dev/dri`) resolves real GPU vs SwiftShader without `--disable-gpu` self-contradictions.
+  - Added desktop Chrome `navigator.plugins` (3 PDF plugins) and `window.chrome` (`loadTimes`, `csi`, `app`, `runtime`).
+  - Added stable per-seed media device IDs (`audioinput`, `audiooutput`, `videoinput`).
+  - Removed detection signal `console.log` from `evasion.js`.
+- **Encrypted Backups & Manifest V2**:
+  - Optional AES-256-GCM encrypted backups (`.mp_enc`) with PBKDF2-HMAC-SHA256 key derivation (600,000 iterations).
+  - Plaintext backwards compatibility maintained.
+  - Backup Manifest V2 includes version, creation timestamp, profile/client IDs, encryption metadata, and SHA-256 checksums without leaking passwords.
+- **Profile Health & Observability**:
+  - Live `ProfileHealth` model and `GET /api/profiles/<id>/health` and bulk `/api/health/profiles` endpoints.
+  - Clone modes (`config_only`, `config_and_cookies`, `full_session`) with deterministic fresh seed generation.
+
 ## 1.4.6
 
 - Do not silently launch GitHub Cloud Runner profiles on the home IP. Connecting a PAT does not provide an Azure/datacenter proxy; launch fails with instructions to use Custom Proxy or Direct.
 - Apply canvas/WebGL noise inside Web Workers (CreepJS reads canvas there, which previously leaked the real GPU fingerprint across profiles).
+
 
 ## 1.4.5
 

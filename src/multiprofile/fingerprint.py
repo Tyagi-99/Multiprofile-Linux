@@ -30,6 +30,17 @@ def _pick(seed: int, salt: int, choices: list):
     return choices[idx]
 
 
+def _hex_id(rng_val: float) -> str:
+    """Generate a stable hex media device ID from a deterministic float.
+
+    Converts a 0..1 float to a 64-char hex string — same format as real
+    browser-generated device IDs.
+    """
+    import struct
+    raw = struct.pack(">d", rng_val)
+    return hashlib.sha256(raw).hexdigest()
+
+
 # Platform pools — UA must agree with platform/touch/screen
 _DESKTOP_WIN = {
     "platform": "Win32",
@@ -172,6 +183,29 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
 
     ua_full = _chrome_version(ua)
     major = ua_full.split(".")[0] if ua_full else "131"
+    try:
+        major_int = int(major)
+    except ValueError:
+        major_int = 131
+
+    ch_brands = [
+        {"brand": "Google Chrome", "version": str(major_int)},
+        {"brand": "Chromium", "version": str(major_int)},
+        {"brand": "Not-A.Brand", "version": "99"},
+    ]
+    ch_full_version_list = [
+        {"brand": "Google Chrome", "version": ua_full},
+        {"brand": "Chromium", "version": ua_full},
+        {"brand": "Not-A.Brand", "version": "99.0.0.0"},
+    ]
+
+    # Stable per-seed media device IDs — deterministic, not random on each call
+    rng_dev = _rng(seed, 20)
+    media_device_ids = {
+        "audioinput": _hex_id(rng_dev),
+        "audiooutput": _hex_id(rng_dev),
+        "videoinput": _hex_id(rng_dev),
+    }
 
     fp = {
         "seed": seed,
@@ -186,6 +220,17 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         "timezone": tz,
         "webrtcPolicy": webrtc,
         "webrtcMode": webrtc,
+        # Top-level client hint fields for CDP identity module
+        "ch_platform": pool["ch_platform"],
+        "ch_brands": ch_brands,
+        "ch_full_version_list": ch_full_version_list,
+        "architecture": pool["architecture"],
+        "bitness": pool["bitness"],
+        "platformVersion": pool["platformVersion"],
+        "model": pool.get("model") or "",
+        # Stable media device IDs per profile
+        "mediaDeviceIds": media_device_ids,
+        # Nested client hints (legacy field, kept for extension compatibility)
         "clientHints": {
             "platform": pool["ch_platform"],
             "mobile": pool["touch"] > 0,
@@ -194,11 +239,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
             "platformVersion": pool["platformVersion"],
             "model": pool.get("model") or "",
             "uaFullVersion": ua_full,
-            "brands": [
-                {"brand": "Chromium", "version": major},
-                {"brand": "Google Chrome", "version": major},
-                {"brand": "Not-A.Brand", "version": "99"},
-            ],
+            "brands": ch_brands,
         },
         "userAgent": ua,
         "isMobile": pool["touch"] > 0,

@@ -128,9 +128,8 @@
     } catch (e) {}
   }
 
-  try {
-    console.log(`%c[🛡️ Anti-Detect Defender Active] Device: ${TARGET_TOUCH > 0 ? 'Mobile' : 'Desktop'} | Platform: ${TARGET_PLATFORM} | GPU: ${TARGET_GPU_RENDERER} | CPU: ${TARGET_CORES} Cores | RAM: ${TARGET_MEMORY || 8}GB | TZ: ${TARGET_TIMEZONE} | IP: ${TARGET_IP || 'Direct'} | Screen: ${SCREEN_W}x${SCREEN_H} | seed=${PROFILE_SEED}`, 'color: #10b981; font-weight: bold;');
-  } catch(e) {}
+  // NOTE: No console.log — logging extension activity is a detection signal.
+
 
   // Deterministic noise generator
   function getNoiseValue(index) {
@@ -980,5 +979,172 @@
   // Apply to main window
   applyTimezoneSpoofs(window);
   applyWebRTCSpoofs(window);
+
+  // ==========================================
+  // NAVIGATOR.PLUGINS + MIMETYPES CONSISTENCY
+  // ==========================================
+  // Purpose: Desktop Chrome exposes 3 built-in plugin entries.
+  //          A completely empty navigator.plugins is an automation signal.
+  // Scope:   MAIN world, document_start.
+  // Rollback: Remove this block only — other spoofs are independent.
+  try {
+    // Only add plugins for desktop profiles (touch=0)
+    if (TARGET_TOUCH === 0) {
+      const fakePlugin = (name, filename, desc, mimeTypes) => {
+        const p = Object.create(Plugin.prototype);
+        Object.defineProperty(p, 'name', { get: () => name, enumerable: true });
+        Object.defineProperty(p, 'filename', { get: () => filename, enumerable: true });
+        Object.defineProperty(p, 'description', { get: () => desc, enumerable: true });
+        Object.defineProperty(p, 'length', { get: () => mimeTypes.length, enumerable: true });
+        mimeTypes.forEach((mt, i) => { p[i] = mt; });
+        return p;
+      };
+      const fakeMime = (type, desc, suffixes) => {
+        const m = Object.create(MimeType.prototype);
+        Object.defineProperty(m, 'type', { get: () => type, enumerable: true });
+        Object.defineProperty(m, 'description', { get: () => desc, enumerable: true });
+        Object.defineProperty(m, 'suffixes', { get: () => suffixes, enumerable: true });
+        return m;
+      };
+      const pdfMime = fakeMime('application/pdf', 'Portable Document Format', 'pdf');
+      const pdfXMime = fakeMime('application/x-google-chrome-pdf', 'Portable Document Format', 'pdf');
+      const plugin1 = fakePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format', [pdfMime]);
+      const plugin2 = fakePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format', [pdfXMime]);
+      const plugin3 = fakePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format', [pdfMime]);
+      const fakePL = Object.create(PluginArray.prototype);
+      Object.defineProperty(fakePL, 'length', { get: () => 3, enumerable: true });
+      [plugin1, plugin2, plugin3].forEach((p, i) => { fakePL[i] = p; });
+      fakePL.item = i => fakePL[i] || null;
+      fakePL.namedItem = n => [plugin1, plugin2, plugin3].find(p => p.name === n) || null;
+      fakePL.refresh = () => {};
+      makeNative(fakePL.item, 'item');
+      makeNative(fakePL.namedItem, 'namedItem');
+      makeNative(fakePL.refresh, 'refresh');
+      Object.defineProperty(Navigator.prototype, 'plugins', {
+        get: makeNative(() => fakePL, 'get plugins'),
+        configurable: true, enumerable: true
+      });
+      const fakeML = Object.create(MimeTypeArray.prototype);
+      Object.defineProperty(fakeML, 'length', { get: () => 2, enumerable: true });
+      fakeML[0] = pdfMime; fakeML[1] = pdfXMime;
+      fakeML.item = i => fakeML[i] || null;
+      fakeML.namedItem = n => [pdfMime, pdfXMime].find(m => m.type === n) || null;
+      makeNative(fakeML.item, 'item');
+      makeNative(fakeML.namedItem, 'namedItem');
+      Object.defineProperty(Navigator.prototype, 'mimeTypes', {
+        get: makeNative(() => fakeML, 'get mimeTypes'),
+        configurable: true, enumerable: true
+      });
+    }
+  } catch(e) {}
+
+  // ==========================================
+  // WINDOW.CHROME SUPPLEMENT
+  // ==========================================
+  // Purpose: Real Chrome exposes window.chrome with loadTimes, csi, app.
+  //          Missing or empty window.chrome is an automation indicator.
+  // Scope:   MAIN world only; does not apply to workers.
+  try {
+    if (!window.chrome || typeof window.chrome !== 'object') {
+      window.chrome = {};
+    }
+    if (!window.chrome.app) {
+      window.chrome.app = {
+        isInstalled: false,
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+        getDetails: makeNative(function() { return null; }, 'getDetails'),
+        getIsInstalled: makeNative(function() { return false; }, 'getIsInstalled'),
+        runningState: makeNative(function() { return 'cannot_run'; }, 'runningState'),
+      };
+    }
+    if (!window.chrome.runtime) {
+      window.chrome.runtime = { PlatformOs: {}, PlatformArch: {}, PlatformNaclArch: {} };
+    }
+    if (!window.chrome.loadTimes) {
+      window.chrome.loadTimes = makeNative(function() {
+        const t = performance.timing;
+        return {
+          requestTime: t.requestStart / 1000,
+          startLoadTime: t.navigationStart / 1000,
+          commitLoadTime: t.responseStart / 1000,
+          finishDocumentLoadTime: t.domContentLoadedEventEnd / 1000,
+          finishLoadTime: t.loadEventEnd / 1000,
+          firstPaintTime: t.responseStart / 1000,
+          firstPaintAfterLoadTime: 0,
+          navigationType: 'Other',
+          wasFetchedViaSpdy: false,
+          wasNpnNegotiated: true,
+          npnNegotiatedProtocol: 'h2',
+          wasAlternateProtocolAvailable: false,
+          connectionInfo: 'h2',
+        };
+      }, 'loadTimes');
+    }
+    if (!window.chrome.csi) {
+      window.chrome.csi = makeNative(function() {
+        return {
+          startE: performance.timing.navigationStart,
+          onloadT: performance.timing.loadEventEnd,
+          pageT: performance.now(),
+          tran: 15,
+        };
+      }, 'csi');
+    }
+  } catch(e) {}
+
+  // ==========================================
+  // NAVIGATOR.CONNECTION (NetworkInformation)
+  // ==========================================
+  // Purpose: Expose a realistic NetworkInformation object.
+  //          Absence on desktop Chrome is a fingerprint gap.
+  // Scope:   MAIN world only.
+  try {
+    if ('connection' in navigator) {
+      const conn = navigator.connection;
+      if (conn) {
+        // Only override if already exists — don't create from scratch
+        try {
+          Object.defineProperty(conn, 'downlink', { get: makeNative(() => 10, 'get downlink'), configurable: true });
+          Object.defineProperty(conn, 'effectiveType', { get: makeNative(() => '4g', 'get effectiveType'), configurable: true });
+          Object.defineProperty(conn, 'rtt', { get: makeNative(() => 50, 'get rtt'), configurable: true });
+          Object.defineProperty(conn, 'saveData', { get: makeNative(() => false, 'get saveData'), configurable: true });
+        } catch(e) {}
+      }
+    }
+  } catch(e) {}
+
+  // ==========================================
+  // STABLE MEDIA DEVICE IDs
+  // ==========================================
+  // Purpose: Real browsers return stable device IDs per origin after permission grant.
+  //          Randomised IDs on every call is an automation signal.
+  //          We intercept enumerateDevices and return seeded stable IDs.
+  // Limitation: IDs change on permission revoke in real Chrome too.
+  // Scope:   MAIN world.
+  try {
+    const MP_DEVICE_IDS = (typeof __MP_INLINE_CFG__ !== 'undefined' && __MP_INLINE_CFG__.mediaDeviceIds)
+      ? __MP_INLINE_CFG__.mediaDeviceIds
+      : { audioinput: null, audiooutput: null, videoinput: null };
+
+    if (MP_DEVICE_IDS.audioinput && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+      const origEnum = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+      navigator.mediaDevices.enumerateDevices = makeNative(async function() {
+        try {
+          const devices = await origEnum();
+          // Replace device IDs with stable seeded values
+          return devices.map((dev, i) => {
+            let stableId = dev.deviceId;
+            if (dev.kind === 'audioinput' && MP_DEVICE_IDS.audioinput) stableId = MP_DEVICE_IDS.audioinput;
+            if (dev.kind === 'audiooutput' && MP_DEVICE_IDS.audiooutput) stableId = MP_DEVICE_IDS.audiooutput;
+            if (dev.kind === 'videoinput' && MP_DEVICE_IDS.videoinput) stableId = MP_DEVICE_IDS.videoinput;
+            return { kind: dev.kind, label: dev.label, deviceId: stableId, groupId: dev.groupId };
+          });
+        } catch(e) {
+          return origEnum();
+        }
+      }, 'enumerateDevices');
+    }
+  } catch(e) {}
 
 })();

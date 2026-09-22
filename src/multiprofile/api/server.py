@@ -34,16 +34,6 @@ from ..storage.clients import (
     load_clients,
     update_client,
 )
-from ..storage.profiles import (
-    create_profile,
-    delete_profile,
-    duplicate_profile,
-    filter_profiles,
-    get_profile,
-    load_profiles,
-    reap_orphans,
-    update_profile,
-)
 from ..storage.templates import (
     create_template,
     delete_template,
@@ -59,6 +49,28 @@ from ..storage.github_accounts import (
     set_default as gh_set_default,
     verify_account as gh_verify_account,
 )
+from ..storage.gateways import (
+    create_gateway,
+    delete_gateway,
+    get_gateway,
+    load_gateways,
+    update_gateway,
+    resolve_gateway,
+)
+from ..storage.profiles import (
+    clone_profile,
+    create_profile,
+    delete_profile,
+    duplicate_profile,
+    filter_profiles,
+    get_profile,
+    load_profiles,
+    reap_orphans,
+    update_profile,
+)
+from ..network import network_config_for_profile, check_proxy_before_launch, ProxyConfig
+from ..browser.health import get_profile_health, get_all_health
+
 from ..storage.xdg import chrome_profile_dir, data_dir, profiles_path
 from .user_agents import USER_AGENTS
 
@@ -346,9 +358,13 @@ def create_app() -> Flask:
     def profiles_backup(profile_id: str):
         payload = request.get_json(force=True, silent=True) or {}
         include = payload.get("includeUserData", True)
-        result = create_backup(profile_id, include_user_data=bool(include))
+        passphrase = payload.get("passphrase") or None
+        result = create_backup(profile_id, include_user_data=bool(include), passphrase=passphrase)
+        # Never return passphrase in response
+        result.pop("passphrase", None)
         code = 200 if result.get("ok") else 404
         return jsonify(result), code
+
 
     @app.post("/api/profiles/from-template")
     def profiles_from_template():
@@ -566,12 +582,18 @@ def create_app() -> Flask:
     @app.post("/api/backups/restore")
     def backups_restore():
         payload = request.get_json(force=True, silent=True) or {}
+        # passphrase is consumed here and never forwarded to logs or audit
+        passphrase = payload.get("passphrase") or None
         result = restore_backup(
             backup_path=payload.get("backupPath"),
             backup_id=payload.get("backupId"),
             profile_id=payload.get("profileId"),
+            passphrase=passphrase,
         )
+        # Ensure passphrase is never in the response
+        result.pop("passphrase", None)
         return jsonify(result), (200 if result.get("ok") else 400)
+
 
     @app.get("/api/audit")
     def audit_list():
@@ -685,6 +707,125 @@ def create_app() -> Flask:
     @app.post("/api/update/apply")
     def update_apply():
         return jsonify({"ok": False})
+
+    # ------------------------------------------------------------------ #
+    #  Clone profile                                                       #
+    # ------------------------------------------------------------------ #
+    @app.post("/api/profiles/<profile_id>/clone")
+    def profiles_clone(profile_id: str):
+        payload = request.get_json(force=True, silent=True) or {}
+        mode = payload.get("mode") or "config_only"
+        if mode not in ("config_only", "config_and_cookies", "full_session"):
+            return jsonify({"error": "mode must be config_only|config_and_cookies|full_session"}), 400
+        cloned = clone_profile(profile_id, mode=mode, name=payload.get("name"))
+        if not cloned:
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_clone", profile_id=profile_id, ok=True, detail={"mode": mode, "newId": cloned.get("id")})
+        return jsonify({"ok": True, "profile": cloned, "mode": mode}), 201
+
+    # ------------------------------------------------------------------ #
+    #  Network health                                                      #
+    # ------------------------------------------------------------------ #
+    @app.get("/api/profiles/<profile_id>/network-health")
+    def profiles_network_health(profile_id: str):
+        profile = get_profile(profile_id)
+        if not profile:
+            return jsonify({"error": "not found"}), 404
+        net = network_config_for_profile(profile)
+        if not net.needs_proxy_check():
+            return jsonify({
+                "ok": True,
+                "mode": net.mode.value,
+                "status": "DIRECT",
+                "message": "Direct connection — no proxy configured",
+                "proxyHealth": None,
+            })
+        try:
+            timeout = float(request.args.get("timeout") or 8)
+            from ..network import check_proxy
+            result = check_proxy(net.proxy, timeout=timeout)
+            audit_log("proxy_test", profile_id=profile_id, ok=result.ok,
+                      detail={"latencyMs": result.latency_ms, "egressIp": result.egress_ip})
+            return jsonify({
+                "ok": result.ok,
+                "mode": net.mode.value,
+                "proxyHealth": result.to_dict(),
+                # Never expose credentials
+                "proxy": net.proxy.to_dict() if net.proxy else None,
+            })
+        except Exception as e:
+            return jsonify({"ok": False, "mode": net.mode.value, "error": str(e)}), 500
+
+    # ------------------------------------------------------------------ #
+    #  Profile health                                                      #
+    # ------------------------------------------------------------------ #
+    @app.get("/api/profiles/<profile_id>/health")
+    def profiles_health(profile_id: str):
+        if not get_profile(profile_id):
+            return jsonify({"error": "not found"}), 404
+        h = get_profile_health(profile_id)
+        return jsonify(h.to_dict())
+
+    @app.get("/api/health/profiles")
+    def all_profiles_health():
+        ids = request.args.getlist("id") or None
+        results = get_all_health(ids)
+        return jsonify({"ok": True, "profiles": results, "count": len(results)})
+
+    # ------------------------------------------------------------------ #
+    #  Gateways CRUD                                                       #
+    # ------------------------------------------------------------------ #
+    @app.get("/api/gateways")
+    def gateways_list():
+        return jsonify({"ok": True, "gateways": load_gateways(safe=True)})
+
+    @app.post("/api/gateways")
+    def gateways_create():
+        payload = request.get_json(force=True, silent=True) or {}
+        gw = create_gateway(payload)
+        audit_log("gateway_create", ok=True, detail={"gatewayId": gw.get("id"), "providerType": gw.get("providerType")})
+        return jsonify({"ok": True, "gateway": gw}), 201
+
+    @app.get("/api/gateways/<gw_id>")
+    def gateways_get(gw_id: str):
+        gw = get_gateway(gw_id, safe=True)
+        if not gw:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"ok": True, "gateway": gw})
+
+    @app.put("/api/gateways/<gw_id>")
+    def gateways_update(gw_id: str):
+        payload = request.get_json(force=True, silent=True) or {}
+        updated = update_gateway(gw_id, payload)
+        if not updated:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"ok": True, "gateway": updated})
+
+    @app.delete("/api/gateways/<gw_id>")
+    def gateways_delete(gw_id: str):
+        if not delete_gateway(gw_id):
+            return jsonify({"error": "not found"}), 404
+        audit_log("gateway_delete", ok=True, detail={"gatewayId": gw_id})
+        return jsonify({"ok": True})
+
+    @app.get("/api/gateways/<gw_id>/health")
+    def gateways_health(gw_id: str):
+        provider = resolve_gateway(gw_id)
+        if not provider:
+            return jsonify({"error": "not found"}), 404
+        try:
+            h = provider.health()
+            return jsonify({"ok": h.ok, "gatewayId": gw_id, "health": h.to_dict()})
+        except Exception as e:
+            return jsonify({"ok": False, "gatewayId": gw_id, "error": str(e)}), 500
+
+    @app.post("/api/gateways/<gw_id>/provision")
+    def gateways_provision(gw_id: str):
+        provider = resolve_gateway(gw_id)
+        if not provider:
+            return jsonify({"error": "not found"}), 404
+        result = provider.provision()
+        return jsonify(result), (200 if result.get("ok") else 400)
 
     @app.get("/")
     def index():

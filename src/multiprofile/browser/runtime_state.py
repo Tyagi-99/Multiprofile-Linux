@@ -37,6 +37,10 @@ class ProfileRuntime:
     error: str | None = None
     error_code: str | None = None
     updated_at: float = field(default_factory=time.time)
+    # Network health fields — populated after proxy probe
+    proxy_ok: bool | None = None
+    egress_ip: str | None = None
+    last_proxy_check: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

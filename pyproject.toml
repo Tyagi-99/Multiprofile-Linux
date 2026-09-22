@@ -1,6 +1,6 @@
 [project]
 name = "multiprofile-native"
-version = "1.4.6"
+version = "1.5.0"
 description = "Native Linux Multiprofile manager (clean-room host for authorized UI/extension assets)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -11,6 +11,8 @@ dependencies = [
 
 [project.optional-dependencies]
 ui = ["pywebview>=5.0"]
+encrypted-backup = ["cryptography>=42.0.0"]
+all = ["pywebview>=5.0", "cryptography>=42.0.0"]
 
 [project.scripts]
 multiprofile = "multiprofile.__main__:main"
@@ -24,3 +26,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 multiprofile = ["../static/*", "../extension/*"]
+
+[dependency-groups]
+dev = [
+    "cryptography>=50.0.1",
+    "pytest>=9.1.1",
+]

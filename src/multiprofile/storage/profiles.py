@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import logging
 import shutil
 import random
 import threading
@@ -10,6 +11,7 @@ from typing import Any
 
 from .xdg import profiles_path, runtime_state_path
 
+log = logging.getLogger("multiprofile.storage.profiles")
 _lock = threading.RLock()
 
 DEFAULT_PROFILES = [
@@ -258,21 +260,80 @@ def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
     return True
 
 
-def duplicate_profile(profile_id: str) -> dict[str, Any] | None:
+def clone_profile(
+    profile_id: str,
+    *,
+    mode: str = "config_only",
+    name: str | None = None,
+) -> dict[str, Any] | None:
+    """Clone a profile with explicit semantics.
+
+    Modes:
+        config_only          — copy configuration, generate new seed, no cookies/session
+        config_and_cookies   — copy config + cookies, generate new seed
+        full_session         — copy config + cookies + Chrome user-data-dir, new seed
+
+    The new profile always receives a fresh identity seed so two profiles never
+    accidentally share the same fingerprint.  'full_session' is the only mode
+    that copies actual browser session data and should be used only for explicit
+    session backups, not for routine profile creation.
+    """
+    import shutil as _shutil
+    from .xdg import chrome_profile_dir as _cpd
+    from ..cookies_store import load_cookies as _lc, save_cookies as _sc
+
     src = get_profile(profile_id)
     if not src:
         return None
+
     payload = dict(src)
-    payload.pop("id", None)
-    payload.pop("pid", None)
-    payload.pop("status", None)
-    payload.pop("isRunning", None)
-    payload.pop("fingerprint", None)
+    # Strip runtime-only fields
+    for f in ("id", "pid", "status", "isRunning", "isQueued", "isFailed",
+              "launchState", "cdpPort", "fingerprint"):
+        payload.pop(f, None)
+
+    # Always generate a new seed — never duplicate a live fingerprint
     payload["seed"] = _new_seed()
-    name = payload.get("name") or "Profile"
-    if not name.endswith(" (copy)"):
-        payload["name"] = f"{name} (copy)"
-    return create_profile(payload)
+    payload.pop("fingerprint", None)  # force rebuild on next launch
+
+    # Name
+    base_name = name or src.get("name") or "Profile"
+    suffix_map = {
+        "config_only": " (clone)",
+        "config_and_cookies": " (clone+cookies)",
+        "full_session": " (session clone)",
+    }
+    if not name:
+        payload["name"] = base_name.rstrip(" (clone)").rstrip(" (copy)") + suffix_map.get(mode, " (clone)")
+
+    new_profile = create_profile(payload)
+    new_id = new_profile["id"]
+
+    if mode in ("config_and_cookies", "full_session"):
+        try:
+            cookies = _lc(profile_id)
+            if cookies:
+                _sc(new_id, cookies)
+        except Exception as e:
+            log.warning("clone: cookie copy failed: %s", e)  # non-fatal
+
+    if mode == "full_session":
+        try:
+            src_dir = _cpd(profile_id) / "user-data"
+            dst_dir = _cpd(new_id) / "user-data"
+            if src_dir.exists():
+                if dst_dir.exists():
+                    _shutil.rmtree(dst_dir)
+                _shutil.copytree(src_dir, dst_dir)
+        except Exception as e:
+            log.warning("clone: user-data copy failed: %s", e)  # non-fatal
+
+    return new_profile
+
+
+def duplicate_profile(profile_id: str) -> dict[str, Any] | None:
+    """Backwards-compatible alias for clone_profile(mode='config_only')."""
+    return clone_profile(profile_id, mode="config_only")
 
 
 def filter_profiles(
