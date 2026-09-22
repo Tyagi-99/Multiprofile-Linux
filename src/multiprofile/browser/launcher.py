@@ -97,6 +97,14 @@ def find_chrome() -> str:
     )
 
 
+def github_runner_unavailable_error() -> str:
+    return (
+        "GitHub Cloud Runner does not change your IP in the native Linux build. "
+        "Connecting a PAT only stores the GitHub account. "
+        "Set a Custom Proxy (HTTP/SOCKS) for a different IP, or launch with Direct Connection."
+    )
+
+
 def _resolve_proxy(profile: dict[str, Any], direct: bool) -> dict[str, Any] | None:
     """Apply proxy whenever custom proxy configured unless direct=true."""
     if direct:
@@ -229,10 +237,13 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
     webrtc_mode = profile.get("webrtcMode") or "default"
 
     if profile.get("proxyType") == "github" and not direct:
-        notes.append(
-            "GitHub Cloud Runner proxy is not implemented in native launcher; "
-            "launch with direct=true or switch to custom proxy."
-        )
+        if slot_held:
+            browser_manager.release_slot(profile_id)
+        return {
+            "ok": False,
+            "error": github_runner_unavailable_error(),
+            "errors": ["github_runner_unavailable"],
+        }
 
     settings = get_settings()
     sandbox_args, sandbox_status = sandbox_chrome_args(chrome)

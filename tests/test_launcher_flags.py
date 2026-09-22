@@ -9,6 +9,14 @@ from multiprofile.browser.grid import GridCalculator
 from multiprofile.browser.work_area import WorkArea
 
 
+def test_github_runner_does_not_silently_use_home_ip():
+    msg = launcher.github_runner_unavailable_error()
+    assert "does not change your IP" in msg
+    src = Path("src/multiprofile/browser/launcher.py").read_text(encoding="utf-8")
+    assert "github_runner_unavailable" in src
+    assert 'notes.append(\n            "GitHub Cloud Runner proxy is not implemented' not in src
+
+
 def test_platform_args_force_x11_so_cdp_bounds_are_real():
     """Wayland compositors ignore Browser.setWindowBounds; X11/XWayland does not."""
     args = launcher.chrome_window_platform_args()

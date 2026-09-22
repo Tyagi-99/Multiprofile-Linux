@@ -1,3 +1,10 @@
+multiprofile-native (1.4.6) unstable; urgency=medium
+
+  * Fail GitHub Cloud Runner launches instead of using the home IP.
+    Inject canvas/WebGL noise into Workers so CreepJS hashes differ per profile.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Tue, 22 Sep 2026 12:20:00 +0530
+
 multiprofile-native (1.4.5) unstable; urgency=medium
 
   * GitHub Cloud Accounts: persist and verify Personal Access Tokens

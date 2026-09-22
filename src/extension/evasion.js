@@ -138,6 +138,13 @@
     return x - Math.floor(x);
   }
 
+  function pixelHash(x, y) {
+    let h = Math.imul(PROFILE_SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+    return (h ^ (h >>> 15)) >>> 0;
+  }
+
   // ==========================================
   // 1. HARDWARE & CPU/MEMORY PROTOTYPE SPOOFING
   // ==========================================
@@ -293,6 +300,28 @@
 
     proto.getParameter = patchedGetParameter;
 
+    if (proto.readPixels) {
+      const origReadPixels = proto.readPixels;
+      proto.readPixels = makeNative(function readPixels(x, y, w, h, format, type, pixels) {
+        const ret = origReadPixels.apply(this, arguments);
+        try {
+          if (pixels && pixels.length && w > 0 && h > 0) {
+            const len = Math.min(pixels.length, w * h * 4);
+            for (let i = 0; i < len; i += 4) {
+              const px = (i / 4) | 0;
+              const r = pixelHash(px % w, (px / w) | 0);
+              if ((r & 15) !== 0) continue;
+              if (pixels[i + 3] === 0) continue;
+              const c = i + ((r >>> 4) % 3);
+              const v = pixels[c];
+              pixels[c] = ((r >>> 8) & 1) ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
+            }
+          }
+        } catch (e) {}
+        return ret;
+      }, 'readPixels');
+    }
+
     // Also protect getExtension('WEBGL_debug_renderer_info')
     const originalGetExtension = proto.getExtension;
     if (originalGetExtension) {
@@ -339,13 +368,6 @@
 
     if (!alreadyShielded) {
       const MAX_NOISE_PIXELS = 4000000;  // bigger canvases are images, not fingerprint probes
-
-      function pixelHash(x, y) {
-        let h = Math.imul(PROFILE_SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
-        h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
-        h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
-        return (h ^ (h >>> 15)) >>> 0;
-      }
 
       // data holds the w x h rect whose top-left is (ox, oy) on the canvas. Pixels are picked by
       // canvas position, so getImageData and toDataURL agree on where the noise is.
@@ -488,6 +510,103 @@
     }
 
   } catch(e) {}
+
+  // CreepJS and similar probes fingerprint canvas inside Worker/OffscreenCanvas.
+  // Content scripts do not run in workers, so wrap Worker to prepend the same seed.
+  try {
+    if (typeof Worker !== "undefined") {
+      const NativeWorker = Worker;
+      const prelude =
+        "self.__MP_SEED=" + String(PROFILE_SEED | 0) + ";" +
+        "self.__MP_GPU_V=" + JSON.stringify(TARGET_GPU_VENDOR) + ";" +
+        "self.__MP_GPU_R=" + JSON.stringify(TARGET_GPU_RENDERER) + ";" +
+        "(" + function () {
+          const PROFILE_SEED = self.__MP_SEED || 1;
+          function pixelHash(x, y) {
+            let h = Math.imul(PROFILE_SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
+            h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+            h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+            return (h ^ (h >>> 15)) >>> 0;
+          }
+          function addNoise(data, ox, oy, w, h) {
+            if (w * h > 4000000) return;
+            for (let y = 0; y < h; y++) {
+              for (let x = 0; x < w; x++) {
+                const i = (y * w + x) * 4;
+                if (data[i + 3] === 0) continue;
+                const r = pixelHash(ox + x, oy + y);
+                if ((r & 15) !== 0) continue;
+                const up = ((r >>> 8) & 1) === 1;
+                const a = data[i + 3];
+                if (a === 255) {
+                  const c = i + ((r >>> 4) % 3);
+                  const v = data[c];
+                  data[c] = up ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
+                } else {
+                  data[i + 3] = (up || a === 1) ? a + 1 : a - 1;
+                }
+              }
+            }
+          }
+          try {
+            if (self.OffscreenCanvasRenderingContext2D) {
+              const orig = self.OffscreenCanvasRenderingContext2D.prototype.getImageData;
+              self.OffscreenCanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
+                const img = orig.apply(this, arguments);
+                try { addNoise(img.data, 0, 0, img.width, img.height); } catch (e) {}
+                return img;
+              };
+            }
+          } catch (e) {}
+          try {
+            const hookGL = function (proto) {
+              if (!proto || !proto.getParameter) return;
+              const origGP = proto.getParameter;
+              proto.getParameter = function (param) {
+                if (param === 37445) return self.__MP_GPU_V;
+                if (param === 37446) return self.__MP_GPU_R;
+                return origGP.call(this, param);
+              };
+              if (proto.readPixels) {
+                const origRP = proto.readPixels;
+                proto.readPixels = function (x, y, w, h, format, type, pixels) {
+                  const ret = origRP.apply(this, arguments);
+                  try {
+                    if (pixels && pixels.length && w > 0 && h > 0) {
+                      const len = Math.min(pixels.length, w * h * 4);
+                      for (let i = 0; i < len; i += 4) {
+                        const px = (i / 4) | 0;
+                        const r = pixelHash(px % w, (px / w) | 0);
+                        if ((r & 15) !== 0) continue;
+                        if (pixels[i + 3] === 0) continue;
+                        const c = i + ((r >>> 4) % 3);
+                        const v = pixels[c];
+                        pixels[c] = ((r >>> 8) & 1) ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
+                      }
+                    }
+                  } catch (e) {}
+                  return ret;
+                };
+              }
+            };
+            if (self.WebGLRenderingContext) hookGL(self.WebGLRenderingContext.prototype);
+            if (self.WebGL2RenderingContext) hookGL(self.WebGL2RenderingContext.prototype);
+          } catch (e) {}
+        }.toString() + ")();";
+      function wrapWorkerScript(scriptURL) {
+        const blob = new Blob(
+          [prelude, "\ntry{importScripts(", JSON.stringify(String(scriptURL)), ");}catch(e){}"],
+          { type: "text/javascript" }
+        );
+        return URL.createObjectURL(blob);
+      }
+      const WrappedWorker = function Worker(scriptURL, options) {
+        return new NativeWorker(wrapWorkerScript(scriptURL), options);
+      };
+      WrappedWorker.prototype = NativeWorker.prototype;
+      window.Worker = makeNative(WrappedWorker, "Worker");
+    }
+  } catch (e) {}
 
   // ==========================================
   // 6. CLIENT HINTS CONSISTENCY

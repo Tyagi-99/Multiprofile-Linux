@@ -1,3 +1,8 @@
+## 1.4.6
+
+- Do not silently launch GitHub Cloud Runner profiles on the home IP. Connecting a PAT does not provide an Azure/datacenter proxy; launch fails with instructions to use Custom Proxy or Direct.
+- Apply canvas/WebGL noise inside Web Workers (CreepJS reads canvas there, which previously leaked the real GPU fingerprint across profiles).
+
 ## 1.4.5
 
 - GitHub Cloud Accounts: Verify & Connect now calls `api.github.com/user`, stores the PAT (0600 file), and lists accounts. Requires classic PAT scopes `repo` and `workflow`. Cloud Runner proxy launch is still not implemented — use Direct or Custom Proxy for traffic.
