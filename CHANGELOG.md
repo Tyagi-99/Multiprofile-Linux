@@ -1,3 +1,7 @@
+## 1.4.5
+
+- GitHub Cloud Accounts: Verify & Connect now calls `api.github.com/user`, stores the PAT (0600 file), and lists accounts. Requires classic PAT scopes `repo` and `workflow`. Cloud Runner proxy launch is still not implemented — use Direct or Custom Proxy for traffic.
+
 ## 1.4.4
 
 - Disable Chrome CSD drop-shadows on tiled windows (`browser.custom_chrome_frame=false`) so adjacent tiles look flush. Geometry was already edge-to-edge; the purple strips were the client shadow drawn inside the outer bounds.

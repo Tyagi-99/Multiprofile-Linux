@@ -52,6 +52,13 @@ from ..storage.templates import (
     template_to_profile_payload,
     update_template,
 )
+from ..storage.github_accounts import (
+    add_account as gh_add_account,
+    delete_account as gh_delete_account,
+    list_accounts as gh_list_accounts,
+    set_default as gh_set_default,
+    verify_account as gh_verify_account,
+)
 from ..storage.xdg import chrome_profile_dir, data_dir, profiles_path
 from .user_agents import USER_AGENTS
 
@@ -611,22 +618,39 @@ def create_app() -> Flask:
 
     @app.get("/api/github-accounts")
     def github_accounts():
-        return jsonify([])
+        return jsonify(gh_list_accounts())
 
     @app.post("/api/github-accounts")
     def github_accounts_create():
-        return jsonify({"ok": True, "account": {"id": "local", "login": "local-dev"}}), 201
+        payload = request.get_json(silent=True) or {}
+        result = gh_add_account(
+            str(payload.get("token") or ""),
+            label=str(payload.get("label") or ""),
+            is_default=bool(payload.get("is_default")),
+        )
+        if not result.get("ok"):
+            return jsonify({"ok": False, "error": result.get("error") or "connect failed"}), 400
+        return jsonify(result), 201
 
     @app.delete("/api/github-accounts/<acc_id>")
     def github_accounts_delete(acc_id: str):
+        ok = gh_delete_account(acc_id)
+        if not ok:
+            return jsonify({"ok": False, "error": "account not found"}), 404
         return jsonify({"ok": True})
 
     @app.post("/api/github-accounts/<acc_id>/verify")
     def github_verify(acc_id: str):
-        return jsonify({"ok": False, "error": "GitHub integration not enabled in native build"})
+        result = gh_verify_account(acc_id)
+        if not result.get("success"):
+            return jsonify(result), 400
+        return jsonify(result)
 
     @app.post("/api/github-accounts/<acc_id>/set-default")
     def github_default(acc_id: str):
+        ok = gh_set_default(acc_id)
+        if not ok:
+            return jsonify({"ok": False, "error": "account not found"}), 404
         return jsonify({"ok": True})
 
     @app.get("/api/ads")

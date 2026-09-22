@@ -39,6 +39,10 @@ def backups_dir() -> Path:
 def runtime_state_path() -> Path:
     return cache_dir() / "runtime.json"
 
+
+def github_accounts_path() -> Path:
+    return data_dir() / "github-accounts.json"
+
 def chrome_profile_dir(profile_id: str) -> Path:
     p = data_dir() / "chrome-profiles" / profile_id
     p.mkdir(parents=True, exist_ok=True)

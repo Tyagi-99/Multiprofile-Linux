@@ -1,3 +1,10 @@
+multiprofile-native (1.4.5) unstable; urgency=medium
+
+  * GitHub Cloud Accounts: persist and verify Personal Access Tokens
+    against api.github.com (repo + workflow scopes).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Tue, 22 Sep 2026 11:40:00 +0530
+
 multiprofile-native (1.4.4) unstable; urgency=medium
 
   * Disable Chrome client-side frame shadows so tiled windows look flush.
