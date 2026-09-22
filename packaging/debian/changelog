@@ -1,3 +1,10 @@
+multiprofile-native (1.4.4) unstable; urgency=medium
+
+  * Disable Chrome client-side frame shadows so tiled windows look flush.
+    Set browser.custom_chrome_frame=false (system title bar/borders).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Tue, 22 Sep 2026 11:05:00 +0530
+
 multiprofile-native (1.4.3) unstable; urgency=medium
 
   * Edge-to-edge tiling: default gap/margin 0, remainder pixels distributed

@@ -39,6 +39,37 @@ def chrome_disable_features_arg() -> str:
     return "--disable-features=ChromeWhatsNewUI,WaylandWindowDecorations"
 
 
+def ensure_no_client_frame_shadow(user_data_dir: Path) -> None:
+    """Turn off Chrome CSD drop-shadows for tiled windows.
+
+    Custom frames draw a translucent shadow *inside* the outer bounds, so the
+    desktop shows between tiles even when CDP rectangles touch. Setting
+    browser.custom_chrome_frame=false uses system title bar/borders instead
+    (Chrome's "Use system title bar and borders"), which keeps the opaque
+    frame flush.
+    """
+    prefs_path = Path(user_data_dir) / "Default" / "Preferences"
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {}
+    if prefs_path.exists():
+        try:
+            loaded = json.loads(prefs_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            data = {}
+    browser = data.get("browser")
+    if not isinstance(browser, dict):
+        browser = {}
+        data["browser"] = browser
+    if browser.get("custom_chrome_frame") is False:
+        return
+    browser["custom_chrome_frame"] = False
+    tmp = prefs_path.with_name(prefs_path.name + ".tmp")
+    tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    tmp.replace(prefs_path)
+
+
 def extension_src() -> Path:
     candidates = [
         Path(__file__).resolve().parents[2] / "extension",
@@ -189,6 +220,7 @@ def launch_profile(profile_id: str, url: str | None = None, direct: bool = False
 
     user_dir = chrome_profile_dir(profile_id) / "user-data"
     user_dir.mkdir(parents=True, exist_ok=True)
+    ensure_no_client_frame_shadow(user_dir)
     start = url or profile.get("startUrl") or "https://example.com"
     ua = profile.get("userAgent") or ""
 

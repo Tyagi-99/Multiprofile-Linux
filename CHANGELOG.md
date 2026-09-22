@@ -1,3 +1,7 @@
+## 1.4.4
+
+- Disable Chrome CSD drop-shadows on tiled windows (`browser.custom_chrome_frame=false`) so adjacent tiles look flush. Geometry was already edge-to-edge; the purple strips were the client shadow drawn inside the outer bounds.
+
 ## 1.4.3
 
 - Edge-to-edge tiling: default `gap=0` / `margin=0`. Remainder pixels are distributed so adjacent outer bounds touch and the grid consumes the full work area. No overlap.

@@ -1,6 +1,7 @@
 """Launch flags that make CDP window bounds actually move native windows."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from multiprofile.browser import grid, launcher
@@ -37,6 +38,31 @@ def test_jobs_pass_slot_rects_at_launch():
     src = Path("src/multiprofile/jobs.py").read_text(encoding="utf-8")
     assert "window_rect=None" not in src
     assert "slot_rect_map" in src
+
+
+def test_ensure_no_client_frame_shadow_writes_pref(tmp_path):
+    launcher.ensure_no_client_frame_shadow(tmp_path)
+    data = json.loads((tmp_path / "Default" / "Preferences").read_text(encoding="utf-8"))
+    assert data["browser"]["custom_chrome_frame"] is False
+
+
+def test_ensure_no_client_frame_shadow_preserves_other_keys(tmp_path):
+    prefs = tmp_path / "Default" / "Preferences"
+    prefs.parent.mkdir(parents=True)
+    prefs.write_text(
+        json.dumps({"browser": {"window_placement": {"left": 9}}, "keep": True}),
+        encoding="utf-8",
+    )
+    launcher.ensure_no_client_frame_shadow(tmp_path)
+    data = json.loads(prefs.read_text(encoding="utf-8"))
+    assert data["keep"] is True
+    assert data["browser"]["window_placement"]["left"] == 9
+    assert data["browser"]["custom_chrome_frame"] is False
+
+
+def test_launcher_writes_no_shadow_pref_before_spawn():
+    src = Path("src/multiprofile/browser/launcher.py").read_text(encoding="utf-8")
+    assert "ensure_no_client_frame_shadow(" in src
 
 
 def test_slot_rect_map_assigns_distinct_cells():
