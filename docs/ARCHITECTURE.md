@@ -1,6 +1,6 @@
 # Multiprofile Linux — Architecture Specification
 
-Version: 1.5.0  
+Version: 1.6.0  
 Status: Production Grade Linux-Native Multi-Profile Browser Platform  
 
 ---
@@ -90,7 +90,35 @@ Multiprofile Linux is an enterprise-grade, clean-room, native Linux platform for
 - **Encrypted Format**: AES-256-GCM authenticated encryption. Key derived via PBKDF2-HMAC-SHA256 (600,000 iterations, 32-byte salt). Ciphertext bundle stores version, salt, IV, tag, and ciphertext (`.mp_enc`).
 - **Manifest V2**: Every backup includes metadata detailing `version`, `createdAt`, `profileIds`, `clientIds`, checksums (`zip_sha256`), and encryption parameters.
 
-### 3.6 Window Tiling & Geometry (`multiprofile.browser.grid`)
+### 3.6 Device Preset System (`multiprofile.devices`)
+- **`DevicePreset`**: a coherent identity bundle per real device — User-Agent,
+  Client Hints, viewport/screen geometry, DPR, touch, plus an explicit
+  capability matrix declaring what a Linux Chromium host cannot reproduce
+  (iOS-class engine, macOS-class GPU/fonts, WebGL renderer honesty).
+- **`DevicePresetValidator`**: static checks (schema, UA format, Client-Hints
+  coherence, geometry sanity) plus a genuine CDP round-trip against a real
+  Chromium binary: geometry is applied through DevTools and the *page* reads
+  it back. Statuses: `VALIDATED` / `PARTIAL` (honest capability limits) /
+  `PENDING` (no binary) / `UNSUPPORTED`. See `docs/DEVICE_PRESETS.md`.
+- **Launcher hook**: with `deviceId`, the launcher applies the preset's
+  geometry/touch/UA via CDP; an unknown `deviceId` records a
+  `device preset not found` note rather than crashing.
+
+### 3.7 Fingerprint Inspector & Consistency Engine (`multiprofile.fingerprint`)
+- **Inspector components**: `GET /api/profiles/<id>/fingerprint` reports
+  per-component `expected` values (Navigator, Client Hints, Screen, Touch,
+  …). When a device preset is attached, the Screen component pins exactly to
+  the preset viewport × DPR (e.g. Pixel 9 → `411x923@2.626`). Note: the
+  legacy top-level `fingerprint` block may still reflect the stored legacy
+  desktop fingerprint; the inspector `components` are the preset-coherent view.
+- **Consistency engine** (`multiprofile.consistency`): read-only per-domain
+  checks (`geo`, `device`, `platform`, `mobile`, `browser`, `gpu_webgl`),
+  each `PASS | WARNING | ERROR` with a human message; overall status is the
+  worst domain. See `docs/PROFILE_CONSISTENCY.md`.
+
+---
+
+### 3.8 Window Tiling & Geometry (`multiprofile.browser.grid`)
 - **Pure Math Calculation**: `GridCalculator` partitions the detected work area without margins or gaps when configured for edge-to-edge layout.
 - **X11 / Wayland Bridge**: Forces `--ozone-platform=x11` so Chromium's native window handles honor CDP `Browser.setWindowBounds` across Linux compositors.
 - **Idempotence**: Re-computing grid plans for $N$ profiles yields invariant geometry without coordinate drift or overlapping windows.

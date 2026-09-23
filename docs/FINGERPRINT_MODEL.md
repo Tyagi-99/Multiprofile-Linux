@@ -1,6 +1,6 @@
 # Multiprofile Linux — Fingerprint & Identity Model
 
-Version: 1.5.0  
+Version: 1.6.0  
 Status: Deterministic & Coherent Configuration Model  
 
 ---
@@ -98,7 +98,37 @@ The launcher detects system graphics capabilities via `/dev/dri/renderD*` and `/
 
 ---
 
-## 5. Known Limitations & Technical Boundaries
+## 6. 1.6.0 Additions: Inspector Components, Device Coherence, CDP Brand Fix
+
+### 6.1 Fingerprint inspector (`GET /api/profiles/<id>/fingerprint`)
+The report now carries per-component `expected` blocks (Navigator, Client
+Hints, Screen, Touch, …) so callers can inspect exactly what the profile
+claims in each domain. See `docs/PROFILE_CONSISTENCY.md` for the coherence
+engine that cross-checks them.
+
+### 6.2 Device-preset coherence
+When a profile is created with `deviceId`, the Screen component pins exactly
+to the preset viewport × DPR (measured: Pixel 9 → `411x923@2.626`, matching
+the declared preset geometry within the ±1 px validator tolerance), and the
+Navigator/Client-Hints components carry the preset's Android UA and brand
+metadata. Honest caveat: the legacy top-level `fingerprint` block may still
+reflect the stored legacy desktop fingerprint; the inspector `components`
+are the preset-coherent view.
+
+### 6.3 CDP brand metadata shape (fixed in 1.6.0)
+`MobileProfileConfig.user_agent_metadata()` previously emitted
+`fullVersionList` entries with `fullVersion` keys, which real CDP rejects
+(`Network.setUserAgentOverride` returned "Invalid parameters: missing
+fullVersionList.version"). Both brand lists now emit CDP's exact
+`{brand, version}` shape. Measured after the fix via live DevTools against
+Chromium 152: `Emulation.setDeviceMetricsOverride` OK,
+`Emulation.setTouchEmulationEnabled` OK, `Network.setUserAgentOverride` OK,
+with the page reporting the applied geometry, `maxTouchPoints > 0`, and the
+Android UA.
+
+---
+
+## 7. Known Limitations & Technical Boundaries (unchanged from 1.5.0)
 
 1. **Linux Font Subsystem**: Linux renders fonts using FreeType/Fontconfig, which produces slightly different antialiasing sub-pixel geometry compared to DirectWrite (Windows) or CoreText (macOS). This cannot be eliminated without compiling a custom Chromium engine.
 2. **Audio Hardware Latency**: AudioContext buffer timing and sample rate clocks reflect the host ALSA/PulseAudio/PipeWire subsystem.

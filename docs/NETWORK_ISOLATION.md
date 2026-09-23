@@ -1,6 +1,6 @@
 # Multiprofile Linux — Network Isolation Specification
 
-Version: 1.5.0  
+Version: 1.6.0  
 Status: Production Grade Network Isolation  
 
 ---
@@ -90,7 +90,42 @@ Multiprofile Linux protects credentials through two layers:
 
 ---
 
-## 6. Verification & Automated Testing
+## 7. 1.6.0 Additions: Honest Network Diagnostics Surface
+
+### 7.1 `POST /api/profiles/<id>/network/test` — real measurements only
+The diagnostics endpoint returns a fixed, honest shape:
+
+```json
+{
+  "profileId": "…", "mode": "DIRECT",
+  "health": "HEALTHY | DEGRADED | DOWN",
+  "egressIp": "… (measured) | null",
+  "error": "… (real error) | null",
+  "country": "… | null", "countryCode": "… | null",
+  "timezone": "… | null", "dns": {…} | null,
+  "ipv6": {…} | null, "latencyMs": 0, "lastTest": "…"
+}
+```
+
+Rules, enforced by tests (`tests/test_integration_v16.py`):
+- `health` is exactly one of `HEALTHY | DEGRADED | DOWN`.
+- A non-`HEALTHY` result **must** carry the real `error` (e.g.
+  `proxy unreachable (http://u:***@10.0.0.1:8080): [Errno 1] Operation not permitted`
+  — note the credential is masked as `***` in the message).
+- A `HEALTHY` result **must** carry a measured `egressIp`.
+- `egressIp` is never a placeholder (`0.0.0.0`, `N/A`); the suite parses it as
+  a real IP literal.
+- The upstream geolocation provider (ip-api) may return HTTP 403; that
+  surfaces as `DOWN` + the real error — still honest, never faked.
+
+### 7.2 Per-profile diagnostics feed the consistency engine
+The last diagnostic's country/timezone feed the consistency engine's `geo`
+domain (`GET /api/profiles/<id>/consistency`). Until a diagnostic has run,
+`geo` reports `WARNING` ("insufficient data") rather than guessing.
+
+---
+
+## 8. Verification & Automated Testing
 
 The network isolation layer is validated in `tests/test_network.py` and `tests/test_backup_and_isolation.py`:
 - `test_direct_mode_default`: Verifies direct mode needs no check and launches immediately.

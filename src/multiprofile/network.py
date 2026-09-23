@@ -489,3 +489,323 @@ def network_config_for_profile(profile: dict[str, Any]) -> NetworkConfig:
         return NetworkConfig.from_dict(nc_raw)
     # Legacy migration: build from scattered fields
     return NetworkConfig.from_legacy_profile(profile)
+
+
+# ---------------------------------------------------------------------------
+# Network diagnostics (Worker 3 — ADDITIVE; no existing behavior changed)
+# ---------------------------------------------------------------------------
+
+# Health values reported by run_diagnostics()
+HEALTH_HEALTHY = "HEALTHY"
+HEALTH_DEGRADED = "DEGRADED"
+HEALTH_DOWN = "DOWN"
+
+_DNS_PASS = "PASS"
+_DNS_FAIL = "FAIL"
+_DNS_NOT_RUN = "NOT_RUN"
+
+_IPV6_SUPPORTED = "SUPPORTED"
+_IPV6_UNAVAILABLE = "UNAVAILABLE"
+_IPV6_NOT_RUN = "NOT_RUN"
+
+# Single IP-echo + geo endpoint used for egress measurement.
+# Returns: query (ip), country, countryCode, timezone. Free, no key required.
+_ECHO_GEO_URL = "https://ip-api.com/json/?fields=status,message,query,country,countryCode,timezone"
+_DNS_TEST_HOST = "example.com"
+_IPV6_PROBE = ("2606:4700:4700::1111", 443)  # Cloudflare DNS over a well-known IPv6 address
+
+
+@dataclass
+class NetworkDiagnostics:
+    """Measured network route state for a profile.
+
+    All fields are REAL measurements or explicit NOT_RUN/None with reasons.
+    Placeholder IPs, guessed geolocation, and silent fallbacks are forbidden.
+    """
+    profile_id: str = ""
+    mode: str = NetworkMode.DIRECT.value
+    health: str = HEALTH_DOWN  # HEALTHY | DEGRADED | DOWN
+    egress_ip: str | None = None
+    country: str | None = None
+    country_code: str | None = None
+    timezone: str | None = None
+    latency_ms: float | None = None
+    dns: dict[str, Any] = field(default_factory=dict)
+    ipv6: dict[str, Any] = field(default_factory=dict)
+    last_test: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        # No credentials are ever stored on this dataclass, so nothing to mask.
+        return {
+            "profileId": self.profile_id,
+            "mode": self.mode,
+            "health": self.health,
+            "egressIp": self.egress_ip,
+            "country": self.country,
+            "countryCode": self.country_code,
+            "timezone": self.timezone,
+            "latencyMs": self.latency_ms,
+            "dns": dict(self.dns),
+            "ipv6": dict(self.ipv6),
+            "lastTest": self.last_test,
+            "error": self.error,
+        }
+
+
+def _iso_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _validate_ip_literal(value: str | None) -> str | None:
+    """Return the value if it is a real IP literal, else None (never fake one)."""
+    if not value:
+        return None
+    try:
+        import ipaddress
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
+def _proxy_opener(proxy: ProxyConfig) -> urllib.request.OpenerDirector:
+    if proxy.username and proxy.password:
+        proxy_url = f"http://{proxy.username}:{proxy.password}@{proxy.host}:{proxy.port}"
+    elif proxy.username:
+        proxy_url = f"http://{proxy.username}@{proxy.host}:{proxy.port}"
+    else:
+        proxy_url = f"http://{proxy.host}:{proxy.port}"
+    handlers: list[Any] = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+    if proxy.username and proxy.password:
+        pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        pwd_mgr.add_password(None, f"{proxy.host}:{proxy.port}", proxy.username, proxy.password)
+        handlers.append(urllib.request.ProxyBasicAuthHandler(pwd_mgr))
+    return urllib.request.build_opener(*handlers)
+
+
+def _tcp_connect_ms(host: str, port: int, timeout: float) -> tuple[float | None, str | None]:
+    """Return (connect latency ms, error)."""
+    t0 = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return (time.monotonic() - t0) * 1000.0, None
+    except OSError as e:
+        return None, str(e)
+
+
+def _fetch_echo_geo(opener: urllib.request.OpenerDirector, timeout: float) -> dict[str, Any]:
+    """Fetch egress IP + geo through the opener's route. Raises on any failure."""
+    req = urllib.request.Request(
+        _ECHO_GEO_URL,
+        headers={"User-Agent": "multiprofile-native/1.6.0"},
+    )
+    with opener.open(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8", "ignore")
+    data = json.loads(body)
+    if data.get("status") != "success":
+        raise RuntimeError(f"geo lookup failed: {data.get('message') or 'unknown'}")
+    return data
+
+
+def _measure_dns(net_config: NetworkConfig, timeout: float) -> dict[str, Any]:
+    """DNS check: resolve a test hostname through the effective route.
+
+    Honest about what stdlib can observe: through a proxy we cannot see
+    remote DNS, so we report NOT_RUN with a reason instead of guessing.
+    """
+    if net_config.mode == NetworkMode.DIRECT:
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(timeout)
+        try:
+            try:
+                _, _, addrs = socket.gethostbyname_ex(_DNS_TEST_HOST)
+            except OSError as e:
+                return {"status": _DNS_FAIL, "detail": f"system DNS resolution failed: {e}"}
+            ip = addrs[0] if addrs else None
+            return {
+                "status": _DNS_PASS if ip else _DNS_FAIL,
+                "detail": f"resolved {_DNS_TEST_HOST} via system resolver to {ip}"
+                if ip else f"system resolver returned no addresses for {_DNS_TEST_HOST}",
+            }
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+    if net_config.dns_policy == DNSPolicy.PROXY_RESOLVED:
+        return {
+            "status": _DNS_NOT_RUN,
+            "detail": "DNS is delegated to the proxy; remote resolution cannot be "
+                      "observed from here. Chrome enforces it via --host-resolver-rules.",
+        }
+    return {
+        "status": _DNS_NOT_RUN,
+        "detail": "DNS through the configured route cannot be verified with the "
+                  "stdlib HTTP stack; no claim is made.",
+    }
+
+
+def _measure_ipv6(net_config: NetworkConfig, timeout: float) -> dict[str, Any]:
+    """IPv6 check: attempt a real IPv6 TCP connection. Never guessed."""
+    if net_config.ipv6_policy in (IPv6Policy.DISABLED, IPv6Policy.PROXY_ONLY):
+        return {
+            "status": _IPV6_UNAVAILABLE,
+            "detail": f"IPv6 suppressed by profile policy {net_config.ipv6_policy.value}",
+        }
+    if net_config.mode != NetworkMode.DIRECT:
+        return {
+            "status": _IPV6_NOT_RUN,
+            "detail": "IPv6 through the configured proxy cannot be probed from here; "
+                      "Chrome enforces the profile's ipv6 policy at launch.",
+        }
+    host, port = _IPV6_PROBE
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, port, 0, 0))
+        return {
+            "status": _IPV6_SUPPORTED,
+            "detail": f"IPv6 TCP connect to [{host}]:{port} succeeded",
+        }
+    except OSError as e:
+        return {
+            "status": _IPV6_UNAVAILABLE,
+            "detail": f"IPv6 TCP connect to [{host}]:{port} failed: {e}",
+        }
+
+
+def run_diagnostics(
+    net_config: NetworkConfig,
+    *,
+    profile_id: str = "",
+    timeout: float = 10.0,
+) -> NetworkDiagnostics:
+    """Run REAL network measurements for a profile's configured route.
+
+    Fail-closed: any route failure yields health DOWN with an error and NO
+    egress data. The reported `mode` always reflects the configured mode —
+    a failed proxy NEVER flips the report to DIRECT (no silent fallback).
+    """
+    mode = net_config.mode.value
+    diag = NetworkDiagnostics(
+        profile_id=profile_id,
+        mode=mode,
+        health=HEALTH_DOWN,
+        last_test=_iso_now(),
+    )
+    timeout = max(1.0, min(float(timeout or 10.0), 60.0))
+
+    # ---------------------------------------------------------------- direct
+    # DIRECT is allowed ONLY when explicitly configured (mode == DIRECT).
+    # A proxy mode with no proxy endpoint is misconfigured -> fail closed below.
+    if net_config.mode == NetworkMode.DIRECT:
+        t0 = time.monotonic()
+        try:
+            # Default opener honors the host's egress configuration (env
+            # proxies on sandboxed hosts); this measures the host's real
+            # egress path, matching what a DIRECT Chrome launch would use.
+            opener = urllib.request.build_opener()
+            data = _fetch_echo_geo(opener, timeout)
+        except Exception as e:
+            diag.error = f"direct route failed: {e}"
+            diag.dns = _measure_dns(net_config, timeout)
+            diag.ipv6 = _measure_ipv6(net_config, timeout)
+            return diag
+        diag.egress_ip = _validate_ip_literal(data.get("query"))
+        diag.country = data.get("country") or None
+        diag.country_code = data.get("countryCode") or None
+        diag.timezone = data.get("timezone") or None
+        diag.latency_ms = round((time.monotonic() - t0) * 1000.0, 1)
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        if diag.egress_ip:
+            diag.health = HEALTH_HEALTHY
+        else:
+            diag.error = "direct route answered but returned no valid egress IP"
+        return diag
+
+    # ------------------------------------------------------- proxy required
+    proxy = net_config.proxy
+    if proxy is None or not proxy.host:
+        # Fail closed: misconfigured route — never fall back to DIRECT.
+        if net_config.mode == NetworkMode.REMOTE_GATEWAY:
+            diag.error = (
+                f"mode {mode} requires a gateway route"
+                + (f" (gateway_id={net_config.gateway_id})" if net_config.gateway_id else "")
+                + ", but no gateway route is available. "
+                "Refusing to report DIRECT (fail-closed)."
+            )
+        else:
+            diag.error = (
+                f"mode {mode} requires a proxy endpoint, but none is configured. "
+                "Refusing to report DIRECT (fail-closed)."
+            )
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        return diag
+
+    # Step 1: TCP connect to the proxy — measured latency, no assumptions.
+    tcp_ms, tcp_err = _tcp_connect_ms(proxy.host, proxy.port, timeout)
+    diag.latency_ms = round(tcp_ms, 1) if tcp_ms is not None else None
+    if tcp_err is not None:
+        diag.error = f"proxy unreachable ({proxy.masked_str()}): {tcp_err}"
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        return diag
+
+    # Step 2: egress measurement through the proxy.
+    if proxy.scheme in ("socks5", "socks5h", "socks4"):
+        # stdlib has no SOCKS transport — report honestly instead of faking.
+        diag.health = HEALTH_DEGRADED
+        diag.error = (
+            "SOCKS5 TCP handshake succeeded, but egress IP cannot be verified: "
+            "the stdlib HTTP stack has no SOCKS transport. Treat as unverified "
+            "(pre-launch gate uses the same TCP probe)."
+        )
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        return diag
+
+    try:
+        opener = _proxy_opener(proxy)
+        data = _fetch_echo_geo(opener, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code == 407:
+            diag.error = (
+                f"proxy authentication failed (HTTP 407) for {proxy.masked_str()}: "
+                "invalid proxy credentials"
+            )
+        else:
+            diag.error = f"proxy HTTP request failed ({proxy.masked_str()}): HTTP {e.code}"
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        return diag
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", e)
+        reason_str = str(reason)
+        if "407" in reason_str or "Proxy Authentication Required" in reason_str:
+            diag.error = (
+                f"proxy authentication failed for {proxy.masked_str()}: "
+                "invalid proxy credentials"
+            )
+        else:
+            diag.error = f"proxy request failed ({proxy.masked_str()}): {reason_str}"
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        return diag
+    except Exception as e:
+        diag.error = f"proxy request failed ({proxy.masked_str()}): {e}"
+        diag.dns = _measure_dns(net_config, timeout)
+        diag.ipv6 = _measure_ipv6(net_config, timeout)
+        return diag
+
+    diag.egress_ip = _validate_ip_literal(data.get("query"))
+    diag.country = data.get("country") or None
+    diag.country_code = data.get("countryCode") or None
+    diag.timezone = data.get("timezone") or None
+    diag.dns = _measure_dns(net_config, timeout)
+    diag.ipv6 = _measure_ipv6(net_config, timeout)
+    if diag.egress_ip:
+        diag.health = HEALTH_HEALTHY
+    else:
+        diag.error = (
+            f"proxy responded ({proxy.masked_str()}) but returned no valid egress IP"
+        )
+    return diag

@@ -1,6 +1,6 @@
 # Multiprofile Linux
 
-[![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Ubuntu-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)]()
@@ -12,7 +12,7 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 
 ---
 
-## Key Capabilities (v1.5.0)
+## Key Capabilities (v1.6.0)
 
 ### 1. Robust Network Isolation & Fail-Closed Safety
 - **Explicit Route Topology**: Every profile defines its own egress path via `NetworkConfig` (`DIRECT`, `HTTP_PROXY`, `HTTPS_PROXY`, `SOCKS5`, or `REMOTE_GATEWAY`).

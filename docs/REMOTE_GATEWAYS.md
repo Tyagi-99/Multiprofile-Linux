@@ -1,6 +1,6 @@
 # Multiprofile Linux — Remote Gateways & Cloud Egress
 
-Version: 1.5.0  
+Version: 1.6.0  
 Status: Clean Architecture & Honest Provider Status  
 
 ---
@@ -128,3 +128,25 @@ To isolate a single Chromium profile to a WireGuard tunnel without diverting the
 4. Launch the Chromium profile inside the namespace: `ip netns exec mp-profile-1 chromium ...`
 
 Because this requires `CAP_NET_ADMIN` or `sudo` privileges, `WireGuardGatewayProvider` remains designated as a scaffold interface pending a dedicated non-root daemon helper.
+
+---
+
+## 6. 1.6.0 Re-verification (2026-09-23)
+
+Both scaffolds remain **SCAFFOLD / NOT ACTIVE** in 1.6.0 — nothing was
+promoted, and no new provisioning claims are made:
+
+- `AzureGatewayProvider.provision()` still returns
+  `{"ok": false, "status": "not_implemented", …}` with manual-setup guidance.
+- `WireGuardGatewayProvider.provision()` still returns
+  `{"ok": false, "status": "not_implemented", …}`.
+- `WireGuardGatewayProvider.health()` still returns `ok=False`,
+  `status="UNKNOWN"` with the manual-setup note.
+- Both statuses are pinned by automated tests
+  (`tests/test_release_v16.py::test_azure_gateway_provision_still_not_implemented`,
+  `test_wireguard_gateway_provision_still_not_implemented`), so a future
+  implementation must update the docs and the tests together.
+- New in 1.6.0: per-profile network diagnostics
+  (`POST /api/profiles/<id>/network/test`, see `docs/NETWORK_ISOLATION.md`
+  §7) surface gateway health honestly — `HEALTHY | DEGRADED | DOWN` with the
+  real error — instead of the old silent/unknown states.

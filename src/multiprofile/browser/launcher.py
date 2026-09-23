@@ -18,6 +18,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -262,6 +263,41 @@ def _prepare_extension(profile: dict[str, Any], fingerprint: dict[str, Any]) -> 
 
 
 # ---------------------------------------------------------------------------
+# Device-emulation CDP session holder
+# ---------------------------------------------------------------------------
+
+def _hold_device_session(profile_id: str, pid: int, sess: Any) -> None:
+    """Keep a device-emulation CDP session open for the browser's lifetime.
+
+    Chromium drops ``Network.setUserAgentOverride`` and
+    ``Emulation.setTouchEmulationEnabled`` when the DevTools session that
+    set them disconnects (verified empirically: override ACKed and visible
+    while the session is open, gone after it closes; only
+    ``Emulation.setDeviceMetricsOverride`` survives a disconnect). A daemon
+    thread therefore holds the session until the browser process exits,
+    then closes it. Never fatal, never blocking.
+    """
+
+    def _watch() -> None:
+        try:
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    break
+                time.sleep(10)
+        finally:
+            try:
+                sess.close()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+
+    threading.Thread(
+        target=_watch, daemon=True, name=f"mpl-cdp-hold-{profile_id}"
+    ).start()
+
+
+# ---------------------------------------------------------------------------
 # Main launch function
 # ---------------------------------------------------------------------------
 
@@ -374,6 +410,27 @@ def launch_profile(
     ensure_no_client_frame_shadow(user_dir)
     start = url or profile.get("startUrl") or "https://example.com"
     ua = profile.get("userAgent") or ""
+
+    # ------------------------------------------------------------------
+    # Device preset — resolve early so the preset UA can ride the
+    # --user-agent launch flag (persistent for HTTP + JS), not just the
+    # session-scoped CDP override applied later.
+    # ------------------------------------------------------------------
+    device_id = profile.get("deviceId") or ""
+    device_preset = None
+    if device_id:
+        try:
+            from ..devices.registry import DeviceRegistry
+            device_preset = DeviceRegistry().get(device_id)
+        except Exception as e:  # noqa: BLE001 - preset lookup never breaks launch
+            log.debug("device preset lookup failed for %s: %s", device_id, e)
+        if device_preset is None:
+            notes.append(f"device preset not found: {device_id}")
+        else:
+            preset_ua = (device_preset.to_mobile_config_dict() or {}).get("user_agent") or ""
+            if not ua and preset_ua:
+                ua = preset_ua
+                notes.append(f"Device preset UA applied via --user-agent ({device_preset.id})")
 
     # ------------------------------------------------------------------
     # Sandbox
@@ -490,10 +547,53 @@ def launch_profile(
         # Apply UA/client-hints override via CDP for HTTP-layer consistency
         try:
             from .cdp_identity import apply_ua_override
-            apply_ua_override(debug_port, fingerprint, ua or fingerprint.get("userAgent") or "")
-            notes.append("CDP UA/client-hints override applied")
+            if apply_ua_override(debug_port, fingerprint, ua or fingerprint.get("userAgent") or ""):
+                notes.append("CDP UA/client-hints override applied")
+            else:
+                notes.append("CDP UA/client-hints override FAILED (no CDP response)")
         except Exception as e:
             notes.append(f"CDP UA override skipped: {e}")
+
+        # Device-preset emulation via CDP (viewport/touch/UA+CH as one plan).
+        # Applied after the generic UA override so the preset is authoritative.
+        # The plan runs on ONE pinned CDP session which is then HELD OPEN for
+        # the browser's lifetime: Chromium drops Network.setUserAgentOverride
+        # and Emulation.setTouchEmulationEnabled when the setting session
+        # disconnects, so one-shot "send and close" can never make them
+        # persist. Only Emulation.setDeviceMetricsOverride survives a
+        # disconnect. Never fatal: a failed step is recorded in notes, launch
+        # continues.
+        try:
+            if device_preset is not None:
+                from .cdp_identity import open_pinned_cdp_session
+                from ..fingerprint.mobile import MobileProfileConfig, apply_cdp_plan
+                _cfg = MobileProfileConfig.from_preset_dict(device_preset.to_mobile_config_dict())
+                _sess = open_pinned_cdp_session(debug_port)
+                if _sess is None:
+                    notes.append(
+                        f"CDP device emulation FAILED ({device_preset.id}: no CDP session)"
+                    )
+                else:
+                    _results = apply_cdp_plan(_sess.send, _cfg.to_cdp_plan())
+                    _ok = sum(1 for r in _results if r.get("ok"))
+                    if _ok == len(_results) and _ok > 0:
+                        _hold_device_session(profile_id, proc.pid, _sess)
+                        notes.append(
+                            f"CDP device emulation applied ({device_preset.id}: "
+                            f"{_ok}/{len(_results)} steps; session held open — "
+                            f"UA/touch overrides are session-scoped)"
+                        )
+                    else:
+                        _sess.close()
+                        notes.append(
+                            f"CDP device emulation FAILED ({device_preset.id}: "
+                            f"{_ok}/{len(_results)} steps)"
+                        )
+                    for _r in _results:
+                        if not _r.get("ok"):
+                            notes.append(f"CDP emulation step failed: {_r.get('method')}: {_r.get('error')}")
+        except Exception as e:
+            notes.append(f"CDP device emulation skipped: {e}")
 
         # Store egress IP in runtime if proxy health gave us one
         if proxy_health and proxy_health.egress_ip:

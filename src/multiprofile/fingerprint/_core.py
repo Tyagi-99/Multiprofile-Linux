@@ -1,4 +1,16 @@
-"""Deterministic fingerprint builder for profile consistency (Phase 2 foundation)."""
+"""Shared deterministic internals for the fingerprint package.
+
+This is the verbatim logic that used to live in ``fingerprint.py``:
+platform pools, seed normalisation, deterministic picks, pool detection,
+``build_fingerprint`` and ``_ua_platform_mismatch``.  Every component module
+derives its values from the same ``resolve_context()`` source so the
+per-surface outputs (navigator, screen, client hints, ...) stay coherent.
+
+Public names that existed on the old ``fingerprint`` module are re-exported
+from ``multiprofile.fingerprint`` unchanged; ``build_fingerprint`` keeps
+byte-identical behaviour so the launcher, the extension config and the
+existing tests see exactly the same dict as before.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -43,6 +55,7 @@ def _hex_id(rng_val: float) -> str:
 
 # Platform pools — UA must agree with platform/touch/screen
 _DESKTOP_WIN = {
+    "pool_name": "win",
     "platform": "Win32",
     "touch": 0,
     "screens": [(1920, 1080, 1040, 1), (2560, 1440, 1400, 1), (1366, 768, 728, 1), (1536, 864, 824, 1.25)],
@@ -63,6 +76,7 @@ _DESKTOP_WIN = {
 }
 
 _DESKTOP_MAC = {
+    "pool_name": "mac",
     "platform": "MacIntel",
     "touch": 0,
     "screens": [(1440, 900, 877, 2), (1680, 1050, 1027, 2), (1728, 1117, 1080, 2), (2560, 1600, 1570, 2)],
@@ -81,6 +95,7 @@ _DESKTOP_MAC = {
 }
 
 _DESKTOP_LINUX = {
+    "pool_name": "linux",
     "platform": "Linux x86_64",
     "touch": 0,
     "screens": [(1920, 1080, 1040, 1), (2560, 1440, 1400, 1), (1366, 768, 728, 1)],
@@ -99,6 +114,7 @@ _DESKTOP_LINUX = {
 }
 
 _MOBILE_ANDROID = {
+    "pool_name": "android",
     "platform": "Linux armv8l",
     "touch": 5,
     "screens": [(412, 915, 915, 2.625), (360, 800, 800, 3), (393, 851, 851, 2.75), (412, 892, 892, 2.625)],
@@ -106,7 +122,7 @@ _MOBILE_ANDROID = {
     "memory": [4, 6, 8],
     "gpus": [
         ("Google Inc. (Qualcomm)", "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)"),
-        ("Google Inc. (Qualcomm)", "ANGLE (Qualcomm, Adreno (TM) 650, OpenGL ES 3.2)"),
+        ("Google Inc. (Qualcomm)", "ANGLE (ARM, Mali-G78, OpenGL ES 3.2)"),
         ("Google Inc. (ARM)", "ANGLE (ARM, Mali-G78, OpenGL ES 3.2)"),
     ],
     "ch_platform": "Android",
@@ -117,6 +133,7 @@ _MOBILE_ANDROID = {
 }
 
 _MOBILE_IPHONE = {
+    "pool_name": "iphone",
     "platform": "iPhone",
     "touch": 5,
     "screens": [(393, 852, 852, 3), (390, 844, 844, 3), (428, 926, 926, 3)],
@@ -130,6 +147,18 @@ _MOBILE_IPHONE = {
     "bitness": "64",
     "platformVersion": "17.4.0",
     "model": "iPhone",
+}
+
+# Named lookup for device presets. "ios" is an alias for "iphone".
+POOL_MAP = {
+    "win": _DESKTOP_WIN,
+    "windows": _DESKTOP_WIN,
+    "mac": _DESKTOP_MAC,
+    "macos": _DESKTOP_MAC,
+    "linux": _DESKTOP_LINUX,
+    "android": _MOBILE_ANDROID,
+    "iphone": _MOBILE_IPHONE,
+    "ios": _MOBILE_IPHONE,
 }
 
 
@@ -156,8 +185,161 @@ def _chrome_version(ua: str) -> str:
     return "131.0.0.0"
 
 
+def _chrome_major(ua: str) -> int:
+    full = _chrome_version(ua)
+    try:
+        return int(full.split(".")[0])
+    except (ValueError, IndexError):
+        return 131
+
+
+def _languages(lang: str) -> list[str]:
+    languages = [lang]
+    if lang.startswith("en") and lang != "en":
+        languages.append("en")
+    elif "-" in lang:
+        languages.append(lang.split("-")[0])
+    return languages
+
+
+def _apply_preset(pool: dict, preset: dict[str, Any]) -> dict:
+    """Return a pool dict with device_preset fields overlaid.
+
+    A preset is coherent because it overrides the *same* pool dict every
+    surface reads from, instead of letting each surface guess separately.
+    Only known pool keys are honoured; unknown keys are ignored.
+
+    A device preset additionally pins the exact viewport: the Screen
+    component must report the preset's geometry (the same values the
+    launcher applies via Emulation.setDeviceMetricsOverride), not a
+    generic pool pick.
+    """
+    merged = dict(pool)
+    for key in ("platform", "touch", "screens", "cores", "memory", "gpus",
+                "ch_platform", "architecture", "bitness", "platformVersion", "model"):
+        if preset.get(key) is not None:
+            merged[key] = preset[key]
+    vp = preset.get("viewport") or {}
+    if isinstance(vp.get("width"), int) and isinstance(vp.get("height"), int):
+        dsf = preset.get("device_scale_factor") or 1.0
+        try:
+            dsf = float(dsf)
+        except (TypeError, ValueError):
+            dsf = 1.0
+        merged["screens"] = [(vp["width"], vp["height"], vp["height"], dsf)]
+    return merged
+
+
+def resolve_context(
+    profile: dict[str, Any],
+    device_preset: dict[str, Any] | str | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Resolve the ONE coherent source every component build reads from.
+
+    Returns {"seed", "pool", "pool_name", "userAgent", "isMobile", "language",
+    "languages", "timezone", "webrtcMode", "source"}.
+
+    device_preset may be:
+      - None: pool detected from profile UA / isMobile (legacy behaviour)
+      - str:  a POOL_MAP key ("win", "mac", "linux", "android", "iphone")
+      - dict: {"pool": <key>} for a named pool, and/or explicit pool fields
+              ("platform", "touch", "screens", "cores", "memory", "ch_platform",
+              "architecture", "bitness", "platformVersion", "model",
+              "user_agent") overlaid on the detected pool.
+    """
+    seed = seed if seed is not None else normalize_seed(profile)
+    preset_dict: dict[str, Any] = {}
+    pool_name: str | None = None
+    if isinstance(device_preset, str):
+        preset_dict = {"pool": device_preset}
+    elif isinstance(device_preset, dict):
+        preset_dict = dict(device_preset)
+
+    ua = preset_dict.get("user_agent") or profile.get("userAgent") or ""
+    is_mobile = bool(preset_dict.get("mobile", profile.get("isMobile")))
+
+    pool = _detect_pool(ua, is_mobile)
+    pool_name = pool.get("pool_name", "detected")
+    source = f"pool:{pool_name}"
+    if "pool" in preset_dict:
+        named = POOL_MAP.get(str(preset_dict["pool"]).lower())
+        if named is not None:
+            pool = named
+            pool_name = pool.get("pool_name", str(preset_dict["pool"]))
+            source = f"device_preset:{pool_name}"
+    if any(k in preset_dict for k in ("platform", "touch", "screens", "cores",
+                                      "memory", "gpus", "ch_platform", "architecture",
+                                      "bitness", "platformVersion", "model")):
+        pool = _apply_preset(pool, preset_dict)
+        source = f"device_preset:overlay({pool_name})"
+
+    lang = profile.get("language") or "en-US"
+    tz = profile.get("timezone") or "America/New_York"
+    webrtc = profile.get("webrtcMode") or "default"
+    if webrtc not in ("default", "disable_non_proxied_udp", "disable"):
+        webrtc = "default"
+
+    return {
+        "seed": seed,
+        "pool": pool,
+        "pool_name": pool_name,
+        "userAgent": ua,
+        "isMobile": is_mobile,
+        "language": lang,
+        "languages": _languages(lang),
+        "timezone": tz,
+        "webrtcMode": webrtc,
+        "source": source,
+    }
+
+
+def _build_brands(chrome_major: int) -> list[dict[str, str]]:
+    return [
+        {"brand": "Google Chrome", "version": str(chrome_major)},
+        {"brand": "Chromium", "version": str(chrome_major)},
+        {"brand": "Not-A.Brand", "version": "99"},
+    ]
+
+
+def _build_full_version_list(chrome_full: str) -> list[dict[str, str]]:
+    return [
+        {"brand": "Google Chrome", "version": chrome_full},
+        {"brand": "Chromium", "version": chrome_full},
+        {"brand": "Not-A.Brand", "version": "99.0.0.0"},
+    ]
+
+
+def device_preset_for_profile(profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return the device preset dict for ``profile["deviceId"]``, or None.
+
+    Guarded import: returns None when the devices package is unavailable
+    or the id is unknown, so callers degrade gracefully.
+    """
+    device_id = (profile or {}).get("deviceId")
+    if not device_id:
+        return None
+    try:
+        from ..devices.registry import DeviceRegistry
+        preset = DeviceRegistry().get(device_id)
+    except Exception:
+        return None
+    if preset is None:
+        return None
+    try:
+        return preset.to_dict()
+    except Exception:
+        return None
+
+
 def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
-    """Build a deterministic fingerprint dict from seed + UA/isMobile."""
+    """Build a deterministic fingerprint dict from seed + UA/isMobile.
+
+    Kept byte-identical to the legacy implementation: the launcher, the
+    extension config (which reads seed/platform/screen/cores/memory/touch),
+    CDP identity (_extract_ua_metadata) and the existing tests all consume
+    this exact dict shape.
+    """
     seed = normalize_seed(profile)
     ua = profile.get("userAgent") or ""
     is_mobile = bool(profile.get("isMobile"))
@@ -271,37 +453,3 @@ def _ua_platform_mismatch(ua: str, platform: str) -> list[str]:
     if "android" in ua_l and platform == "Win32":
         warnings.append("CRITICAL: Android UA paired with Win32 platform")
     return warnings
-
-
-def fingerprint_report(profile: dict[str, Any]) -> dict[str, Any]:
-    """Human-readable fingerprint report including mismatch warnings."""
-    fp = profile.get("fingerprint") if isinstance(profile.get("fingerprint"), dict) else None
-    if not fp:
-        fp = build_fingerprint(profile)
-    warnings = _ua_platform_mismatch(fp.get("userAgent") or profile.get("userAgent") or "", fp.get("platform", ""))
-    touch = fp.get("touch", 0)
-    is_mobile_fp = touch > 0
-    ua_mobile = bool(profile.get("isMobile")) or bool(
-        re.search(r"Mobile|Android|iPhone|iPad", profile.get("userAgent") or "", re.I)
-    )
-    if is_mobile_fp != ua_mobile and profile.get("userAgent"):
-        # soft check — UA may not have Mobile token on some desktop-emulation cases
-        if is_mobile_fp and not ua_mobile:
-            warnings.append("Fingerprint is mobile (touch>0) but profile isMobile/UA looks desktop")
-        if not is_mobile_fp and ua_mobile:
-            warnings.append("Fingerprint is desktop (touch=0) but UA looks mobile")
-
-    screen = fp.get("screen") or {}
-    summary = (
-        f"{fp.get('platform')} | {screen.get('w')}x{screen.get('h')}@{screen.get('dpr')} | "
-        f"{fp.get('cores')} cores / {fp.get('memory')}GB | "
-        f"touch={touch} | tz={fp.get('timezone')} | webrtc={fp.get('webrtcMode') or fp.get('webrtcPolicy')}"
-    )
-    return {
-        "ok": True,
-        "seed": fp.get("seed"),
-        "summary": summary,
-        "fingerprint": fp,
-        "warnings": warnings,
-        "consistent": len(warnings) == 0,
-    }

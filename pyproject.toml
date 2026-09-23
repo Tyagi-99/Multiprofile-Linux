@@ -1,6 +1,6 @@
 [project]
 name = "multiprofile-native"
-version = "1.5.0"
+version = "1.6.0"
 description = "Native Linux Multiprofile manager (clean-room host for authorized UI/extension assets)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,4 +31,9 @@ multiprofile = ["../static/*", "../extension/*"]
 dev = [
     "cryptography>=50.0.1",
     "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "network: tests that require outbound network access",
 ]

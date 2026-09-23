@@ -1,0 +1,512 @@
+"""Profile consistency engine for Multiprofile Native.
+
+Pure, deterministic logic — no browser, no network.  Given a profile, an
+optional device preset, optional network diagnostics, and an optional expected
+fingerprint, it cross-checks the signals a real browser would expose and
+reports PASS / WARNING / ERROR per domain with human-readable messages.
+
+Domains:
+    geo       ip_country <-> timezone <-> language
+    device    device preset <-> viewport <-> DPR <-> touch
+    platform  os <-> user-agent <-> Client Hints platform
+    mobile    mobile category <-> viewport <-> touch
+    browser   browser family <-> Client Hints brands
+    gpu_webgl expected webgl policy <-> runtime capability (when provided)
+"""
+from __future__ import annotations
+
+from typing import Any
+
+PASS = "PASS"
+WARNING = "WARNING"
+ERROR = "ERROR"
+
+# ---------------------------------------------------------------------------
+# IANA timezone -> ISO country code (common zones; unknown zones are reported
+# as insufficient data rather than guessed).
+# ---------------------------------------------------------------------------
+
+TZ_COUNTRY: dict[str, str] = {
+    # North America
+    "America/New_York": "US", "America/Chicago": "US", "America/Denver": "US",
+    "America/Los_Angeles": "US", "America/Anchorage": "US", "Pacific/Honolulu": "US",
+    "America/Toronto": "CA", "America/Vancouver": "CA", "America/Montreal": "CA",
+    "America/Mexico_City": "MX", "America/Bogota": "CO", "America/Sao_Paulo": "BR",
+    "America/Buenos_Aires": "AR", "America/Santiago": "CL", "America/Lima": "PE",
+    # Europe
+    "Europe/London": "GB", "Europe/Dublin": "IE", "Europe/Lisbon": "PT",
+    "Europe/Madrid": "ES", "Europe/Paris": "FR", "Europe/Berlin": "DE",
+    "Europe/Rome": "IT", "Europe/Amsterdam": "NL", "Europe/Brussels": "BE",
+    "Europe/Zurich": "CH", "Europe/Vienna": "AT", "Europe/Prague": "CZ",
+    "Europe/Warsaw": "PL", "Europe/Stockholm": "SE", "Europe/Oslo": "NO",
+    "Europe/Copenhagen": "DK", "Europe/Helsinki": "FI", "Europe/Athens": "GR",
+    "Europe/Istanbul": "TR", "Europe/Moscow": "RU", "Europe/Kiev": "UA",
+    "Europe/Bucharest": "RO", "Europe/Budapest": "HU",
+    # Asia
+    "Asia/Dubai": "AE", "Asia/Kolkata": "IN", "Asia/Karachi": "PK",
+    "Asia/Dhaka": "BD", "Asia/Colombo": "LK", "Asia/Kathmandu": "NP",
+    "Asia/Bangkok": "TH", "Asia/Jakarta": "ID", "Asia/Singapore": "SG",
+    "Asia/Kuala_Lumpur": "MY", "Asia/Manila": "PH", "Asia/Hong_Kong": "HK",
+    "Asia/Shanghai": "CN", "Asia/Taipei": "TW", "Asia/Seoul": "KR",
+    "Asia/Tokyo": "JP", "Asia/Jerusalem": "IL", "Asia/Riyadh": "SA",
+    "Asia/Tehran": "IR",
+    # Oceania
+    "Australia/Sydney": "AU", "Australia/Melbourne": "AU", "Australia/Perth": "AU",
+    "Pacific/Auckland": "NZ",
+    # Africa
+    "Africa/Cairo": "EG", "Africa/Lagos": "NG", "Africa/Nairobi": "KE",
+    "Africa/Johannesburg": "ZA", "Africa/Casablanca": "MA",
+}
+
+# Mobile viewport envelope: (min_w, max_w, min_h, max_h)
+_MOBILE_VIEWPORT = (300, 600, 560, 1400)
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+def _ua_platform(ua: str) -> str | None:
+    """Best-effort OS platform token from a user-agent string."""
+    u = (ua or "").lower()
+    if "android" in u:
+        return "Android"
+    if "iphone" in u or "ipad" in u:
+        return "iOS"
+    if "macintosh" in u or "mac os x" in u:
+        return "macOS"
+    if "windows nt" in u or "win64" in u or "wow64" in u:
+        return "Windows"
+    if "linux" in u:
+        return "Linux"
+    if "cros" in u:
+        return "ChromeOS"
+    return None
+
+
+def _ua_browser_family(ua: str) -> str | None:
+    u = ua or ""
+    if "Edg/" in u or "Edge/" in u:
+        return "Edge"
+    if "OPR/" in u or "Opera" in u:
+        return "Opera"
+    if "Firefox/" in u:
+        return "Firefox"
+    if "Chrome/" in u or "Chromium/" in u:
+        return "Chrome"
+    if "Version/" in u and "Safari/" in u:
+        return "Safari"
+    return None
+
+
+def _ch_of(fp: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract client-hints view from a fingerprint dict (both shapes)."""
+    if not isinstance(fp, dict):
+        return {}
+    ch = fp.get("clientHints")
+    if isinstance(ch, dict):
+        return ch
+    out: dict[str, Any] = {}
+    for k in ("platform", "brands", "mobile", "architecture", "bitness",
+              "platformVersion", "model", "uaFullVersion"):
+        v = fp.get("ch_" + k) if k != "platform" else fp.get("ch_platform")
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def _diag_value(diagnostics: Any, key: str) -> Any:
+    if diagnostics is None:
+        return None
+    if isinstance(diagnostics, dict):
+        return diagnostics.get(key)
+    return getattr(diagnostics, key, None)
+
+
+def _norm_country_code(cc: Any) -> str | None:
+    if not cc:
+        return None
+    s = str(cc).strip().upper()
+    return s if len(s) == 2 else None
+
+
+def _lang_region(language: Any) -> str | None:
+    if not language:
+        return None
+    parts = str(language).replace("_", "-").split("-")
+    if len(parts) >= 2 and len(parts[-1]) == 2:
+        return parts[-1].upper()
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+class ProfileConsistencyEngine:
+    """Cross-checks profile signals for internal coherence."""
+
+    # ------------------------------------------------------------------ API
+    def check(
+        self,
+        profile: dict[str, Any],
+        *,
+        device_preset: dict[str, Any] | None = None,
+        diagnostics: Any = None,
+        fingerprint_expected: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        profile = profile or {}
+        fp = fingerprint_expected if isinstance(fingerprint_expected, dict) else None
+
+        checks = [
+            self._check_geo(profile, diagnostics),
+            self._check_device(profile, device_preset, fp),
+            self._check_platform(profile, fp),
+            self._check_mobile(profile, device_preset, fp),
+            self._check_browser(profile, fp),
+            self._check_gpu_webgl(profile, fp),
+        ]
+        status = PASS
+        for c in checks:
+            if c["status"] == ERROR:
+                status = ERROR
+                break
+        if status != ERROR:
+            for c in checks:
+                if c["status"] == WARNING:
+                    status = WARNING
+                    break
+        return {
+            "profile_id": profile.get("id"),
+            "status": status,
+            "checks": checks,
+        }
+
+    # --------------------------------------------------------------- domains
+    def _check_geo(self, profile: dict[str, Any], diagnostics: Any) -> dict[str, Any]:
+        domain = "geo"
+        cc = _norm_country_code(_diag_value(diagnostics, "country_code"))
+        tz = (profile.get("timezone") or "").strip()
+        tz_cc = TZ_COUNTRY.get(tz)
+        lang_cc = _lang_region(profile.get("language"))
+
+        comparators = [v for v in (tz_cc, lang_cc) if v]
+        if cc is None:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "IP geolocation to compare against",
+                "actual": {"country_code": None, "timezone": tz or None,
+                           "timezone_country": tz_cc, "language": profile.get("language"),
+                           "language_country": lang_cc},
+                "message": "insufficient data: no IP geolocation (country_code) to "
+                           "compare timezone/language against",
+            }
+        if not comparators:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "a timezone or language region to compare against",
+                "actual": {"country_code": cc, "timezone": tz or None,
+                           "language": profile.get("language")},
+                "message": "insufficient data: IP country known but no timezone or "
+                           "language region to compare against",
+            }
+        known = [cc] + comparators
+        distinct = set(known)
+        if len(distinct) > 1:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "single coherent country",
+                "actual": {"country_code": cc, "timezone": tz or None,
+                           "timezone_country": tz_cc, "language": profile.get("language"),
+                           "language_country": lang_cc},
+                "message": (
+                    f"geolocation conflict: IP country {cc or 'unknown'} vs "
+                    f"timezone {tz or 'unset'} ({tz_cc or 'unknown'}) vs "
+                    f"language region {lang_cc or 'unknown'}. "
+                    "A mismatched IP/timezone pair is a common detection signal."
+                ),
+            }
+        return {
+            "domain": domain, "status": PASS,
+            "expected": distinct.pop(),
+            "actual": {"country_code": cc, "timezone": tz or None,
+                       "timezone_country": tz_cc, "language": profile.get("language"),
+                       "language_country": lang_cc},
+            "message": "IP country, timezone and language region are coherent",
+        }
+
+    def _check_device(
+        self,
+        profile: dict[str, Any],
+        preset: dict[str, Any] | None,
+        fp: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        domain = "device"
+        if not isinstance(preset, dict):
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "a device preset",
+                "actual": None,
+                "message": "device preset unavailable: cannot cross-check viewport, DPR and touch",
+            }
+
+        vp = preset.get("viewport") or {}
+        p_w, p_h = vp.get("width"), vp.get("height")
+        p_dpr = preset.get("device_scale_factor")
+        p_touch = preset.get("touch")
+        p_mobile = preset.get("mobile")
+
+        problems: list[str] = []
+        # Internal coherence of the preset itself
+        if p_mobile is True and p_touch is False:
+            problems.append("preset declares mobile=True but touch=False")
+        if p_mobile is True and isinstance(p_w, (int, float)) and p_w > _MOBILE_VIEWPORT[1]:
+            problems.append(f"preset mobile viewport width {p_w}px exceeds mobile range")
+
+        # Cross-check against the expected fingerprint, when available
+        if fp is not None:
+            screen = fp.get("screen") or {}
+            f_w, f_h, f_dpr = screen.get("w"), screen.get("h"), screen.get("dpr")
+            f_touch = fp.get("touch")
+            if all(isinstance(v, (int, float)) for v in (p_w, p_h, f_w, f_h)) and (p_w, p_h) != (f_w, f_h):
+                problems.append(
+                    f"preset viewport {int(p_w)}x{int(p_h)} != fingerprint screen {int(f_w)}x{int(f_h)}"
+                )
+            if isinstance(p_dpr, (int, float)) and isinstance(f_dpr, (int, float)) and p_dpr != f_dpr:
+                problems.append(f"preset DPR {p_dpr} != fingerprint DPR {f_dpr}")
+            if isinstance(p_touch, bool) and isinstance(f_touch, (int, float)):
+                if (f_touch > 0) != p_touch:
+                    problems.append(
+                        f"preset touch={p_touch} contradicts fingerprint touch points={f_touch}"
+                    )
+
+        if problems:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "device preset, viewport, DPR and touch in agreement",
+                "actual": {"viewport": {"width": p_w, "height": p_h}, "dpr": p_dpr,
+                           "touch": p_touch, "mobile": p_mobile},
+                "message": "device mismatch: " + "; ".join(problems),
+            }
+        return {
+            "domain": domain, "status": PASS,
+            "expected": "device preset, viewport, DPR and touch in agreement",
+            "actual": {"viewport": {"width": p_w, "height": p_h}, "dpr": p_dpr,
+                       "touch": p_touch, "mobile": p_mobile},
+            "message": "device preset, viewport, DPR and touch are coherent",
+        }
+
+    def _check_platform(self, profile: dict[str, Any], fp: dict[str, Any] | None) -> dict[str, Any]:
+        domain = "platform"
+        ua = profile.get("userAgent") or ""
+        ua_plat = _ua_platform(ua)
+        ch = _ch_of(fp)
+        ch_plat = ch.get("platform")
+
+        if ua_plat is None or not ch_plat:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "OS, user-agent and Client Hints platform in agreement",
+                "actual": {"ua_platform": ua_plat, "ch_platform": ch_plat},
+                "message": "insufficient data: cannot verify OS/user-agent/Client-Hints agreement",
+            }
+
+        ch_norm = str(ch_plat).strip().lower()
+        ua_norm = ua_plat.strip().lower()
+        # "Android" CH platform must pair with an Android UA, etc.
+        match = (
+            (ch_norm == "android" and ua_norm == "android")
+            or (ch_norm == "ios" and ua_norm == "ios")
+            or (ch_norm == "windows" and ua_norm == "windows")
+            or (ch_norm in ("macos", "mac os") and ua_norm == "macos")
+            or (ch_norm == "linux" and ua_norm == "linux")
+            or (ch_norm == "chromeos" and ua_norm == "chromeos")
+        )
+        if match:
+            return {
+                "domain": domain, "status": PASS,
+                "expected": ua_plat,
+                "actual": {"ua_platform": ua_plat, "ch_platform": ch_plat},
+                "message": f"user-agent OS ({ua_plat}) matches Client Hints platform ({ch_plat})",
+            }
+        return {
+            "domain": domain, "status": ERROR,
+            "expected": f"Client Hints platform coherent with UA OS ({ua_plat})",
+            "actual": {"ua_platform": ua_plat, "ch_platform": ch_plat},
+            "message": (
+                f"OS mismatch: user-agent reports {ua_plat} but Client Hints "
+                f"platform is '{ch_plat}'. This is a hard detection signal."
+            ),
+        }
+
+    def _check_mobile(
+        self,
+        profile: dict[str, Any],
+        preset: dict[str, Any] | None,
+        fp: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        domain = "mobile"
+        is_mobile = profile.get("isMobile")
+        if is_mobile is None and isinstance(preset, dict):
+            is_mobile = preset.get("mobile")
+        if is_mobile is None and isinstance(fp, dict):
+            is_mobile = fp.get("isMobile")
+
+        # Touch signal
+        touch: bool | None = None
+        if isinstance(fp, dict) and isinstance(fp.get("touch"), (int, float)):
+            touch = fp["touch"] > 0
+        elif isinstance(preset, dict) and isinstance(preset.get("touch"), bool):
+            touch = preset["touch"]
+
+        # Viewport signal
+        w = h = None
+        if isinstance(preset, dict) and isinstance(preset.get("viewport"), dict):
+            w, h = preset["viewport"].get("width"), preset["viewport"].get("height")
+        if (w, h) == (None, None) and isinstance(fp, dict) and isinstance(fp.get("screen"), dict):
+            w, h = fp["screen"].get("w"), fp["screen"].get("h")
+
+        actual = {"isMobile": bool(is_mobile) if is_mobile is not None else None,
+                  "touch": touch, "viewport": {"width": w, "height": h}}
+
+        if is_mobile is None:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "mobile category declared",
+                "actual": actual,
+                "message": "insufficient data: mobile category unknown",
+            }
+
+        problems: list[str] = []
+        if is_mobile:
+            if touch is False:
+                problems.append("mobile profile declares touch=False (mobile devices have touch)")
+            if isinstance(w, (int, float)) and isinstance(h, (int, float)):
+                min_w, max_w, min_h, max_h = _MOBILE_VIEWPORT
+                if not (min_w <= w <= max_w and min_h <= h <= max_h):
+                    problems.append(
+                        f"mobile viewport {int(w)}x{int(h)} outside mobile range "
+                        f"{min_w}-{max_w}x{min_h}-{max_h}"
+                    )
+            elif touch is None and (w, h) == (None, None):
+                return {
+                    "domain": domain, "status": WARNING,
+                    "expected": "touch enabled and a mobile-range viewport",
+                    "actual": actual,
+                    "message": "insufficient data: no touch/viewport signal for a mobile profile",
+                }
+        else:
+            if isinstance(w, (int, float)) and isinstance(h, (int, float)):
+                min_w, max_w, min_h, max_h = _MOBILE_VIEWPORT
+                if min_w <= w <= max_w and min_h <= h <= max_h and touch:
+                    problems.append(
+                        f"desktop profile uses a mobile-range viewport {int(w)}x{int(h)} with touch"
+                    )
+
+        if problems:
+            return {
+                "domain": domain, "status": ERROR if is_mobile else WARNING,
+                "expected": "touch enabled and mobile-range viewport" if is_mobile
+                            else "desktop-range viewport",
+                "actual": actual,
+                "message": "mobile consistency failure: " + "; ".join(problems),
+            }
+        return {
+            "domain": domain, "status": PASS,
+            "expected": "mobile" if is_mobile else "desktop",
+            "actual": actual,
+            "message": "mobile category, touch and viewport are coherent",
+        }
+
+    def _check_browser(self, profile: dict[str, Any], fp: dict[str, Any] | None) -> dict[str, Any]:
+        domain = "browser"
+        ua = profile.get("userAgent") or ""
+        family = _ua_browser_family(ua)
+        ch = _ch_of(fp)
+        brands = ch.get("brands") if isinstance(ch.get("brands"), list) else None
+
+        if family is None or not brands:
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "Client Hints brands containing the browser family",
+                "actual": {"browser_family": family,
+                           "brands": [b.get("brand") for b in brands] if brands else None},
+                "message": "insufficient data: cannot verify browser/Client-Hints brand agreement",
+            }
+
+        brand_names = [str(b.get("brand") or "") for b in brands if isinstance(b, dict)]
+        hit = any(family.lower() in name.lower() for name in brand_names)
+        if hit:
+            return {
+                "domain": domain, "status": PASS,
+                "expected": family,
+                "actual": {"browser_family": family, "brands": brand_names},
+                "message": f"user-agent browser ({family}) present in Client Hints brands",
+            }
+        return {
+            "domain": domain, "status": WARNING,
+            "expected": f"Client Hints brand containing '{family}'",
+            "actual": {"browser_family": family, "brands": brand_names},
+            "message": (
+                f"browser mismatch: user-agent reports {family} but Client Hints "
+                f"brands are {brand_names}"
+            ),
+        }
+
+    def _check_gpu_webgl(self, profile: dict[str, Any], fp: dict[str, Any] | None) -> dict[str, Any]:
+        domain = "gpu_webgl"
+        expected_policy = (profile.get("webglPolicy") or profile.get("webgl") or "default")
+        expected_policy = str(expected_policy).strip().lower() or "default"
+
+        runtime = None
+        if isinstance(fp, dict) and isinstance(fp.get("webglRuntime"), dict):
+            runtime = fp["webglRuntime"]
+        expected_gpu = fp.get("gpu") if isinstance(fp, dict) else None
+
+        if runtime is None and not isinstance(expected_gpu, dict):
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "WebGL vendor/renderer coherent with expected GPU",
+                "actual": None,
+                "message": "insufficient data: no runtime WebGL capability provided",
+            }
+
+        actual = {"webgl_policy": expected_policy,
+                  "expected_gpu": expected_gpu, "runtime": runtime}
+
+        if expected_policy in ("disabled", "disable", "off"):
+            renderer = str((runtime or {}).get("renderer") or "").lower()
+            if renderer and "swiftshader" not in renderer and "llvmpipe" not in renderer \
+                    and "disabled" not in renderer:
+                return {
+                    "domain": domain, "status": WARNING,
+                    "expected": "software/disabled WebGL renderer",
+                    "actual": actual,
+                    "message": (
+                        "WebGL is expected to be disabled/software, but the runtime "
+                        f"reports renderer '{(runtime or {}).get('renderer')}'"
+                    ),
+                }
+            return {
+                "domain": domain, "status": PASS,
+                "expected": "software/disabled WebGL renderer",
+                "actual": actual,
+                "message": "WebGL state matches the expected disabled/software policy",
+            }
+
+        # Default policy: a real GPU renderer is expected (ANGLE/vendor string).
+        renderer = str(((runtime or {}).get("renderer") or (expected_gpu or {}).get("renderer") or ""))
+        vendor = str(((runtime or {}).get("vendor") or (expected_gpu or {}).get("vendor") or ""))
+        if renderer or vendor:
+            return {
+                "domain": domain, "status": PASS,
+                "expected": "hardware WebGL renderer",
+                "actual": actual,
+                "message": f"WebGL vendor/renderer present ({vendor} / {renderer})",
+            }
+        return {
+            "domain": domain, "status": WARNING,
+            "expected": "hardware WebGL renderer",
+            "actual": actual,
+            "message": "insufficient data: WebGL vendor/renderer not reported",
+        }

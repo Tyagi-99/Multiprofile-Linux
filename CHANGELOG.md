@@ -1,3 +1,48 @@
+## 1.6.0 (2026-09-23)
+
+- **Device Presets (33, honest statuses)**:
+  - 33 coherent device identity bundles: 20 Android phones, 7 iOS-class iPhones,
+    2 iPadOS-class tablets, 1 Android tablet, 3 desktop (Windows/Linux/macOS-class).
+  - `DevicePresetValidator` runs static checks plus a genuine CDP round-trip
+    against a real Chromium binary: geometry is applied via DevTools and the
+    *page* reads it back (e.g. Pixel 9: applied 411x923@2.626, page reports
+    411x923).
+  - Measured matrix: VALIDATED 2 (`win11-chrome`, `ubuntu-chrome`), PARTIAL 31
+    (all checks pass; capped by declared capability limits, not failures),
+    PENDING 0, UNSUPPORTED 0.
+  - Capability matrix honestly declares host limits: real host WebGL renderer,
+    iOS-class = Chromium not WebKit, macOS-class cannot reproduce macOS
+    GPU/media/fonts, emulated sensors, platform font stacks missing on Linux.
+- **Fingerprint Inspector & Consistency Engine**:
+  - `GET /api/profiles/<id>/fingerprint` reports per-component `expected` values;
+    device profiles pin Screen exactly to preset viewport x DPR and carry the
+    preset UA / Client Hints. (Legacy top-level `fingerprint` may still reflect
+    the stored legacy desktop fingerprint.)
+  - `GET /api/profiles/<id>/consistency` runs read-only per-domain checks
+    (`geo`, `device`, `platform`, `mobile`, `browser`, `gpu_webgl`), each
+    PASS/WARNING/ERROR with a message; overall = worst domain.
+- **Honest Network Diagnostics**:
+  - `POST /api/profiles/<id>/network/test` returns `HEALTHY | DEGRADED | DOWN`
+    with real measurements or real errors — never placeholders. Non-HEALTHY
+    results carry the actual error; proxy credentials are masked (`***`) in
+    error strings. ip-api 403s surface as DOWN + error.
+- **Launcher Hardening**:
+  - Fixed CDP `userAgentMetadata` brand shape (`fullVersionList` entries now use
+    `{brand, version}` as CDP requires); verified live: all three emulation
+    commands OK, page reports applied geometry, touch, and Android UA.
+  - Unknown `deviceId` records a `device preset not found` note instead of a
+    traceback; launching with no Chromium binary fails fast with
+    `dependency_missing` instead of hanging.
+- **Gateways (unchanged)**: Azure and WireGuard providers remain
+  SCAFFOLD / NOT ACTIVE — `provision()` returns `not_implemented`, pinned by
+  tests. Manual proxy routing via `custom` remains the production path.
+- **Docs**: new `docs/DEVICE_PRESETS.md` (full 33-preset catalogue + measured
+  matrix) and `docs/PROFILE_CONSISTENCY.md`; updated ARCHITECTURE (1.6.0),
+  FINGERPRINT_MODEL, NETWORK_ISOLATION, REMOTE_GATEWAYS (scaffold re-verified).
+- **Tests**: new `tests/test_integration_v16.py` (API E2E, launcher exception
+  safety, honest-diagnostics shape) and `tests/test_release_v16.py` (version
+  coherence, docs presence, secret-leak scan, gateway scaffold pins).
+
 ## 1.5.0
 
 - **Network Isolation & Fail-Closed Pre-Launch Gate**:

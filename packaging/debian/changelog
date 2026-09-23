@@ -1,3 +1,22 @@
+multiprofile-native (1.6.0) unstable; urgency=medium
+
+  * Device presets: 33 coherent device identities (Android, iOS-class, iPadOS-class,
+    Windows/Linux/macOS-class) with honest capability matrices and genuine CDP
+    round-trip validation (VALIDATED/PARTIAL/PENDING/UNSUPPORTED).
+  * Fingerprint inspector components: per-component expected values (Navigator,
+    Client Hints, Screen, Touch) with device-preset coherence; Screen pins to
+    preset viewport x DPR.
+  * Profile consistency engine: read-only per-domain checks (geo, device,
+    platform, mobile, browser, gpu_webgl) with PASS/WARNING/ERROR semantics.
+  * Honest network diagnostics: POST /api/profiles/<id>/network/test returns
+    HEALTHY|DEGRADED|DOWN with real measurements or real errors, never placeholders.
+  * CDP userAgentMetadata brand shape fix: fullVersionList now uses {brand, version}.
+  * Launcher hook: device emulation via CDP; unknown deviceId records a note,
+    no traceback; no-Chrome launch fails gracefully without hanging.
+  * Azure/WireGuard gateways remain scaffold / not active (provision: not_implemented).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Wed, 23 Sep 2026 12:00:00 +0530
+
 multiprofile-native (1.4.6) unstable; urgency=medium
 
   * Fail GitHub Cloud Runner launches instead of using the home IP.

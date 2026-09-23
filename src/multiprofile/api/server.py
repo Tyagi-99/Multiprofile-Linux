@@ -837,4 +837,19 @@ def create_app() -> Flask:
             return jsonify({"error": "not found"}), 404
         return send_from_directory(static_dir(), path)
 
+    # ------------------------------------------------------------------ #
+    #  v1.6.0 extension routes (guarded: app must boot even if a package   #
+    #  is mid-development)                                                #
+    # ------------------------------------------------------------------ #
+    try:
+        from ..devices.routes import register_devices_routes
+        register_devices_routes(app)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("devices routes not registered: %s", e)
+    try:
+        from ..network_routes import register_network_routes
+        register_network_routes(app)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("network routes not registered: %s", e)
+
     return app
