@@ -1,9 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Multiprofile Native
-Comment=Native Linux multi-profile browser manager
+Name=Multiprofile
+Comment=Linux Console
 Exec=multiprofile
 Icon=multiprofile
+StartupWMClass=multiprofile-native
 Terminal=false
 Categories=Network;Utility;
 StartupNotify=true

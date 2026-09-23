@@ -41,24 +41,35 @@ def _webview_icon_path() -> str | None:
     return None
 
 
-def open_ui(url: str = "http://127.0.0.1:8765/", title: str = "Multiprofile Native") -> None:
+def open_ui(url: str = "http://127.0.0.1:8765/", title: str = "Multiprofile") -> None:
     """Prefer pywebview GTK; fall back to system browser."""
     try:
         import webview  # type: ignore
 
         log.info("Starting pywebview UI at %s", url)
         icon = _webview_icon_path()
-        # `icon` is supported by newer pywebview; older versions raise
-        # TypeError for the unknown kwarg — fall back to no window icon.
-        if icon:
-            try:
-                webview.create_window(title, url, width=1280, height=800, icon=icon)
-            except TypeError:
-                webview.create_window(title, url, width=1280, height=800)
-        else:
-            webview.create_window(title, url, width=1280, height=800)
+        # Match the desktop file id so GNOME uses Icon=multiprofile, not a generic mark.
+        os.environ.setdefault("GIO_LAUNCHED_DESKTOP_FILE", "multiprofile-native.desktop")
+        try:
+            import gi
+
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import GLib, Gtk
+
+            GLib.set_prgname("multiprofile-native")
+            GLib.set_application_name("Multiprofile")
+            if icon:
+                Gtk.Window.set_default_icon_from_file(icon)
+        except Exception:
+            log.debug("could not set GTK app id/icon", exc_info=True)
+        # This pywebview build rejects icon= on create_window. start(icon=) is what GTK applies.
+        webview.create_window(title, url, width=1280, height=800)
         os.makedirs(WEBVIEW_STORAGE_PATH, exist_ok=True)
-        webview.start(private_mode=False, storage_path=WEBVIEW_STORAGE_PATH)
+        webview.start(
+            private_mode=False,
+            storage_path=WEBVIEW_STORAGE_PATH,
+            icon=icon,
+        )
         return
     except Exception as e:
         log.warning("pywebview unavailable (%s); opening system browser", e)
