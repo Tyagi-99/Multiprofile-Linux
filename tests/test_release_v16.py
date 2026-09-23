@@ -1,4 +1,4 @@
-"""1.8.0 release tests: version coherence, docs presence, security (no secret
+"""1.9.0 release tests: version coherence, docs presence, security (no secret
 leakage in API responses or audit entries), and gateway scaffold status.
 
 Storage is isolated per-test via XDG_* env vars.
@@ -17,7 +17,7 @@ from multiprofile.api.server import create_app
 from multiprofile.audit import read_audit
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_VERSION = "1.8.0"
+EXPECTED_VERSION = "1.9.0"
 
 SECRET_KEY_RE = re.compile(r"password|passwd|passphrase|secret|token|pat", re.I)
 
@@ -52,7 +52,7 @@ def _iter_keys(obj, path=""):
 # Version coherence
 # ---------------------------------------------------------------------------
 
-def test_version_is_1_7_0():
+def test_version_is_1_9_0():
     assert __version__ == EXPECTED_VERSION
 
 
@@ -85,7 +85,7 @@ def test_no_stale_version_markers():
     """No leftover 1.5.0/1.4.6 version markers in packaging or source.
 
     The Debian changelog deliberately keeps its 1.4.6 history entry below the
-    new 1.8.0 stanza (upstream history is preserved), so it is excluded here;
+    new 1.9.0 stanza (upstream history is preserved), so it is excluded here;
     test_debian_changelog_top_entry covers it.
     """
     for rel in ("pyproject.toml", "build-deb.sh", "src/multiprofile/__init__.py"):

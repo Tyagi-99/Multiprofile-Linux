@@ -1,3 +1,11 @@
+## 1.9.0 (2026-09-24)
+
+- **Premium console redesign**: the old single-file console (`src/static/app.js`) is replaced by a Next.js 15 / React 19 / TypeScript / Tailwind v4 static export, served from the same `src/static` directory and packaged into the deb exactly as before — no Node.js runtime needed on the machine. Hash routing keeps every deep link working; all Flask API contracts, the browser launcher, supervisor, 33 device presets (with honest support badges), fingerprints, proxies/gateways, jobs, audit, backups, and proxy fail-closed behaviour are preserved.
+- **New 6-step New Profile wizard** (Basic → Device → Network → Fingerprint → Consistency → Review) with ad-hoc proxy testing, per-device fingerprint capability matrix, local pre-flight checks, and a double-confirm on errors. The quick-create dialog stays, with a "Full setup ›" cross-link into the wizard.
+- **New sections**: Overview dashboard (real data), Profiles table (filters, cursor pagination, row selection, bulk actions, export with proxy passwords stripped), 10-tab profile detail, Device Library, Fingerprint Inspector, Network tabs (proxies/gateways/diagnostics), Jobs with live SSE updates, Audit log, and Settings (general, clients & templates, backups with passphrase restore, extensions status).
+- **Global shell**: command palette (`Ctrl+K`), keyboard shortcuts, light/dark/system themes, toast notifications, bearer-token dialog, skip-to-content link, focus-trapped dialogs, and screen-reader announcements. The wizard is code-split; first-load JS ~196 kB.
+- **Packaging**: all seven version markers synchronized on 1.9.0.
+
 ## 1.8.0 (2026-09-23)
 
 - **Desktop logo**: original Multiprofile mark — four isolated browser panes in a tight grid, pine teal `#0e7c6b` on deep ink `#131a25`, flat and readable at 16px. Shipped as SVG (`packaging/icons/multiprofile.svg`) plus PNGs at 512/256/128/64/48/32/16 installed under `/usr/share/icons/hicolor/<size>/apps/multiprofile.png` via the deb; `packaging/debian/multiprofile.desktop` now uses `Icon=multiprofile` (replacing the generic terminal icon), and `postinst` refreshes the icon cache when `gtk-update-icon-cache` exists. The same artwork is used for `src/static/app_icon.png`, `favicon.ico`, the console sidebar, the login card, and the pywebview window icon (with a graceful fallback for older pywebview versions).

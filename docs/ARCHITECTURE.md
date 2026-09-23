@@ -1,6 +1,6 @@
 # Multiprofile Linux — Architecture Specification
 
-Version: 1.8.0  
+Version: 1.9.0  
 Status: Production Grade Linux-Native Multi-Profile Browser Platform  
 
 ---

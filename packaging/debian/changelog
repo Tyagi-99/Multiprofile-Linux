@@ -1,3 +1,27 @@
+multiprofile-native (1.9.0) unstable; urgency=medium
+
+  * Premium console redesign: the old single-file console (src/static/app.js)
+    is replaced by a Next.js 15 / React 19 / TypeScript / Tailwind v4 static
+    export served from the same src/static directory — no Node.js runtime
+    needed on the machine. Hash routing, same Flask API contracts, all 33
+    device presets with honest support badges, proxy fail-closed behaviour,
+    and every existing backend feature preserved.
+  * New 6-step New Profile wizard (Basic / Device / Network / Fingerprint /
+    Consistency / Review) with proxy testing, device capability matrix, and
+    local pre-flight checks; quick-create dialog kept with a "Full setup"
+    cross-link.
+  * Overview dashboard, Profiles table (filters, cursor pagination,
+    selection, bulk actions, export with proxy passwords stripped),
+    10-tab profile detail, Device Library, Fingerprint Inspector, Network
+    (proxies/gateways/diagnostics), Jobs with live SSE updates, Audit log,
+    and Settings (general, clients & templates, backups, extensions).
+  * Global shell: command palette, keyboard shortcuts, light/dark/system
+    themes, notifications, bearer-token dialog. Wizard code-split;
+    first-load JS ~196 kB.
+  * All seven version markers synchronized on 1.9.0.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Thu, 24 Sep 2026 00:26:00 +0530
+
 multiprofile-native (1.8.0) unstable; urgency=medium
 
   * Desktop logo: original Multiprofile mark (four isolated browser panes in

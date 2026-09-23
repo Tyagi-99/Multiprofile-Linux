@@ -1,6 +1,6 @@
 # Multiprofile Linux — Profile Consistency Engine
 
-Version: 1.8.0  
+Version: 1.9.0  
 Status: Per-domain coherence checks (honest, bounded)
 
 ---

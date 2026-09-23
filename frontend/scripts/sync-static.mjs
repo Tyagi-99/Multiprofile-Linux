@@ -13,9 +13,10 @@ import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = dirname(fileURLToPath(import.meta.url));
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const root = join(scriptDir, ".."); // frontend/
 const outDir = join(root, "out");
-const staticDir = join(root, "..", "src", "static");
+const staticDir = join(root, "..", "src", "static"); // repo-root/src/static
 
 if (!existsSync(outDir)) {
   console.error("frontend/out not found — run `npm run build` first.");

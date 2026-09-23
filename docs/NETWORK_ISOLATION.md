@@ -1,6 +1,6 @@
 # Multiprofile Linux — Network Isolation Specification
 
-Version: 1.8.0  
+Version: 1.9.0  
 Status: Production Grade Network Isolation  
 
 ---
