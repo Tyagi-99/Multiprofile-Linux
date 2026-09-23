@@ -1,4 +1,4 @@
-"""1.7.0 release tests: version coherence, docs presence, security (no secret
+"""1.8.0 release tests: version coherence, docs presence, security (no secret
 leakage in API responses or audit entries), and gateway scaffold status.
 
 Storage is isolated per-test via XDG_* env vars.
@@ -17,7 +17,7 @@ from multiprofile.api.server import create_app
 from multiprofile.audit import read_audit
 
 ROOT = Path(__file__).resolve().parent.parent
-EXPECTED_VERSION = "1.7.0"
+EXPECTED_VERSION = "1.8.0"
 
 SECRET_KEY_RE = re.compile(r"password|passwd|passphrase|secret|token|pat", re.I)
 
@@ -76,7 +76,7 @@ def test_health_endpoint_reports_version(client):
     assert body["version"] == EXPECTED_VERSION
 
 
-def test_changelog_has_1_7_0_section():
+def test_changelog_has_release_section():
     text = (ROOT / "CHANGELOG.md").read_text()
     assert EXPECTED_VERSION in text
 
@@ -85,7 +85,7 @@ def test_no_stale_version_markers():
     """No leftover 1.5.0/1.4.6 version markers in packaging or source.
 
     The Debian changelog deliberately keeps its 1.4.6 history entry below the
-    new 1.7.0 stanza (upstream history is preserved), so it is excluded here;
+    new 1.8.0 stanza (upstream history is preserved), so it is excluded here;
     test_debian_changelog_top_entry covers it.
     """
     for rel in ("pyproject.toml", "build-deb.sh", "src/multiprofile/__init__.py"):
@@ -110,7 +110,7 @@ def test_release_docs_exist(doc):
     assert (ROOT / doc).exists(), doc
 
 
-def test_docs_reference_1_7_0():
+def test_docs_reference_current_version():
     for doc in ("docs/ARCHITECTURE.md", "docs/DEVICE_PRESETS.md",
                 "docs/FINGERPRINT_MODEL.md", "docs/NETWORK_ISOLATION.md",
                 "docs/PROFILE_CONSISTENCY.md"):

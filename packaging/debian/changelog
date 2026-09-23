@@ -1,3 +1,46 @@
+multiprofile-native (1.8.0) unstable; urgency=medium
+
+  * Desktop logo: original Multiprofile mark (four isolated browser panes in
+    a tight grid, pine teal #0e7c6b on deep ink #131a25) as SVG plus PNGs at
+    512/256/128/64/48/32/16 installed under
+    /usr/share/icons/hicolor/<size>/apps/multiprofile.png; the .desktop file
+    now uses Icon=multiprofile (was utilities-terminal); postinst refreshes
+    the icon cache when gtk-update-icon-cache exists. Same artwork drives
+    src/static/app_icon.png, favicon.ico, the sidebar, the login card, and
+    the pywebview window icon.
+  * Light and dark mode: one Light/Dark segmented toggle in the console top
+    bar, persisted with storeSet("mp_theme", ...); first launch follows
+    prefers-color-scheme. data-theme is set on <html> before paint (no flash);
+    Light keeps the current look, Dark restyles content surfaces with the
+    existing --mp-* tokens. No new font, no purple accent.
+  * Profile grid: explicit full-fill layouts for 1, 2, and 3 profiles — 1
+    covers the whole work area; 2 side-by-side when wider than tall, else
+    stacked; 3 as one row on wide displays, else a column (never a 2x2 with a
+    blank cell). 4+ keep the current balanced grids. GridCalculator remains
+    the tiling authority; CDP Browser.setWindowBounds applies; gap 0,
+    margin 0, work-area clip unchanged. The grid is re-tiled after every
+    launch and after every stop.
+  * Stop stays stopped: stop_profile records an explicit user stop
+    (STOPPING note), SIGTERMs, waits for the pid to die, then marks STOPPED,
+    releases the slot, and re-tiles the survivors. The supervisor re-reads
+    state before any restart and relaunches ONLY an unexpected exit from
+    RUNNING — a user stop is never treated as a crash. Retries exhausted or
+    a stop gone wrong park the profile in error; nothing relaunches until
+    the user presses Launch.
+  * All seven version markers synchronized on 1.8.0.
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Wed, 23 Sep 2026 17:30:00 +0530
+
+multiprofile-native (1.7.1) unstable; urgency=medium
+
+  * Desktop webview fixes: persistent storage_path
+    (~/.local/share/multiprofile/webview) with private_mode=False in open_ui;
+    [hidden]{display:none !important} CSS guard; all localStorage access routed
+    through storeGet/storeSet/storeDel helpers.
+  * packaging/debian/control Version corrected to 1.7.1 (was stale at 1.5.0).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Wed, 23 Sep 2026 16:30:00 +0530
+
 multiprofile-native (1.7.0) unstable; urgency=medium
 
   * Browser supervisor: crash watchdog with PID checks, bounded restart

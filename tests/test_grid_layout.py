@@ -137,3 +137,55 @@ def test_grid_rejects_tiny_area():
     calc = GridCalculator()
     with pytest.raises(ValueError):
         calc.plan(["a", "b", "c"], WorkArea(0, 0, 50, 50, "tiny"), gap=0, margin=0)
+
+
+# ---------------- v1.8.0: explicit small-count layouts ----------------
+
+WIDE_AREAS = [
+    WorkArea(0, 0, 3373, 1408, "wide-3373"),
+    WorkArea(0, 0, 1853, 1048, "wide-1853"),
+]
+TALL_AREAS = [
+    WorkArea(0, 0, 1048, 1853, "tall-1048"),
+]
+
+
+@pytest.mark.parametrize("area", WIDE_AREAS + TALL_AREAS, ids=lambda a: f"{a.w}x{a.h}")
+def test_one_profile_covers_whole_work_area(area):
+    plan = GridCalculator().plan(["solo"], area, gap=0, margin=0)
+    assert (plan.cols, plan.rows) == (1, 1)
+    r = plan.slots[0].rect
+    assert (r.x, r.y, r.w, r.h) == (area.x, area.y, area.w, area.h)
+
+
+@pytest.mark.parametrize("area", WIDE_AREAS, ids=lambda a: f"{a.w}x{a.h}")
+def test_two_profiles_side_by_side_on_wide(area):
+    plan = GridCalculator().plan(["a", "b"], area, gap=0, margin=0)
+    assert (plan.cols, plan.rows) == (2, 1)
+    assert_edge_to_edge(plan, area)
+    a, b = plan.slots[0].rect, plan.slots[1].rect
+    assert b.x == a.x + a.w  # share the vertical seam, no gap, no overlap
+    assert a.y == b.y and a.h == b.h
+
+
+@pytest.mark.parametrize("area", TALL_AREAS, ids=lambda a: f"{a.w}x{a.h}")
+def test_two_profiles_stacked_on_tall(area):
+    plan = GridCalculator().plan(["a", "b"], area, gap=0, margin=0)
+    assert (plan.cols, plan.rows) == (1, 2)
+    assert_edge_to_edge(plan, area)
+
+
+@pytest.mark.parametrize("area", WIDE_AREAS, ids=lambda a: f"{a.w}x{a.h}")
+def test_three_profiles_one_row_on_wide(area):
+    plan = GridCalculator().plan(["a", "b", "c"], area, gap=0, margin=0)
+    assert (plan.cols, plan.rows) == (3, 1)  # never a 2x2 with a blank cell
+    assert_edge_to_edge(plan, area)
+    assert validate_equal_sizes(plan.rects())
+
+
+@pytest.mark.parametrize("area", TALL_AREAS, ids=lambda a: f"{a.w}x{a.h}")
+def test_three_profiles_one_column_on_tall(area):
+    plan = GridCalculator().plan(["a", "b", "c"], area, gap=0, margin=0)
+    assert (plan.cols, plan.rows) == (1, 3)
+    assert_edge_to_edge(plan, area)
+    assert validate_equal_sizes(plan.rects())

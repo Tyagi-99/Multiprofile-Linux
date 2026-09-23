@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
-VERSION=1.7.0
+VERSION=1.8.0
 NAME=multiprofile-native
 OUT="$ROOT/dist"
 STAGE="$OUT/${NAME}_${VERSION}_amd64"
@@ -23,6 +23,14 @@ chmod 0755 "$STAGE/DEBIAN/postinst"
 cp packaging/debian/changelog "$STAGE/usr/share/doc/$NAME/"
 cp packaging/debian/copyright "$STAGE/usr/share/doc/$NAME/"
 cp packaging/debian/multiprofile.desktop "$STAGE/usr/share/applications/multiprofile-native.desktop"
+# App icon: hicolor PNGs at 16..512 plus scalable SVG source.
+for _s in 16 32 48 64 128 256 512; do
+  mkdir -p "$STAGE/usr/share/icons/hicolor/${_s}x${_s}/apps"
+  cp "packaging/icons/hicolor/${_s}x${_s}/apps/multiprofile.png" \
+     "$STAGE/usr/share/icons/hicolor/${_s}x${_s}/apps/"
+done
+mkdir -p "$STAGE/usr/share/icons/hicolor/scalable/apps"
+cp packaging/icons/multiprofile.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/"
 cp README.md "$STAGE/usr/share/doc/$NAME/"
 
 cat > "$STAGE/usr/bin/multiprofile" <<'PY'

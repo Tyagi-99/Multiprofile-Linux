@@ -20,6 +20,18 @@ const num = (v) => (v === undefined || v === null || v === "")
   : `<span class="mono">${esc(v)}</span>`;
 const hasV = (v) => v !== undefined && v !== null && v !== "";
 
+/* Local-storage access goes ONLY through these three helpers. Direct
+   localStorage touches elsewhere break the webview desktop build. */
+function storeGet(key) {
+  try { return window.localStorage.getItem(key); } catch (e) { return null; }
+}
+function storeSet(key, value) {
+  try { window.localStorage.setItem(key, value); } catch (e) { /* storage unavailable */ }
+}
+function storeDel(key) {
+  try { window.localStorage.removeItem(key); } catch (e) { /* storage unavailable */ }
+}
+
 function debounce(fn, ms) {
   let t = 0;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
@@ -79,7 +91,29 @@ const IC = {
 
 /* ============================== API client ============================== */
 const TOKEN_KEY = "mp_api_token";
-let apiToken = localStorage.getItem(TOKEN_KEY) || "";
+const THEME_KEY = "mp_theme";
+let apiToken = storeGet(TOKEN_KEY) || "";
+
+/* ============================== Theme (Light / Dark) ============================== */
+/* data-theme is set on <html> before paint by the inline script in index.html.
+   Here we only sync the toggle control and persist the user's choice. */
+function currentTheme() {
+  const t = storeGet(THEME_KEY);
+  if (t === "dark" || t === "light") return t;
+  return document.documentElement.getAttribute("data-theme") || "light";
+}
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  const light = $("#themeLight"), dark = $("#themeDark");
+  if (light) light.setAttribute("aria-pressed", t === "light" ? "true" : "false");
+  if (dark) dark.setAttribute("aria-pressed", t === "dark" ? "true" : "false");
+}
+function initTheme() {
+  applyTheme(currentTheme());
+  const light = $("#themeLight"), dark = $("#themeDark");
+  if (light) light.onclick = () => { storeSet(THEME_KEY, "light"); applyTheme("light"); };
+  if (dark) dark.onclick = () => { storeSet(THEME_KEY, "dark"); applyTheme("dark"); };
+}
 let authFailed = false;
 
 async function api(path, opts = {}) {
@@ -393,7 +427,7 @@ function toggleSidebar(collapse) {
   const willCollapse = collapse == null ? !app.classList.contains("nav-collapsed") : collapse;
   app.classList.toggle("nav-collapsed", willCollapse);
   $("#navExpand").hidden = !willCollapse;
-  try { localStorage.setItem("mp_nav_collapsed", willCollapse ? "1" : "0"); } catch (e) {}
+  storeSet("mp_nav_collapsed", willCollapse ? "1" : "0");
 }
 
 /* ============================== Router ============================== */
@@ -470,13 +504,13 @@ function initAuth() {
       `<button class="btn" id="authClear">Clear</button><button class="btn btn-primary" id="authSave">Save &amp; retry</button>`);
     $("#authSave").onclick = () => {
       apiToken = $("#authToken").value.trim();
-      if (apiToken) localStorage.setItem(TOKEN_KEY, apiToken); else localStorage.removeItem(TOKEN_KEY);
+      if (apiToken) storeSet(TOKEN_KEY, apiToken); else storeDel(TOKEN_KEY);
       authFailed = false;
       invalidate("profiles", "healthMap", "clients", "templates", "devices", "gateways", "jobs");
       closeModal(); hideLoginGate(); refreshHealthPill(); route();
     };
     $("#authClear").onclick = () => {
-      apiToken = ""; localStorage.removeItem(TOKEN_KEY);
+      apiToken = ""; storeDel(TOKEN_KEY);
       $("#authToken").value = ""; toast("Token cleared");
     };
   };
@@ -484,7 +518,7 @@ function initAuth() {
     const t = $("#loginToken").value.trim();
     $("#loginError").hidden = true;
     if (!t) { $("#loginError").textContent = "Paste a token first."; $("#loginError").hidden = false; return; }
-    apiToken = t; localStorage.setItem(TOKEN_KEY, t);
+    apiToken = t; storeSet(TOKEN_KEY, t);
     authFailed = false; hideLoginGate(); refreshHealthPill(); route();
   };
   $("#loginSkip").onclick = () => { authFailed = false; hideLoginGate(); route(); };
@@ -2257,12 +2291,12 @@ function setGeneral(body, sys) {
 
   $("#sSave").onclick = () => {
     apiToken = $("#sToken").value.trim();
-    if (apiToken) localStorage.setItem(TOKEN_KEY, apiToken); else localStorage.removeItem(TOKEN_KEY);
+    if (apiToken) storeSet(TOKEN_KEY, apiToken); else storeDel(TOKEN_KEY);
     authFailed = false;
     toast("Token saved", "ok");
     refreshHealthPill();
   };
-  $("#sClear").onclick = () => { apiToken = ""; localStorage.removeItem(TOKEN_KEY); $("#sToken").value = ""; toast("Token cleared"); };
+  $("#sClear").onclick = () => { apiToken = ""; storeDel(TOKEN_KEY); $("#sToken").value = ""; toast("Token cleared"); };
   $("#sReap").onclick = async () => {
     const r = await apiPost("/api/maintenance/reap", {});
     $("#sOut").innerHTML = `<p class="note">${r.ok ? `Reaped ${r.data && r.data.count != null ? r.data.count : "?"} orphan(s).` : "Reap failed: " + apiErr(r)}</p>`;
@@ -2540,12 +2574,11 @@ function init() {
   });
   window.addEventListener("hashchange", route);
   initAuth();
+  initTheme();
   initSearch();
   refreshHealthPill();
   setInterval(refreshHealthPill, 30000);
-  try {
-    if (localStorage.getItem("mp_nav_collapsed") === "1") toggleSidebar(true);
-  } catch (e) {}
+  if (storeGet("mp_nav_collapsed") === "1") toggleSidebar(true);
   if (!location.hash) location.hash = "#/dashboard";
   hideLoginGate();
   $("#app").hidden = false;

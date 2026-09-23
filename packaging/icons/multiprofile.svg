@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Multiprofile logo">
+  <!-- Multiprofile mark: four isolated browser panes in a tight grid.
+       Deep ink background, pine-teal panes. Flat, no gradients. -->
+  <rect x="0" y="0" width="256" height="256" rx="56" fill="#131a25"/>
+  <!-- pane row 1 -->
+  <g>
+    <rect x="40" y="52" width="76" height="68" rx="10" fill="#0e7c6b"/>
+    <rect x="40" y="52" width="76" height="18" rx="9" fill="#0a5c50"/>
+    <rect x="40" y="61" width="76" height="9" fill="#0a5c50"/>
+    <circle cx="53" cy="61" r="4.2" fill="#e3f2ee"/>
+    <rect x="140" y="52" width="76" height="68" rx="10" fill="#0e7c6b"/>
+    <rect x="140" y="52" width="76" height="18" rx="9" fill="#0a5c50"/>
+    <rect x="140" y="61" width="76" height="9" fill="#0a5c50"/>
+    <circle cx="153" cy="61" r="4.2" fill="#e3f2ee"/>
+  </g>
+  <!-- pane row 2 -->
+  <g>
+    <rect x="40" y="136" width="76" height="68" rx="10" fill="#0e7c6b"/>
+    <rect x="40" y="136" width="76" height="18" rx="9" fill="#0a5c50"/>
+    <rect x="40" y="145" width="76" height="9" fill="#0a5c50"/>
+    <circle cx="53" cy="145" r="4.2" fill="#e3f2ee"/>
+    <rect x="140" y="136" width="76" height="68" rx="10" fill="#0e7c6b"/>
+    <rect x="140" y="136" width="76" height="18" rx="9" fill="#0a5c50"/>
+    <rect x="140" y="145" width="76" height="9" fill="#0a5c50"/>
+    <circle cx="153" cy="145" r="4.2" fill="#e3f2ee"/>
+  </g>
+</svg>

@@ -4,8 +4,24 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Multiprofile Linux — Operations Console</title>
-  <link rel="icon" type="image/x-icon" href="/favicon.ico">
-  <link rel="stylesheet" href="app.css">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico?v=1.8.0">
+  <script>
+    /* Pre-paint theme: data-theme on <html> before CSS loads so the window
+       never flashes the wrong theme. Storage goes only through try/catch
+       (pywebview private mode has no localStorage). */
+    try {
+      var __t = null;
+      try { __t = window.localStorage.getItem("mp_theme"); } catch (e) { __t = null; }
+      if (__t !== "light" && __t !== "dark") {
+        __t = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches)
+          ? "dark" : "light";
+      }
+      document.documentElement.setAttribute("data-theme", __t);
+    } catch (e) {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  </script>
+  <link rel="stylesheet" href="app.css?v=1.8.0">
 </head>
 <body>
   <!-- ============ Login gate (shown when the API requires a token) ============ -->
@@ -69,6 +85,16 @@
             <input type="search" id="globalSearch" placeholder="Search profiles… ( / )" autocomplete="off" aria-label="Search profiles">
             <div class="search-results" id="searchResults" hidden></div>
           </div>
+          <div class="theme-toggle" role="group" aria-label="Color theme">
+            <button type="button" id="themeLight" aria-pressed="true" title="Light theme">
+              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="3.2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              <span>Light</span>
+            </button>
+            <button type="button" id="themeDark" aria-pressed="false" title="Dark theme">
+              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M13.2 10.2A6 6 0 0 1 5.8 2.8a6 6 0 1 0 7.4 7.4z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg>
+              <span>Dark</span>
+            </button>
+          </div>
           <button class="btn btn-primary" id="btnNewProfile">
             <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <span>New Profile</span>
@@ -114,6 +140,6 @@
 
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=1.8.0"></script>
 </body>
 </html>

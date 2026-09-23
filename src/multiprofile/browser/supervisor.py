@@ -175,7 +175,27 @@ class Supervisor:
     # -------------------------------------------------------------- restart
 
     def _handle_dead(self, profile_id: str, rt: dict[str, Any]) -> bool:
-        """Mark dead, then bounded-restart. Returns True on successful restart."""
+        """Mark dead, then bounded-restart. Returns True on successful restart.
+
+        The supervisor may restart ONLY an unexpected exit from RUNNING. The
+        runtime list was read earlier in this tick, so an explicit Stop/Park
+        may have moved the profile out of RUNNING in the meantime — re-read
+        the current state and never treat a user stop as a crash.
+        """
+        current: dict[str, Any] | None = None
+        try:
+            current = _db.get_profile_runtime(profile_id)
+        except Exception:  # noqa: BLE001 - fall through to stale record
+            current = None
+        current_state = (current or {}).get("state")
+        if current_state and current_state != ProfileState.RUNNING.value:
+            log.info(
+                "supervisor: %s is no longer RUNNING (now %s) — explicit "
+                "stop/park/error; not restarting",
+                profile_id,
+                current_state,
+            )
+            return False
         pid = rt.get("pid")
         cdp_port = rt.get("cdp_port")
         audit_log(

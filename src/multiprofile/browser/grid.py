@@ -115,6 +115,47 @@ def _score(cols: int, rows: int, n: int, area: WorkArea, cell_w: int, cell_h: in
     return empty * 1.5 + aspect_pen + grid_pen - util
 
 
+def _small_n_slots(profile_ids: list[str], work_area: WorkArea, gap: int, margin: int) -> tuple[int, int, tuple[Slot, ...]] | None:
+    """Explicit layouts for n=1..3: fill the work area with no overlap and no
+    empty strip. The generic scorer tends to produce stacked/uneven results
+    for these small counts, so we own them directly.
+
+    - 1 profile: one rectangle covering the whole work area.
+    - 2 profiles: side by side when wider than tall, otherwise stacked.
+    - 3 profiles: one row of three on a wide display, otherwise a column.
+      Never a 2x2 with a blank cell.
+    Returns (cols, rows, slots) or None if n > 3 / not applicable.
+    """
+    n = len(profile_ids)
+    if n < 1 or n > 3:
+        return None
+    ox = work_area.x + margin
+    oy = work_area.y + margin
+    ow = work_area.w - 2 * margin
+    oh = work_area.h - 2 * margin
+    wide = ow >= oh
+    if n == 1:
+        cols, rows = 1, 1
+    elif n == 2:
+        cols, rows = (2, 1) if wide else (1, 2)
+    else:  # n == 3
+        cols, rows = (3, 1) if wide else (1, 3)
+    col_parts = split_axis(ox, ow, cols, gap=gap)
+    row_parts = split_axis(oy, oh, rows, gap=gap)
+    if not col_parts or not row_parts:
+        return None
+    slots: list[Slot] = []
+    for i, pid in enumerate(profile_ids):
+        c = i % cols
+        r = i // cols
+        x, cw = col_parts[c]
+        y, ch = row_parts[r]
+        if cw < 80 or ch < 60:
+            return None
+        slots.append(Slot(pid, i, Rect(x, y, cw, ch)))
+    return cols, rows, tuple(slots)
+
+
 class GridCalculator:
     """Sole pure-math owner of slot rectangles for a given profile id list."""
 
@@ -132,6 +173,18 @@ class GridCalculator:
         n = len(profile_ids)
         if n <= 0:
             return SlotPlan(work_area, 0, 0, gap, margin, ())
+
+        # n=1..3 use the explicit full-fill layouts (no 2x2-with-blank-cell).
+        if n <= 3:
+            explicit = _small_n_slots(profile_ids, work_area, gap, margin)
+            if explicit is not None:
+                cols, rows, slots = explicit
+                rects = [s.rect for s in slots]
+                assert validate_no_overlap(rects)["valid"]
+                assert validate_within_work_area(rects, work_area)["valid"]
+                return SlotPlan(work_area, cols, rows, gap, margin, slots)
+            # Fall through to the generic path if the explicit layout fails
+            # (e.g. a work area too small for three readable cells).
 
         best: SlotPlan | None = None
         best_score = float("inf")

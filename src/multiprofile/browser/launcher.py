@@ -348,6 +348,38 @@ def _hold_device_session(profile_id: str, pid: int, sess: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Grid re-tile (CDP is the only tiling authority)
+# ---------------------------------------------------------------------------
+
+def _retile_running_best_effort(note: str) -> None:
+    """Re-tile every running profile after a launch or a stop.
+
+    The remaining windows must keep filling the work area. Import is local so
+    the launcher never creates an import cycle. Failure is best-effort and
+    never breaks the data plane.
+    """
+    try:
+        from .layout_manager import get_layout_manager
+
+        result = get_layout_manager().tile_running()
+        log.debug("re-tile after %s: %s", note, result.get("ok"))
+    except Exception:  # noqa: BLE001 - re-tile must never break launch/stop
+        log.debug("re-tile after %s failed (best effort)", note, exc_info=True)
+
+
+def _wait_pid_gone(pid: int, timeout_s: float = 10.0) -> bool:
+    """Wait until ``pid`` is gone. A zombie counts as gone (already dead)."""
+    from .supervisor import pid_alive  # local import: supervisor lazily imports launcher
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not pid_alive(pid)
+
+
+# ---------------------------------------------------------------------------
 # Main launch function
 # ---------------------------------------------------------------------------
 
@@ -684,6 +716,9 @@ def launch_profile(
     set_launch_state(profile_id, LaunchState.RUNNING, pid=proc.pid, cdp_port=debug_port)
     _record_state(profile_id, ProfileState.RUNNING)
 
+    # The new window changed the grid: re-tile every running profile via CDP.
+    _retile_running_best_effort("launch")
+
     try:
         if proc.stderr:
             proc.stderr.close()
@@ -746,16 +781,26 @@ def launch_profile(
 # ---------------------------------------------------------------------------
 
 def stop_profile(profile_id: str) -> dict[str, Any]:
+    """Explicit user stop. Records a user-stop the supervisor will not restart.
+
+    Sequence: STOPPING (noted as a user stop) -> SIGTERM -> wait until the pid
+    is actually gone -> STOPPED -> release slot -> re-tile the remaining
+    windows. The supervisor may restart only an unexpected exit from RUNNING,
+    so a stopped profile stays stopped until the user presses Launch again.
+    """
     profile = get_profile(profile_id)
     pid = (profile or {}).get("pid")
     if not pid:
         set_runtime(profile_id, "idle", None)
         clear_runtime(profile_id)
         browser_manager.release_slot(profile_id)
-        _record_state(profile_id, ProfileState.STOPPED)
+        _record_state(profile_id, ProfileState.STOPPED, note="user stop (no pid recorded)")
         audit_log("profile_stop", profile_id=profile_id, ok=True, detail={"pid": None})
         return {"ok": True, "stopped": None, "note": "No running pid recorded"}
-    _record_state(profile_id, ProfileState.STOPPING)
+    # Record the user-stop FIRST: between listing RUNNING runtimes and its
+    # restart check, the supervisor re-reads state, and anything that left
+    # RUNNING is never treated as a crash.
+    _record_state(profile_id, ProfileState.STOPPING, note="user stop requested")
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -763,10 +808,25 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     except PermissionError as e:
         _record_state(profile_id, ProfileState.ERROR, note=f"cannot stop pid {pid}: {e}")
         return {"error": f"Cannot stop pid {pid}: {e}", "errors": ["permission"]}
+    gone = _wait_pid_gone(pid)
     set_runtime(profile_id, "idle", None)
     clear_runtime(profile_id)
     browser_manager.release_slot(profile_id)
-    _record_state(profile_id, ProfileState.STOPPED)
+    if not gone:
+        # Honest failure: SIGTERM was ignored. Do not claim STOPPED; leave
+        # the profile in error so an explicit action can resolve it.
+        _record_state(profile_id, ProfileState.ERROR, note=f"user stop: pid {pid} still alive after SIGTERM")
+        audit_log("profile_stop", profile_id=profile_id, ok=False, detail={"pid": pid, "reason": "sigterm_ignored"})
+        return {
+            "ok": False,
+            "stopped": pid,
+            "error": f"pid {pid} did not exit after SIGTERM",
+            "errors": ["stop_timeout"],
+        }
+    _record_state(profile_id, ProfileState.STOPPED, note="user stop")
+    # The grid changed: re-tile whoever is still running so windows still
+    # fill the work area.
+    _retile_running_best_effort("stop")
     audit_log("profile_stop", profile_id=profile_id, ok=True, detail={"pid": pid})
     return {"ok": True, "stopped": pid}
 

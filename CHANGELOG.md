@@ -1,3 +1,16 @@
+## 1.8.0 (2026-09-23)
+
+- **Desktop logo**: original Multiprofile mark — four isolated browser panes in a tight grid, pine teal `#0e7c6b` on deep ink `#131a25`, flat and readable at 16px. Shipped as SVG (`packaging/icons/multiprofile.svg`) plus PNGs at 512/256/128/64/48/32/16 installed under `/usr/share/icons/hicolor/<size>/apps/multiprofile.png` via the deb; `packaging/debian/multiprofile.desktop` now uses `Icon=multiprofile` (replacing the generic terminal icon), and `postinst` refreshes the icon cache when `gtk-update-icon-cache` exists. The same artwork is used for `src/static/app_icon.png`, `favicon.ico`, the console sidebar, the login card, and the pywebview window icon (with a graceful fallback for older pywebview versions).
+- **Light and dark mode**: one Light/Dark segmented toggle in the console top bar, persisted via `storeSet("mp_theme", "light"|"dark")`. First launch follows `prefers-color-scheme`; `data-theme` is set on `<html>` before paint so the window never flashes the wrong theme. Light keeps the current look (dark sidebar `#131a25`, light content `#f3f5f8`); Dark restyles content surfaces, cards, tables, inputs, and the drawer with the existing `--mp-*` tokens. No second font, no purple accent.
+- **Profile grid**: explicit full-fill layouts for 1–3 profiles — 1 covers the whole work area; 2 side-by-side when wider than tall, otherwise stacked; 3 as one row on wide displays, otherwise a column (never a 2×2 with a blank cell). 4+ keep the balanced grids (2×2, 3×2, 3×3, 4×3). GridCalculator stays the tiling authority, CDP `Browser.setWindowBounds` applies, gap 0 / margin 0 / work-area clip unchanged. The whole grid is re-tiled after every launch and after every stop so remaining windows keep filling the work area.
+- **Stop stays stopped**: `stop_profile` records an explicit user stop (`STOPPING` with a "user stop requested" note), SIGTERMs the pid, waits for it to die, then marks `STOPPED`, releases the slot, and re-tiles the survivors. The supervisor re-reads the runtime state before any restart and relaunches only an unexpected exit from `RUNNING` — a user stop is never treated as a crash, and no profile relaunches after Stop, Park, or exhausted retries until the user presses Launch.
+- **Packaging**: all seven version markers synchronized on 1.8.0.
+
+## 1.7.1 (2026-09-23)
+
+- **Desktop webview fixes** (blank-window regression): `open_ui` now starts pywebview with `private_mode=False` and a persistent `storage_path` at `~/.local/share/multiprofile/webview`; added the `[hidden] { display: none !important; }` CSS guard; all `localStorage` access in the console goes through `storeGet`/`storeSet`/`storeDel` helpers only.
+- **Packaging**: `packaging/debian/control` Version corrected to 1.7.1 (was stale at 1.5.0). All seven version markers now agree on 1.7.1.
+
 ## 1.7.0 (2026-09-23)
 
 - **Browser Supervisor** (`browser/supervisor.py`): crash watchdog polling each
