@@ -43,7 +43,7 @@ def test_launcher_source_uses_helpers_not_duplicate_disable_features():
 
 
 def test_jobs_pass_slot_rects_at_launch():
-    src = Path("src/multiprofile/jobs.py").read_text(encoding="utf-8")
+    src = Path("src/multiprofile/jobs/legacy.py").read_text(encoding="utf-8")
     assert "window_rect=None" not in src
     assert "slot_rect_map" in src
 

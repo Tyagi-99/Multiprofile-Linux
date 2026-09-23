@@ -1,6 +1,6 @@
 # Multiprofile Linux — Device Presets
 
-Version: 1.6.0  
+Version: 1.7.0  
 Status: Honest Emulation Identities (measured, not claimed)
 
 ---

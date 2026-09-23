@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 from multiprofile import __version__
-assert __version__ == "1.6.0", __version__
+assert __version__ == "1.7.0", __version__
 
 from multiprofile.fingerprint import build_fingerprint, normalize_seed, fingerprint_report
 from multiprofile.proxy_util import parse_proxy, proxy_server_arg
@@ -73,7 +73,7 @@ c = app.test_client()
 h = c.get("/api/health")
 assert h.status_code == 200
 hj = h.get_json()
-assert hj["version"] == "1.6.0", hj
+assert hj["version"] == "1.7.0", hj
 assert hj.get("static_ok") is True
 assert hj.get("extension_ok") is True
 assert "slots" in hj
@@ -135,7 +135,8 @@ assert c.get("/api/clients").status_code == 200
 assert c.put(f"/api/clients/{cid}", json={"name": "Acme Labs 2"}).status_code == 200
 
 c.put(f"/api/profiles/{pid}", json={"clientId": cid, "tags": ["lab", "prod"]})
-assert isinstance(c.get("/api/profiles").get_json(), list)
+pl = c.get("/api/profiles").get_json()
+assert isinstance(pl, dict) and "items" in pl and "total" in pl  # v1.7.0: paginated
 paged = c.get("/api/profiles?tag=lab&limit=10&offset=0").get_json()
 assert "items" in paged and "total" in paged
 
@@ -176,20 +177,23 @@ assert zipfile.is_zipfile(zpath)
 os.environ["MULTIPROFILE_API_TOKEN"] = "test-secret-token"
 app2 = create_app()
 c2 = app2.test_client()
-assert c2.get("/api/profiles").status_code == 401
+REMOTE = {"REMOTE_ADDR": "203.0.113.5"}  # simulate a non-localhost client
+assert c2.get("/api/profiles", environ_overrides=REMOTE).status_code == 401
 assert c2.get("/api/health").status_code == 200
-assert c2.get("/api/profiles", headers={"Authorization": "Bearer test-secret-token"}).status_code == 200
+assert c2.get("/api/profiles").status_code == 200  # localhost stays frictionless
+assert c2.get("/api/profiles", environ_overrides=REMOTE,
+               headers={"Authorization": "Bearer test-secret-token"}).status_code == 200
 del os.environ["MULTIPROFILE_API_TOKEN"]
 
 # delete client nulls clientId
 c.delete(f"/api/clients/{cid}")
-got = next(x for x in c.get("/api/profiles").get_json() if x["id"] == pid)
+got = next(x for x in c.get("/api/profiles").get_json()["items"] if x["id"] == pid)
 assert got.get("clientId") in (None, "")
 
 d = c.delete(f"/api/profiles/{pid}?purgeStorage=1")
 assert d.status_code == 200
 
-print("OK: 1.6.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
+print("OK: 1.7.0 — version, fingerprint, proxy, cookies, health, SPA, v1, clients, pagination, jobs, reap, backup, token, templates")
 PY
 
 # --- Phase 2 browser runtime (anti-detect exclusivity preserved) ---

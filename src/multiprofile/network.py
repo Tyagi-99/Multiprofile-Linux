@@ -597,7 +597,7 @@ def _fetch_echo_geo(opener: urllib.request.OpenerDirector, timeout: float) -> di
     """Fetch egress IP + geo through the opener's route. Raises on any failure."""
     req = urllib.request.Request(
         _ECHO_GEO_URL,
-        headers={"User-Agent": "multiprofile-native/1.6.0"},
+        headers={"User-Agent": "multiprofile-native/1.7.0"},
     )
     with opener.open(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", "ignore")

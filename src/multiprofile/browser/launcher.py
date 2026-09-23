@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from ..audit import audit_log
+from ..api import events
 from ..config import get_settings
 from ..cookies_store import load_cookies
 from ..fingerprint import build_fingerprint, normalize_seed
@@ -35,7 +36,9 @@ from ..network import (
     chrome_network_flags,
     network_config_for_profile,
 )
+from ..storage import db as _db
 from ..storage.profiles import get_profile, set_runtime, update_profile
+from ..storage.state import InvalidStateTransition, ProfileState
 from ..storage.xdg import chrome_profile_dir
 from . import manager as browser_manager
 from .cdp_window import allocate_localhost_port, wait_for_cdp
@@ -45,6 +48,53 @@ from .sandbox import sandbox_chrome_args
 from .window_layout import chrome_geometry_args  # weak hint only; no x11 place
 
 log = logging.getLogger("multiprofile.browser")
+
+
+# ---------------------------------------------------------------------------
+# Control-plane state recording (durable truth in SQLite)
+# ---------------------------------------------------------------------------
+
+def _db_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _record_state(    profile_id: str,
+    new_state: ProfileState,
+    *,
+    note: str | None = None,
+    **fields: Any,
+) -> None:
+    """Record a profile state transition in the durable store.
+
+    Fail-open bookkeeping: a DB/write failure is logged and never breaks the
+    data-plane launch path. An invalid transition is forced (with an audit
+    trail) rather than aborting an in-flight browser launch.
+    """
+    try:
+        try:
+            change = _db.set_profile_state(profile_id, new_state, note=note)
+        except InvalidStateTransition:
+            log.warning(
+                "launcher: forcing invalid transition for %s (%s)",
+                profile_id,
+                new_state.value,
+            )
+            change = _db.set_profile_state(profile_id, new_state, note=note, force=True)
+        events.publish(
+            "profile.status",
+            {
+                "profile_id": profile_id,
+                "old_state": change["old"],
+                "new_state": change["new"],
+                "note": note,
+            },
+        )
+        if fields:
+            _db.upsert_profile_runtime(profile_id, **fields)
+    except Exception:  # noqa: BLE001 - bookkeeping must not break launch
+        log.debug("launcher: durable state write failed for %s", profile_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +363,8 @@ def launch_profile(
     if not profile:
         return {"error": f"Profile not found: {profile_id}", "errors": ["profile_not_found"], "ok": False}
 
+    _record_state(profile_id, ProfileState.STARTING)
+
     slot_held = _slot_held
     if not slot_held:
         if not browser_manager.acquire_slot(profile_id, timeout=120.0):
@@ -340,6 +392,7 @@ def launch_profile(
     if (profile.get("proxyType") or "").lower() == "github" and not direct:
         if slot_held:
             browser_manager.release_slot(profile_id)
+        _record_state(profile_id, ProfileState.ERROR, note="github_not_a_network_route: GitHub Account is not a network gateway")
         return {
             "ok": False,
             "error": (
@@ -368,6 +421,7 @@ def launch_profile(
                 ok=False,
                 detail={"error": block_reason, "proxy": net.proxy.masked_str() if net.proxy else None},
             )
+            _record_state(profile_id, ProfileState.ERROR, note="proxy_health_failed: proxy health check blocked launch")
             return {
                 "ok": False,
                 "error": block_reason,
@@ -403,6 +457,7 @@ def launch_profile(
     except FileNotFoundError as e:
         if slot_held:
             browser_manager.release_slot(profile_id)
+        _record_state(profile_id, ProfileState.ERROR, note="dependency_missing: Chrome or extension not found")
         return {"ok": False, "error": str(e), "errors": ["dependency_missing"]}
 
     user_dir = chrome_profile_dir(profile_id) / "user-data"
@@ -505,6 +560,7 @@ def launch_profile(
     except OSError as e:
         if slot_held:
             browser_manager.release_slot(profile_id)
+        _record_state(profile_id, ProfileState.ERROR, note="spawn_failed: could not spawn Chrome process")
         return {"ok": False, "error": f"Failed to spawn Chrome: {e}", "errors": ["spawn_failed"], "cmd": cmd}
 
     time.sleep(1.2)
@@ -514,6 +570,7 @@ def launch_profile(
         set_runtime(profile_id, "idle", None)
         clear_runtime(profile_id)
         set_launch_state(profile_id, LaunchState.LAUNCH_FAILED, error=f"chrome exit {rc}", error_code="chrome_exit_immediate")
+        _record_state(profile_id, ProfileState.ERROR, note=f"chrome exited immediately with code {rc}")
         if slot_held:
             browser_manager.release_slot(profile_id)
         return {
@@ -534,6 +591,15 @@ def launch_profile(
     browser_manager.mark_running(profile_id)
     upsert_runtime(profile_id, pid=proc.pid, cdp_port=debug_port)
     set_launch_state(profile_id, LaunchState.LAUNCHING, pid=proc.pid, cdp_port=debug_port)
+    _record_state(
+        profile_id,
+        ProfileState.STARTING,
+        cdp_port=debug_port,
+        pid=proc.pid,
+        device_preset_id=(profile.get("deviceId") or None),
+        network_config_id=(net.gateway_id or None),
+        started_at=_db_now(),
+    )
     log.info("launched profile %s pid=%s url=%s cdp=%s network=%s", profile_id, proc.pid, start, debug_port, net.mode.value)
 
     # ------------------------------------------------------------------
@@ -616,6 +682,7 @@ def launch_profile(
         notes.append(f"CDP not ready: {e}")
 
     set_launch_state(profile_id, LaunchState.RUNNING, pid=proc.pid, cdp_port=debug_port)
+    _record_state(profile_id, ProfileState.RUNNING)
 
     try:
         if proc.stderr:
@@ -685,17 +752,21 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
         set_runtime(profile_id, "idle", None)
         clear_runtime(profile_id)
         browser_manager.release_slot(profile_id)
+        _record_state(profile_id, ProfileState.STOPPED)
         audit_log("profile_stop", profile_id=profile_id, ok=True, detail={"pid": None})
         return {"ok": True, "stopped": None, "note": "No running pid recorded"}
+    _record_state(profile_id, ProfileState.STOPPING)
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
     except PermissionError as e:
+        _record_state(profile_id, ProfileState.ERROR, note=f"cannot stop pid {pid}: {e}")
         return {"error": f"Cannot stop pid {pid}: {e}", "errors": ["permission"]}
     set_runtime(profile_id, "idle", None)
     clear_runtime(profile_id)
     browser_manager.release_slot(profile_id)
+    _record_state(profile_id, ProfileState.STOPPED)
     audit_log("profile_stop", profile_id=profile_id, ok=True, detail={"pid": pid})
     return {"ok": True, "stopped": pid}
 

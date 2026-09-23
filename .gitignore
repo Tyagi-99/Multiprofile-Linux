@@ -7,3 +7,9 @@ dist/
 *.deb
 .xdg-test-*/
 uv.lock
+# v1.7.0 control plane + runtime data (never commit live state)
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+control.db*

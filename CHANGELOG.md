@@ -1,3 +1,44 @@
+## 1.7.0 (2026-09-23)
+
+- **Browser Supervisor** (`browser/supervisor.py`): crash watchdog polling each
+  profile's PID on a configurable interval; on death it audits, moves the
+  profile to `error`, and performs a bounded restart (max 3 attempts, backoff)
+  via the launcher followed by a full grid re-tile over CDP. Exhaustion leaves
+  the profile in `error` with a reason — it never spins forever.
+- **Durable Job Queue** (`jobs/`, `storage/db.py`): SQLite WAL-backed control
+  plane with `profiles_runtime` + `jobs` tables. `recover()` runs first at
+  every boot: jobs stuck `running` are re-queued (attempts+1, exhausted ones
+  fail), profiles stuck in `starting`/`stopping` go to `error`. A worker pool
+  claims and executes jobs with bounded concurrent launches. Legacy in-process
+  queue preserved at `jobs/legacy.py` with the same import surface.
+- **Profile State Machine** (`storage/state.py`): validated transitions across
+  `stopped → starting → running → stopping → stopped`, plus `idle`, `parked`,
+  `error`; every transition writes an audit note.
+- **Idle Parking & Metrics** (`parking.py`, `metrics.py`, `profile_log.py`):
+  park idle profiles (graceful stop, data kept); `/proc`-based CPU/mem
+  sampling (5s cache cap); JSONL profile log + audit trail;
+  `GET /api/metrics/summary` and per-profile metrics (new `[parking]`,
+  `[health]`, `[metrics]` config sections).
+- **API Hardening**: cursor pagination on list endpoints (`api/pagination.py`);
+  invalid input rejected with 400 `{"error": {"code": "invalid_input"}}`
+  (`api/validation.py`); remote (non-localhost) requests require a bearer
+  token while localhost stays frictionless (`api/auth.py` — see the honest
+  assessment in its docstring); live event stream `GET /api/events/stream`
+  (SSE, with `max_events` for finite reads).
+- **Console Restyle**: sidebar, dense profile table, creation wizard, device
+  library, jobs/audit views, SSE with polling fallback; dead `exportProfiles`
+  helper wired to an Export button (proxy passwords stripped on export).
+- **Netns (experimental)**: `gateway/netns.py` scaffold for Linux network
+  namespaces — EXPERIMENTAL / NOT ACTIVE, default off, no launcher wiring;
+  see `docs/NETNS_ROADMAP.md`.
+- **Startup wiring**: `create_app()` now runs `recover()` → `start_workers()`
+  → `start_supervisor()` (config-guarded), fail-safe: the app boots even if
+  the control DB cannot open. Set `MULTIPROFILE_NO_BACKGROUND=1` to keep
+  daemon threads out of test processes.
+- **Tests**: 835 passing / 9 skipped, incl. new `test_storage_jobs_supervisor.py`,
+  `test_api_hardening.py`, `test_parking_metrics.py`, `test_frontend_smoke.py`,
+  `test_netns.py`, and `test_startup_wiring.py` (startup sequence + SSE E2E).
+
 ## 1.6.0 (2026-09-23)
 
 - **Device Presets (33, honest statuses)**:

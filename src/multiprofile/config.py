@@ -47,6 +47,27 @@ class Settings:
     proxy_check_enabled: bool = True       # set False to skip in offline/dev environments
     # GPU settings: "auto" = probe at launch, "angle" = force angle, "software" = force swiftshader
     gpu_mode: str = "auto"
+    # Supervisor: watches running browsers, bounded-restarts dead ones
+    supervisor_enabled: bool = True
+    supervisor_interval_s: int = 10
+    supervisor_max_restart_attempts: int = 3
+    # Durable job queue
+    jobs_max_workers: int = 4
+    jobs_max_concurrent_launches: int = 2
+    # Idle parking ([parking])
+    parking_enabled: bool = True           # park idle profiles (graceful stop, data kept)
+    parking_idle_timeout_s: int = 1800     # idle seconds before a profile may be parked
+    # Health-check staggering ([health])
+    health_stagger: bool = True            # jitter health checks so N profiles don't fire at once
+    health_max_concurrent: int = 4         # max health checks in flight per wave
+    health_jitter_s: int = 30              # max random delay (s) added per profile
+    # Metrics sampling ([metrics])
+    metrics_cache_ttl_s: int = 5           # point-in-time sample cache, never longer than 5s
+    # Linux network namespaces ([netns]) — EXPERIMENTAL, default OFF.
+    # Must be explicitly enabled AND gateway.netns.can_use_netns() must pass
+    # before any namespace is created. See src/multiprofile/gateway/netns.py
+    # and docs/NETNS_ROADMAP.md. NOT consumed by the launcher (no wiring).
+    netns_enabled: bool = False
 
 
 def get_settings() -> Settings:
@@ -64,6 +85,28 @@ def get_settings() -> Settings:
         proxy_check_timeout=_env_int("MULTIPROFILE_PROXY_CHECK_TIMEOUT", 8, minimum=2, maximum=60),
         proxy_check_enabled=_env_bool("MULTIPROFILE_PROXY_CHECK_ENABLED", True),
         gpu_mode=(os.environ.get("MULTIPROFILE_GPU_MODE") or "auto").strip().lower(),
+        # [supervisor]
+        supervisor_enabled=_env_bool("MULTIPROFILE_SUPERVISOR_ENABLED", True),
+        supervisor_interval_s=_env_int("MULTIPROFILE_SUPERVISOR_INTERVAL_S", 10, minimum=2, maximum=3600),
+        supervisor_max_restart_attempts=_env_int(
+            "MULTIPROFILE_SUPERVISOR_MAX_RESTARTS", 3, minimum=0, maximum=10
+        ),
+        # [jobs]
+        jobs_max_workers=_env_int("MULTIPROFILE_JOBS_MAX_WORKERS", 4, minimum=1, maximum=32),
+        jobs_max_concurrent_launches=_env_int(
+            "MULTIPROFILE_JOBS_MAX_LAUNCHES", 2, minimum=1, maximum=16
+        ),
+        # [parking]
+        parking_enabled=_env_bool("MULTIPROFILE_PARKING_ENABLED", True),
+        parking_idle_timeout_s=_env_int("MULTIPROFILE_PARKING_IDLE_TIMEOUT_S", 1800, minimum=1, maximum=86400),
+        # [health]
+        health_stagger=_env_bool("MULTIPROFILE_HEALTH_STAGGER", True),
+        health_max_concurrent=_env_int("MULTIPROFILE_HEALTH_MAX_CONCURRENT", 4, minimum=1, maximum=64),
+        health_jitter_s=_env_int("MULTIPROFILE_HEALTH_JITTER_S", 30, minimum=0, maximum=3600),
+        # [metrics]
+        metrics_cache_ttl_s=_env_int("MULTIPROFILE_METRICS_CACHE_TTL_S", 5, minimum=1, maximum=5),
+        # [netns] — EXPERIMENTAL, default OFF (see gateway.netns)
+        netns_enabled=_env_bool("MULTIPROFILE_NETNS_ENABLED", False),
     )
 
 

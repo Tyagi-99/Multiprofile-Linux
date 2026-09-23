@@ -1,7 +1,10 @@
-/* Multiprofile Operations Console — vanilla JS SPA.
- * All numbers/badges come from live API responses. Unreachable endpoints
- * render as "—", never fabricated values. Secrets are never displayed.
- */
+/* ============================================================
+   Multiprofile Linux — Operations Console (v1.7.0 restyle)
+   Vanilla JS SPA. All numbers come from live API responses;
+   unavailable endpoints render as "—", never fabricated.
+   Proxy passwords are never displayed (masked as ••••).
+   Brand: Multiprofile Linux — original design language.   UX grammar (sidebar, dense table, bulk bar, stat cards).
+   ============================================================ */
 "use strict";
 
 /* ============================== Utilities ============================== */
@@ -10,44 +13,71 @@ const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 const esc = (v) => String(v == null ? "" : v)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-const cssEsc = (typeof CSS !== "undefined" && CSS.escape)
-  ? (v) => CSS.escape(v)
-  : (v) => String(v).replace(/[^a-zA-Z0-9_-]/g, (c) => "\\" + c);
 const NA = '<span class="muted">—</span>';
 const val = (v) => (v === undefined || v === null || v === "") ? NA : esc(v);
-const num = (v) => (v === undefined || v === null || v === "") ? NA
-  : `<span class="num">${esc(v)}</span>`;
+const num = (v) => (v === undefined || v === null || v === "")
+  ? '<span class="muted">—</span>'
+  : `<span class="mono">${esc(v)}</span>`;
+const hasV = (v) => v !== undefined && v !== null && v !== "";
 
 function debounce(fn, ms) {
-  let t = null;
+  let t = 0;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 function timeAgo(ts) {
-  if (!ts) return null;
-  const d = new Date(ts);
-  if (isNaN(d)) return null;
-  const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return Math.floor(s / 60) + "m ago";
-  if (s < 86400) return Math.floor(s / 3600) + "h ago";
-  const days = Math.floor(s / 86400);
-  return days + "d ago";
+  if (!ts) return "—";
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 0) return "in the future";
+  if (s < 60) return s + "s ago";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h ago";
+  return Math.floor(h / 24) + "d ago";
+}
+function fmtDate(ts) {
+  if (!ts) return "—";
+  try { return new Date(ts).toLocaleString(); } catch (e) { return "—"; }
 }
 function fmtDur(sec) {
-  if (sec == null) return null;
+  if (sec == null || isNaN(sec)) return "—";
   sec = Math.floor(sec);
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m`;
-  return `${sec}s`;
+  if (sec < 60) return sec + "s";
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  return (sec / 3600).toFixed(1) + "h";
+}
+function fmtBytes(b) {
+  if (b == null || isNaN(b)) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return b.toFixed(b >= 10 ? 0 : 1) + " " + u[i];
 }
 function shortId(id) {
-  if (!id) return "—";
-  const s = String(id);
-  return esc(s.length > 18 ? s.slice(0, 16) + "…" : s);
+  id = String(id || "");
+  return id.length > 12 ? id.slice(0, 8) + "…" : id;
 }
 
-/* ============================== API client ============================= */
+/* ============================== Icons (inline SVG) ============================== */
+const IC = {
+  dash: '<svg viewBox="0 0 16 16" width="16" height="16"><rect x="2" y="2" width="5" height="5" rx="1.2" fill="currentColor" opacity="0.85"/><rect x="9" y="2" width="5" height="5" rx="1.2" fill="currentColor" opacity="0.5"/><rect x="2" y="9" width="5" height="5" rx="1.2" fill="currentColor" opacity="0.5"/><rect x="9" y="9" width="5" height="5" rx="1.2" fill="currentColor" opacity="0.85"/></svg>',
+  prof: '<svg viewBox="0 0 16 16" width="16" height="16"><circle cx="8" cy="5.2" r="2.8" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M2.8 13.4c.7-2.4 2.8-3.7 5.2-3.7s4.5 1.3 5.2 3.7" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>',
+  dev: '<svg viewBox="0 0 16 16" width="16" height="16"><rect x="4" y="2" width="8" height="12" rx="1.6" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M7 12.2h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  fp: '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M5.5 13.5c-.9-1-1.5-2.5-1.5-4.3 0-3 2-5.7 4-5.7 2 0 4 2.7 4 5.7 0 1.3-.3 2.5-.8 3.4M6.2 13.2c-.3-.8-.5-1.7-.5-2.6 0-2.2 1.2-4.1 2.3-4.1s2.3 1.9 2.3 4.1c0 1-.2 1.9-.5 2.7M8 13.4v-2.2c0-1 .4-2 .4-2" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>',
+  net: '<svg viewBox="0 0 16 16" width="16" height="16"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M2 8h12M8 2c1.8 1.7 2.7 3.8 2.7 6S9.8 12.3 8 14c-1.8-1.7-2.7-3.8-2.7-6S6.2 3.7 8 2z" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>',
+  jobs: '<svg viewBox="0 0 16 16" width="16" height="16"><rect x="2.5" y="2.5" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M5.5 8l2 2 3.2-3.6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  audit: '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M4 2h8v12H4z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/><path d="M6 5.5h4M6 8h4M6 10.5h2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>',
+  gear: '<svg viewBox="0 0 16 16" width="16" height="16"><circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M12.4 3.6 11 5M5 11l-1.4 1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
+  chevL: '<svg viewBox="0 0 16 16" width="15" height="15"><path d="M10 3 5.5 8 10 13" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  play: '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M4.5 3.2v9.6L12.5 8z" fill="currentColor"/></svg>',
+  stop: '<svg viewBox="0 0 16 16" width="12" height="12"><rect x="3.5" y="3.5" width="9" height="9" rx="1.4" fill="currentColor"/></svg>',
+  restart: '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2.6h-2.6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  park: '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M6 3.5h7M6 8h7M6 12.5h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M2.5 3.5v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  trash: '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M2.8 4h10.4M6.5 2.5h3M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4M6.6 6.6v4M9.4 6.6v4" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  eye: '<svg viewBox="0 0 16 16" width="13" height="13"><path d="M1.8 8S4 4.4 8 4.4 14.2 8 14.2 8 12 11.6 8 11.6 1.8 8 1.8 8z" stroke="currentColor" stroke-width="1.4" fill="none"/><circle cx="8" cy="8" r="1.8" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>',
+};
+
+/* ============================== API client ============================== */
 const TOKEN_KEY = "mp_api_token";
 let apiToken = localStorage.getItem(TOKEN_KEY) || "";
 let authFailed = false;
@@ -59,14 +89,14 @@ async function api(path, opts = {}) {
   try {
     res = await fetch(path, Object.assign({}, opts, { headers }));
   } catch (e) {
-    return { ok: false, status: 0, networkError: true, error: String(e && e.message || e) };
+    return { ok: false, status: 0, networkError: true, error: String((e && e.message) || e) };
   }
   if (res.status === 401) {
     authFailed = true;
     return { ok: false, status: 401, error: "unauthorized" };
   }
   let data = null;
-  try { data = await res.json(); } catch (e) { /* non-JSON */ }
+  try { data = await res.json(); } catch (e) { /* non-JSON body */ }
   return { ok: res.ok, status: res.status, data };
 }
 const apiGet = (p) => api(p, { method: "GET" });
@@ -76,217 +106,307 @@ const apiDel = (p) => api(p, { method: "DELETE" });
 
 /* ============================== Cache ============================== */
 const cache = {
-  profiles: null, health: null, clients: null, templates: null,
-  devices: null, deviceDetail: {}, gateways: null, jobs: null,
-  backups: null, audit: null, ua: null, sysHealth: null,
-  fp: {},          // profileId -> fingerprint report
-  netHealth: {},   // profileId -> network-health
+  profiles: null, devices: null, clients: null, templates: null,
+  gateways: null, jobs: null, healthMap: null, sysHealth: null,
+  fp: {}, netHealth: {},
 };
 function invalidate(...keys) { keys.forEach((k) => { cache[k] = null; }); }
 
-async function loadProfiles(force) {
-  if (!force && cache.profiles) return cache.profiles;
-  const r = await apiGet("/api/profiles");
-  let items = [];
+async function loadDevices(force) {
+  if (!force && cache.devices) return cache.devices;
+  const r = await apiGet("/api/devices");
   if (r.ok && r.data) {
-    if (Array.isArray(r.data)) items = r.data;
-    else if (Array.isArray(r.data.items)) items = r.data.items;
+    const list = Array.isArray(r.data) ? r.data : (r.data.devices || []);
+    cache.devices = list;
+    return list;
   }
-  cache.profiles = items;
-  cache._profilesFailed = !r.ok;
-  return items;
-}
-async function loadHealthMap(force) {
-  if (!force && cache.health) return cache.health;
-  const r = await apiGet("/api/health/profiles");
-  const map = {};
-  if (r.ok && r.data && Array.isArray(r.data.profiles)) {
-    r.data.profiles.forEach((h) => { map[h.profile_id || h.profileId] = h; });
-  }
-  cache.health = map;
-  cache._healthFailed = !r.ok;
-  return map;
+  cache.devices = [];
+  return [];
 }
 async function loadClients(force) {
   if (!force && cache.clients) return cache.clients;
   const r = await apiGet("/api/clients");
-  cache.clients = (r.ok && Array.isArray(r.data)) ? r.data : [];
+  cache.clients = (r.ok && r.data && Array.isArray(r.data.clients)) ? r.data.clients : [];
   return cache.clients;
 }
 async function loadTemplates(force) {
   if (!force && cache.templates) return cache.templates;
   const r = await apiGet("/api/templates");
-  cache.templates = (r.ok && Array.isArray(r.data)) ? r.data : [];
+  cache.templates = (r.ok && r.data && Array.isArray(r.data.templates)) ? r.data.templates : [];
   return cache.templates;
-}
-async function loadDevices(force) {
-  if (!force && cache.devices) return cache.devices;
-  const r = await apiGet("/api/devices");
-  if (r.ok && r.data && Array.isArray(r.data.devices)) {
-    cache.devices = r.data.devices;
-    cache._devicesFailed = false;
-  } else {
-    cache.devices = null;
-    cache._devicesFailed = true;
-  }
-  return cache.devices;
 }
 async function loadGateways(force) {
   if (!force && cache.gateways) return cache.gateways;
   const r = await apiGet("/api/gateways");
   cache.gateways = (r.ok && r.data && Array.isArray(r.data.gateways)) ? r.data.gateways : [];
-  cache._gatewaysFailed = !r.ok;
   return cache.gateways;
 }
-async function loadJobs(force) {
-  if (!force && cache.jobs) return cache.jobs;
-  const r = await apiGet("/api/jobs?limit=100");
-  cache.jobs = (r.ok && r.data && Array.isArray(r.data.jobs)) ? r.data.jobs : [];
-  cache._jobsFailed = !r.ok;
-  return cache.jobs;
-}
-async function loadFp(profileId, force) {
-  if (!force && cache.fp[profileId]) return cache.fp[profileId];
-  const r = await apiGet(`/api/profiles/${encodeURIComponent(profileId)}/fingerprint`);
-  cache.fp[profileId] = r.ok ? r.data : null;
-  return cache.fp[profileId];
-}
-async function loadNetHealth(profileId, force) {
-  if (!force && cache.netHealth[profileId] !== undefined) return cache.netHealth[profileId];
-  const r = await apiGet(`/api/profiles/${encodeURIComponent(profileId)}/network-health`);
-  cache.netHealth[profileId] = r.ok ? r.data : null;
-  return cache.netHealth[profileId];
+async function loadHealthMap(force) {
+  if (!force && cache.healthMap) return cache.healthMap;
+  const r = await apiGet("/api/health/profiles");
+  if (r.ok && r.data) {
+    const h = r.data.profiles || r.data.health || r.data || {};
+    cache.healthMap = Array.isArray(h) ? {} : h;
+    return cache.healthMap;
+  }
+  cache.healthMap = {};
+  return {};
 }
 function clientName(id) {
-  const c = (cache.clients || []).find((x) => x.id === id);
+  if (!id) return null;
+  const c = (cache.clients || []).find((x) => x.id === id || x.clientId === id);
   return c ? (c.name || c.id) : null;
 }
+function deviceById(id) {
+  return (cache.devices || []).find((d) => d.id === id) || null;
+}
 function isRunning(p) {
-  const s = String(p.launchState || "").toUpperCase();
-  return s === "RUNNING" || s === "VERIFIED" || s === "CDP_READY" || s === "WINDOW_FOUND" || s === "POSITIONING";
+  return p.status === "running" || !!p.isRunning || !!p.launchState && /running/i.test(String(p.launchState));
 }
 
 /* ============================== Components ============================== */
 function toast(msg, type) {
-  const t = document.createElement("div");
-  t.className = "toast" + (type ? " " + type : "");
-  t.textContent = msg;
-  $("#toasts").appendChild(t);
-  setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; }, 3400);
-  setTimeout(() => t.remove(), 3800);
+  const el = document.createElement("div");
+  el.className = "toast" + (type === "err" ? " err" : type === "warn" ? " warn" : "");
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300); }, 4200);
 }
 function badge(text, kind) {
-  return `<span class="badge ${kind || ""}">${esc(text)}</span>`;
-}
-function healthBadge(status) {
-  const s = String(status || "").toLowerCase();
-  if (s === "healthy") return badge("Healthy", "green");
-  if (s === "proxy_failed") return badge("Proxy failed", "red");
-  if (s === "stopped") return badge("Stopped", "grey");
-  if (s === "degraded") return badge("Degraded", "amber");
-  return NA;
-}
-function runBadge(p) {
-  return isRunning(p)
-    ? `<span class="badge green"><span class="dot-run"></span>&nbsp;Running</span>`
-    : `<span class="badge grey"><span class="dot-stop"></span>&nbsp;Stopped</span>`;
+  return `<span class="badge ${kind || "grey"}">${esc(text)}</span>`;
 }
 function supportBadge(s) {
   const v = String(s || "").toUpperCase();
-  if (v === "VALIDATED") return badge("✓ Validated", "green");
-  if (v === "PARTIAL") return badge("⚠ Partial", "amber");
-  if (v === "UNSUPPORTED") return badge("✕ Unsupported", "red");
-  if (v === "PENDING") return badge("… Pending", "grey");
+  if (v === "VALIDATED") return badge("Validated", "green");
+  if (v === "PARTIAL") return badge("Partial", "amber");
+  if (v === "PENDING") return badge("Pending", "grey");
+  if (v === "UNSUPPORTED" || v === "UNAVAILABLE") return badge("Unavailable", "red");
   return NA;
 }
+function runDot(p) {
+  if (p.status === "error") return '<span class="status-dot error" title="Error"></span>';
+  if (p.status === "parked") return '<span class="status-dot parked" title="Parked"></span>';
+  if (isRunning(p)) return '<span class="status-dot running" title="Running"></span>';
+  return '<span class="status-dot stopped" title="Stopped"></span>';
+}
 function statusBadge(s) {
-  const v = String(s || "").toUpperCase();
-  if (v === "PASS" || v === "SUPPORTED") return badge(v, "green");
-  if (v === "WARNING" || v === "PARTIAL") return badge(v, "amber");
-  if (v === "ERROR" || v === "FAIL" || v === "UNAVAILABLE" || v === "UNSUPPORTED") return badge(v, "red");
-  return badge(v || "—", "grey");
+  const v = String(s || "").toLowerCase();
+  if (v === "running") return badge("Running", "green");
+  if (v === "error") return badge("Error", "red");
+  if (v === "parked") return badge("Parked", "amber");
+  if (v === "starting" || v === "stopping") return badge(s, "blue");
+  return badge("Stopped", "grey");
 }
-function emptyState(icon, title, text, actionHtml) {
-  return `<div class="empty"><div class="big">${icon}</div><h3>${esc(title)}</h3><p>${esc(text)}</p>${actionHtml || ""}</div>`;
+function jobStatusBadge(s) {
+  const v = String(s || "").toLowerCase();
+  if (["done", "completed", "success"].includes(v)) return badge(s, "green");
+  if (["failed", "error"].includes(v)) return badge(s, "red");
+  if (["running", "in_progress"].includes(v)) return badge(s, "blue");
+  if (["queued", "pending"].includes(v)) return badge(s, "amber");
+  if (["cancelled", "canceled"].includes(v)) return badge(s, "grey");
+  return badge(s || "—", "grey");
 }
-function skelRow(cols) {
-  return `<tr>${Array.from({ length: cols }, () => '<td><div class="skel">&nbsp;</div></td>').join("")}</tr>`;
+function emptyState(title, text, actionHtml) {
+  return `<div class="empty">
+    <h3>${esc(title)}</h3><p>${esc(text)}</p>${actionHtml || ""}
+  </div>`;
 }
-
-/* Modal */
-function openModal(title, bodyHtml, footHtml) {
+function skelTable(cols, rows) {
+  let h = '<div class="table-card"><table class="grid"><tbody>';
+  for (let i = 0; i < (rows || 6); i++) {
+    h += "<tr>" + `<td colspan="${cols}"><div class="skel" style="height:16px;margin:6px 0"></div></td>` + "</tr>";
+  }
+  return h + "</tbody></table></div>";
+}
+/* Proxy summaries NEVER show passwords — auth is rendered as •••• */
+function proxyLabel(p) {
+  const host = p.proxyHost || p.proxy_host;
+  if (!host) return NA;
+  const proto = String(p.proxyType || p.networkMode || "http").toLowerCase();
+  const port = p.proxyPort ? ":" + p.proxyPort : "";
+  const auth = (p.proxyUser || p.proxy_user || p.hasProxyAuth) ? "••••@" : "";
+  return `<span class="mono">${esc(proto)}://${auth}${esc(host)}${esc(port)}</span>`;
+}
+function fpSummary(p) {
+  const parts = [];
+  const ua = p.userAgent || p.user_agent;
+  if (ua) {
+    const m = String(ua).match(/Chrome\/(\d+)/);
+    parts.push(m ? "Chrome " + m[1] : "Custom UA");
+  }
+  if (p.locale || p.language) parts.push(esc(p.locale || p.language));
+  if (p.timezone) parts.push(esc(p.timezone));
+  return parts.length ? parts.join(" · ") : NA;
+}
+function openModal(title, bodyHtml, footHtml, wide) {
   $("#modalTitle").textContent = title;
   $("#modalBody").innerHTML = bodyHtml;
   const foot = $("#modalFoot");
-  if (footHtml) { foot.innerHTML = footHtml; foot.hidden = false; }
-  else { foot.innerHTML = ""; foot.hidden = true; }
+  if (footHtml) { foot.innerHTML = footHtml; foot.hidden = false; } else { foot.hidden = true; foot.innerHTML = ""; }
+  $("#modal").classList.toggle("wide", !!wide);
   $("#modalBackdrop").hidden = false;
+  const first = $("#modalBody").querySelector("input, select, textarea, button");
+  if (first) setTimeout(() => first.focus(), 60);
 }
 function closeModal() { $("#modalBackdrop").hidden = true; $("#modalBody").innerHTML = ""; }
-
-/* Drawer */
 function openDrawer(title, bodyHtml) {
   $("#drawerTitle").textContent = title;
   $("#drawerBody").innerHTML = bodyHtml;
   $("#drawerBackdrop").hidden = false;
   $("#drawer").hidden = false;
 }
-function closeDrawer() {
-  $("#drawerBackdrop").hidden = true;
-  $("#drawer").hidden = true;
-  $("#drawerBody").innerHTML = "";
-}
+function closeDrawer() { $("#drawer").hidden = true; $("#drawerBackdrop").hidden = true; }
 
-/* Masked proxy display — never show passwords */
-function proxyLabel(p) {
-  const host = p.proxyHost || p.proxy_host;
-  if (!host) return NA;
-  const proto = (p.proxyType || p.networkMode || "http");
-  const port = p.proxyPort ? ":" + p.proxyPort : "";
-  const auth = (p.proxyUser || p.hasProxyAuth) ? " •••@" : "";
-  return `<span class="mono">${esc(String(proto).toLowerCase())}://${auth}${esc(host)}${esc(port)}</span>`;
+/* ============================== Shared actions ============================== */
+function apiErr(r, fallback) {
+  return esc((r.data && (r.data.error || r.data.message)) || r.error || fallback || "unknown error");
+}
+async function actLaunch(ids) {
+  if (!ids.length) return;
+  const failed = [];
+  for (const id of ids) {
+    const r = await apiPost(`/api/profiles/${encodeURIComponent(id)}/launch`);
+    if (!r.ok || !(r.data || {}).ok) {
+      failed.push({ id, blocked: r.status === 409, data: r.data });
+    }
+  }
+  if (!failed.length) {
+    toast(`Launched ${ids.length} profile${ids.length > 1 ? "s" : ""}`, "ok");
+  } else {
+    const blocked = failed.filter((f) => f.blocked);
+    if (blocked.length) {
+      const names = blocked.map((f) => f.id).join(", ");
+      const warn = (blocked[0].data && blocked[0].data.warnings || []).join("; ");
+      if (!confirm(`Launch blocked by consistency checks for: ${names}\n${warn}\n\nForce launch anyway?`)) {
+        invalidate("profiles");
+        return;
+      }
+      for (const f of blocked) {
+        const r = await apiPost(`/api/profiles/${encodeURIComponent(f.id)}/launch?force=1`);
+        if (!r.ok || !(r.data || {}).ok) toast("Force launch failed for " + f.id + ": " + apiErr(r), "err");
+      }
+    }
+    const other = failed.filter((f) => !f.blocked);
+    other.forEach((f) => toast("Launch failed for " + f.id, "err"));
+  }
+  invalidate("profiles", "healthMap");
+  if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
+}
+async function actStop(ids) {
+  if (!ids.length) return;
+  for (const id of ids) {
+    const r = await apiPost(`/api/profiles/${encodeURIComponent(id)}/stop`);
+    if (!r.ok || !(r.data || {}).ok) toast("Stop failed for " + id + ": " + apiErr(r), "err");
+  }
+  toast(`Stopped ${ids.length} profile${ids.length > 1 ? "s" : ""}`, "ok");
+  invalidate("profiles", "healthMap");
+  if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
+}
+async function actRestart(id) {
+  const r1 = await apiPost(`/api/profiles/${encodeURIComponent(id)}/stop`);
+  if (!r1.ok) { toast("Stop failed: " + apiErr(r1), "err"); return; }
+  toast("Stopped — relaunching…");
+  setTimeout(async () => {
+    const r2 = await apiPost(`/api/profiles/${encodeURIComponent(id)}/launch`);
+    if (r2.ok && (r2.data || {}).ok) toast("Relaunched", "ok");
+    else if (r2.status === 409) toast("Relaunch blocked by consistency checks", "warn");
+    else toast("Relaunch failed: " + apiErr(r2), "err");
+    invalidate("profiles", "healthMap");
+    if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
+  }, 1500);
+}
+async function actPark(ids, park) {
+  if (!ids.length) return;
+  for (const id of ids) {
+    if (park) await apiPost(`/api/profiles/${encodeURIComponent(id)}/stop`);
+    const r = await apiPut(`/api/profiles/${encodeURIComponent(id)}`, { status: park ? "parked" : "idle" });
+    if (!r.ok) toast((park ? "Park" : "Unpark") + " failed for " + id + ": " + apiErr(r), "err");
+  }
+  toast(park ? `Parked ${ids.length} profile${ids.length > 1 ? "s" : ""}` : `Unparked ${ids.length} profile${ids.length > 1 ? "s" : ""}`, "ok");
+  invalidate("profiles");
+  if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
+}
+async function actDelete(ids) {
+  if (!ids.length) return;
+  const label = ids.length > 1 ? `${ids.length} profiles` : `"${ids[0]}"`;
+  if (!confirm(`Delete ${label}? Browser storage will be purged. This cannot be undone.`)) return;
+  for (const id of ids) {
+    const r = await apiDel(`/api/profiles/${encodeURIComponent(id)}`);
+    if (!r.ok) toast("Delete failed for " + id + ": " + apiErr(r), "err");
+    delete cache.fp[id]; delete cache.netHealth[id];
+  }
+  toast("Deleted", "ok");
+  invalidate("profiles", "healthMap");
+  if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
+  else route();
+}
+function exportProfiles(profiles) {
+  const safe = profiles.map((p) => {
+    const c = Object.assign({}, p);
+    ["proxyPass", "proxy_pass", "proxyPassword", "proxy_password"].forEach((k) => delete c[k]);
+    return c;
+  });
+  const blob = new Blob([JSON.stringify(safe, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "multiprofile-export.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+async function refreshHealthPill() {
+  const r = await apiGet("/api/health");
+  const dot = $("#healthDot"), txt = $("#healthText");
+  if (r.ok && r.data && r.data.ok) {
+    dot.className = "dot ok";
+    txt.textContent = "Online" + (r.data.version ? " · v" + r.data.version : "");
+    $("#versionText").textContent = `multiprofile ${r.data.version || ""} · chrome ${r.data.chrome_ok ? "ok" : "missing"}`;
+    cache.sysHealth = r.data;
+  } else if (r.status === 401) {
+    dot.className = "dot bad"; txt.textContent = "Auth required";
+  } else {
+    dot.className = "dot bad";
+    txt.textContent = r.networkError ? "Unreachable" : "Error " + r.status;
+  }
 }
 
 /* ============================== Navigation ============================== */
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: "▦", route: "#/dashboard" },
-  { id: "profiles", label: "Profiles", icon: "◉", route: "#/profiles" },
-  { id: "groups", label: "Groups", icon: "🏷", route: "#/groups" },
-  { id: "proxies", label: "Proxies", icon: "🌐", route: "#/proxies" },
-  { id: "devices", label: "Devices", icon: "📱", route: "#/devices" },
-  { id: "fingerprints", label: "Fingerprints", icon: "🧬", route: "#/fingerprints" },
-  { id: "automation", label: "Automation", icon: "⚙", route: "#/automation" },
-  { id: "tasks", label: "Tasks", icon: "✓", route: "#/tasks" },
-  { id: "gateways", label: "Gateways", icon: "🛰", route: "#/gateways" },
-  { id: "extensions", label: "Extensions", icon: "🧩", route: "#/extensions" },
-  { id: "backups", label: "Backups", icon: "💾", route: "#/backups" },
-  { id: "audit", label: "Audit Logs", icon: "📜", route: "#/audit" },
-  { id: "settings", label: "Settings", icon: "🔧", route: "#/settings" },
+  { id: "dashboard", label: "Dashboard", icon: IC.dash, route: "#/dashboard" },
+  { id: "profiles", label: "Profiles", icon: IC.prof, route: "#/profiles" },
+  { id: "devices", label: "Devices", icon: IC.dev, route: "#/devices" },
+  { id: "fingerprint", label: "Fingerprint", icon: IC.fp, route: "#/fingerprint" },
+  { id: "network", label: "Network", icon: IC.net, route: "#/network" },
+  { id: "jobs", label: "Jobs", icon: IC.jobs, route: "#/jobs" },
+  { id: "audit", label: "Audit Log", icon: IC.audit, route: "#/audit" },
+  { id: "settings", label: "Settings", icon: IC.gear, route: "#/settings" },
 ];
 function renderNav(activeId, counts) {
   $("#mainNav").innerHTML = NAV.map((n) => {
-    const c = counts && counts[n.id] != null ? `<span class="count">${esc(counts[n.id])}</span>` : "";
-    return `<a href="${n.route}" class="${n.id === activeId ? "active" : ""}" data-nav="${n.id}">
-      <span class="nav-ico">${n.icon}</span><span>${esc(n.label)}</span>${c}</a>`;
+    const c = counts && counts[n.id] != null ? `<span class="nav-badge">${esc(counts[n.id])}</span>` : "";
+    return `<a href="${n.route}" class="nav-item ${n.id === activeId ? "active" : ""}" data-nav="${n.id}">
+      ${n.icon}<span>${esc(n.label)}</span>${c}</a>`;
   }).join("");
+  $("#navCollapse").innerHTML = IC.chevL;
+}
+function toggleSidebar(collapse) {
+  const app = $("#app");
+  const willCollapse = collapse == null ? !app.classList.contains("nav-collapsed") : collapse;
+  app.classList.toggle("nav-collapsed", willCollapse);
+  $("#navExpand").hidden = !willCollapse;
+  try { localStorage.setItem("mp_nav_collapsed", willCollapse ? "1" : "0"); } catch (e) {}
 }
 
 /* ============================== Router ============================== */
 const TITLES = {
   dashboard: ["Dashboard", "Live operational overview"],
-  profiles: ["Profiles", "Browser profiles — launch, monitor, manage"],
-  groups: ["Groups", "Clients and templates"],
-  proxies: ["Proxies", "Test and manage proxy configurations"],
+  profiles: ["Profiles", "Launch, monitor and manage browser profiles"],
+  profile: ["Profile", "Profile detail"],
   devices: ["Device Library", "Device presets for profile creation"],
-  fingerprints: ["Fingerprints", "Per-profile fingerprint inspection"],
-  automation: ["Automation", "Job queue and bulk operations"],
-  tasks: ["Tasks", "Background job monitor"],
-  gateways: ["Gateways", "Proxy gateway providers"],
-  extensions: ["Extensions", "Browser extension status"],
-  backups: ["Backups", "Profile backups and restore"],
-  audit: ["Audit Logs", "Action history"],
+  fingerprint: ["Fingerprint", "Per-profile fingerprint inspection"],
+  network: ["Network", "Proxies, gateways and diagnostics"],
+  jobs: ["Jobs", "Background job queue"],
+  audit: ["Audit Log", "Action history"],
   settings: ["Settings", "Console and backend configuration"],
-  login: ["Sign in", "API access token required"],
 };
 let currentRoute = null;
 
@@ -303,553 +423,479 @@ function parseHash() {
 }
 
 async function route() {
-  if (authFailed) { renderLogin(); return; }
+  if (authFailed) { showLoginGate(); return; }
   const { page, param, query } = parseHash();
   currentRoute = { page, param, query };
-  const title = TITLES[page] || TITLES.dashboard;
-  $("#pageTitle").textContent = title[0];
-  $("#pageSub").textContent = title[1];
-  renderNav(page === "profile" ? "profiles" : page);
-  $("#sidebar").classList.remove("open");
+  const known = Object.prototype.hasOwnProperty.call(TITLES, page);
+  const key = known ? page : "dashboard";
+  $("#pageTitle").textContent = TITLES[key][0];
+  $("#pageSub").textContent = TITLES[key][1];
+  renderNav(page === "profile" ? "profiles" : key);
   const view = $("#view");
-  view.innerHTML = `<div class="grid cards-4">${"<div class='card'><div class='skel'>&nbsp;</div></div>".repeat(4)}</div>`;
+  view.innerHTML = skelTable(4, 6);
   try {
     switch (page) {
       case "dashboard": await vDashboard(view); break;
       case "profiles": await vProfiles(view, query); break;
       case "profile": await vProfileDetail(view, param, query); break;
-      case "groups": await vGroups(view); break;
-      case "proxies": await vProxies(view); break;
-      case "devices": await vDevices(view); break;
-      case "fingerprints": await vFingerprints(view, query); break;
-      case "automation": await vAutomation(view); break;
-      case "tasks": await vTasks(view); break;
-      case "gateways": await vGateways(view); break;
-      case "extensions": await vExtensions(view); break;
-      case "backups": await vBackups(view); break;
-      case "audit": await vAudit(view); break;
-      case "settings": await vSettings(view); break;
+      case "devices": await vDevices(view, query); break;
+      case "fingerprint": await vFingerprint(view, query); break;
+      case "network": await vNetwork(view, query); break;
+      case "jobs": await vJobs(view, query); break;
+      case "audit": await vAudit(view, query); break;
+      case "settings": await vSettings(view, query); break;
       default: await vDashboard(view);
     }
   } catch (e) {
-    view.innerHTML = emptyState("⚠", "View failed to render",
-      "An unexpected error occurred: " + String(e && e.message || e));
+    view.innerHTML = emptyState("View failed to render", "An unexpected error occurred: " + String((e && e.message) || e));
   }
-  view.scrollTop = 0;
-  $("#app").setAttribute("aria-busy", "false");
+  window.scrollTo(0, 0);
 }
 
-function renderLogin() {
-  renderNav("login");
-  $("#pageTitle").textContent = "Sign in";
-  $("#pageSub").textContent = "API access token required";
-  $("#view").innerHTML = `
-    <div class="login-wrap"><div class="card">
-      <h3>API token required</h3>
-      <p class="note">The backend rejected the request (401). Paste the value of
-      <span class="mono">MULTIPROFILE_API_TOKEN</span> — it is stored only in this
-      browser's localStorage.</p>
-      <label class="fld">API token
-        <input type="password" id="loginToken" value="${esc(apiToken)}" autocomplete="off">
-      </label>
-      <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn" id="loginClear">Clear</button>
-        <button class="btn btn-primary" id="loginSave">Save &amp; retry</button>
-      </div>
-    </div></div>`;
-  $("#loginSave").onclick = () => {
-    apiToken = $("#loginToken").value.trim();
-    if (apiToken) localStorage.setItem(TOKEN_KEY, apiToken);
-    else localStorage.removeItem(TOKEN_KEY);
-    authFailed = false;
-    invalidate("profiles", "health", "clients", "templates", "devices", "gateways", "jobs", "backups", "audit");
-    route();
+/* ============================== Login gate ============================== */
+function showLoginGate() {
+  $("#loginGate").hidden = false;
+  $("#app").hidden = true;
+}
+function hideLoginGate() {
+  $("#loginGate").hidden = true;
+  $("#app").hidden = false;
+}
+function initAuth() {
+  $("#btnAuth").onclick = () => {
+    openModal("API access token",
+      `<label class="field"><span class="field-label">Bearer token</span>
+       <input type="password" id="authToken" value="${esc(apiToken)}" autocomplete="off">
+       <span class="field-hint">Stored only in this browser's local storage.</span></label>`,
+      `<button class="btn" id="authClear">Clear</button><button class="btn btn-primary" id="authSave">Save &amp; retry</button>`);
+    $("#authSave").onclick = () => {
+      apiToken = $("#authToken").value.trim();
+      if (apiToken) localStorage.setItem(TOKEN_KEY, apiToken); else localStorage.removeItem(TOKEN_KEY);
+      authFailed = false;
+      invalidate("profiles", "healthMap", "clients", "templates", "devices", "gateways", "jobs");
+      closeModal(); hideLoginGate(); refreshHealthPill(); route();
+    };
+    $("#authClear").onclick = () => {
+      apiToken = ""; localStorage.removeItem(TOKEN_KEY);
+      $("#authToken").value = ""; toast("Token cleared");
+    };
   };
-  $("#loginClear").onclick = () => {
-    apiToken = ""; localStorage.removeItem(TOKEN_KEY); $("#loginToken").value = "";
-    toast("Token cleared");
+  $("#loginSubmit").onclick = () => {
+    const t = $("#loginToken").value.trim();
+    $("#loginError").hidden = true;
+    if (!t) { $("#loginError").textContent = "Paste a token first."; $("#loginError").hidden = false; return; }
+    apiToken = t; localStorage.setItem(TOKEN_KEY, t);
+    authFailed = false; hideLoginGate(); refreshHealthPill(); route();
   };
-}
-
-/* ============================== Shared actions ============================== */
-async function actLaunch(ids, opts) {
-  const r = await apiPost("/api/jobs", Object.assign({ type: ids.length > 1 ? "bulk_launch" : "launch_profile", profileIds: ids }, opts || {}));
-  if (r.ok && r.data && r.data.ok) {
-    toast(`Launch job queued (${ids.length} profile${ids.length > 1 ? "s" : ""})`, "ok");
-    invalidate("jobs");
-  } else toast("Launch failed: " + esc((r.data && (r.data.error || r.data.message)) || r.error || "unknown"), "err");
-}
-async function actStop(ids) {
-  const r = await apiPost("/api/jobs", { type: ids.length > 1 ? "bulk_stop" : "stop_profile", profileIds: ids });
-  if (r.ok && r.data && r.data.ok) { toast(`Stop job queued (${ids.length})`, "ok"); invalidate("jobs"); }
-  else toast("Stop failed: " + esc((r.data && (r.data.error || r.data.message)) || r.error || "unknown"), "err");
-}
-async function actDelete(id) {
-  const ok = confirm("Delete this profile? Its browser storage will be purged.");
-  if (!ok) return;
-  const r = await apiDel(`/api/profiles/${encodeURIComponent(id)}`);
-  if (r.ok && r.data && r.data.ok) {
-    toast("Profile deleted", "ok");
-    invalidate("profiles"); delete cache.fp[id]; delete cache.netHealth[id];
-    route();
-  } else toast("Delete failed: " + esc((r.data && r.data.error) || r.error || "unknown"), "err");
-}
-function exportProfiles(profiles) {
-  const safe = profiles.map((p) => {
-    const c = Object.assign({}, p);
-    delete c.proxyPass; delete c.proxy_password;
-    return c;
-  });
-  const blob = new Blob([JSON.stringify(safe, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "multiprofile-export.json";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-}
-async function refreshHealthPill() {
-  const r = await apiGet("/api/health");
-  const dot = $("#healthDot"), txt = $("#healthText");
-  if (r.ok && r.data && r.data.ok) {
-    dot.className = "dot ok";
-    txt.textContent = "Online" + (r.data.version ? " · v" + r.data.version : "");
-    $("#versionText").textContent = `multiprofile-native ${r.data.version || ""} · chrome ${r.data.chrome_ok ? "ok" : "missing"}`;
-    cache.sysHealth = r.data;
-  } else if (r.status === 401) {
-    dot.className = "dot bad"; txt.textContent = "Auth required";
-  } else {
-    dot.className = "dot bad";
-    txt.textContent = r.networkError ? "Unreachable" : "Error " + r.status;
-  }
+  $("#loginSkip").onclick = () => { authFailed = false; hideLoginGate(); route(); };
 }
 
 /* ============================== Dashboard ============================== */
-function statCard(label, valueHtml, hint, src, tone) {
-  return `<div class="card stat-card ${tone || ""}">
-    <div class="label">${esc(label)}</div>
-    <div class="value">${valueHtml}</div>
-    <div class="hint">${esc(hint || "")}</div>
-    ${src ? `<div class="src">${esc(src)}</div>` : ""}
+function statCard(label, value, hint, tone) {
+  return `<div class="stat-card ${tone || ""}">
+    <div class="stat-label">${esc(label)}</div>
+    <div class="stat-num">${value == null ? '<span class="muted">—</span>' : esc(value)}</div>
+    ${hint ? `<div class="stat-hint">${esc(hint)}</div>` : ""}
   </div>`;
 }
-const DASH_NA = statCard;
+/* Count via limit=1 so we only fetch totals, not full lists */
+async function profileCount(status) {
+  const qs = new URLSearchParams({ limit: "1" });
+  if (status) qs.set("status", status);
+  const r = await apiGet("/api/profiles?" + qs.toString());
+  if (r.ok && r.data) {
+    if (typeof r.data.total === "number") return r.data.total;
+    if (Array.isArray(r.data)) return r.data.length;
+    if (Array.isArray(r.data.items)) return r.data.items.length;
+  }
+  return null;
+}
 
 async function vDashboard(view) {
-  const [profiles, healthMap] = await Promise.all([loadProfiles(), loadHealthMap()]);
-  const profFailed = cache._profilesFailed, healthFailed = cache._healthFailed;
+  view.innerHTML = `<div class="stat-grid" id="dashStats">${"<div class='stat-card'><div class='skel' style='height:64px'></div></div>".repeat(5)}</div>
+    <div class="toolbar-row"><h2 class="section-title" style="margin:0">Recent activity</h2><span class="spacer"></span>
+    <a class="btn btn-sm" href="#/audit">View audit log</a></div>
+    <div class="table-card"><div class="table-scroll" id="dashAudit"></div></div>`;
 
-  const total = profFailed ? null : profiles.length;
-  const running = profFailed ? null : profiles.filter(isRunning).length;
-  const stopped = (total == null || running == null) ? null : total - running;
+  const [total, running, stopped, error] = await Promise.all([
+    profileCount(null),
+    profileCount("running"),
+    profileCount("idle"),
+    profileCount("error"),
+  ]);
 
-  let healthy = null, netErr = null;
-  if (!healthFailed) {
-    const vals = Object.values(healthMap);
-    healthy = vals.filter((h) => h.overallOk).length;
-    netErr = vals.filter((h) => h.proxy_ok === false || h.status === "proxy_failed").length;
+  let queued = null, jobsOk = true;
+  try {
+    const r = await apiGet("/api/jobs?limit=100");
+    if (r.ok && r.data && r.data.ok) {
+      const jobs = r.data.jobs || [];
+      queued = jobs.filter((j) => ["queued", "pending", "running", "in_progress"].includes(String(j.status || "").toLowerCase())).length;
+    } else if (r.status === 503) { jobsOk = false; }
+    else if (!r.ok) { jobsOk = false; }
+  } catch (e) { jobsOk = false; }
+
+  const stats = [
+    statCard("Total profiles", total, "GET /api/profiles"),
+    statCard("Running", running, "status=running", "tone-ok"),
+    statCard("Stopped", stopped, "idle / not running"),
+    statCard("Error", error, "status=error", error ? "tone-err" : ""),
+    statCard("Queued jobs", queued, jobsOk ? "GET /api/jobs" : "job system unavailable", jobsOk ? "tone-info" : "tone-warn"),
+  ];
+  $("#dashStats").innerHTML = stats.join("");
+
+  /* Recent audit — honest empty state when unavailable */
+  try {
+    const r = await apiGet("/api/audit?limit=8");
+    if (r.ok && r.data && Array.isArray(r.data.items) && r.data.items.length) {
+      $("#dashAudit").innerHTML = `<table class="grid"><thead><tr>
+        <th>Time</th><th>Action</th><th>Profile</th><th>Result</th></tr></thead><tbody>` +
+        r.data.items.map(auditRow).join("") + "</tbody></table>";
+    } else {
+      $("#dashAudit").innerHTML = emptyState("No recent activity", "The audit log is empty or unavailable.");
+    }
+  } catch (e) {
+    $("#dashAudit").innerHTML = emptyState("No recent activity", "Could not load the audit log.");
   }
-
-  const activeProxies = profFailed ? null
-    : profiles.filter((p) => p.proxyHost || String(p.networkMode || "").toUpperCase() !== "DIRECT" && p.networkMode).length;
-
-  const jobs = await loadJobs();
-  const jobsFailed = cache._jobsFailed;
-  const activeTasks = jobsFailed ? null
-    : jobs.filter((j) => ["queued", "running", "in_progress"].includes(String(j.status).toLowerCase())).length;
-
-  const card = (label, v, hint, src, tone) =>
-    statCard(label, v == null ? '<span class="na">—</span>' : esc(v), hint, src, tone);
-
-  view.innerHTML = `
-    <div class="grid cards-4">
-      ${card("Total Profiles", total, "from GET /api/profiles", "/api/profiles")}
-      ${card("Running", running, "launchState is a running state", "/api/profiles", "good")}
-      ${card("Stopped", stopped, "total minus running", "/api/profiles")}
-      ${card("Healthy", healthy, "overallOk across profiles", "/api/health/profiles", healthy ? "good" : "")}
-      ${card("Network Errors", netErr, "proxy check failed", "/api/health/profiles", netErr ? "bad" : "")}
-      ${card("Fingerprint Warnings", '<span class="na" id="dashFpWarn">—</span>', "profiles with fingerprint warnings", "/api/profiles/:id/fingerprint", "warn")}
-      ${card("Active Proxies", activeProxies, "profiles with proxy configured", "/api/profiles")}
-      ${card("Active Tasks", activeTasks, "jobs queued or running", "/api/jobs")}
-    </div>
-
-    <div class="section-head"><h2>Fleet snapshot</h2><div class="spacer"></div>
-      <button class="btn btn-sm" id="dashRefresh">⟳ Refresh</button></div>
-    <div class="grid cards-2">
-      <div class="card"><h3>Runtime states</h3><div id="dashStates"><div class="skel">&nbsp;</div></div></div>
-      <div class="card"><h3>Recent jobs</h3><div id="dashJobs"><div class="skel">&nbsp;</div></div></div>
-    </div>
-    <div class="section-head"><h2>System</h2></div>
-    <div class="card" id="dashSys"><div class="skel">&nbsp;</div></div>`;
-
-  $("#dashRefresh").onclick = () => {
-    invalidate("profiles", "health", "jobs");
-    cache.fp = {}; cache.netHealth = {};
-    route();
-  };
-
-  // Fingerprint warnings — fetched per profile in the background; "—" until known.
-  (async () => {
-    if (profFailed) return;
-    const settled = await Promise.allSettled(profiles.map((p) => loadFp(p.id)));
-    const el = $("#dashFpWarn");
-    if (!el) return;
-    let n = 0;
-    settled.forEach((s) => {
-      if (s.status === "fulfilled" && s.value && Array.isArray(s.value.warnings) && s.value.warnings.length) n++;
-    });
-    el.textContent = String(n);
-    el.classList.remove("na");
-  })();
-
-  // Runtime state breakdown
-  const states = {};
-  profiles.forEach((p) => {
-    const s = p.launchState || "IDLE";
-    states[s] = (states[s] || 0) + 1;
-  });
-  $("#dashStates").innerHTML = Object.keys(states).length
-    ? Object.entries(states).sort((a, b) => b[1] - a[1])
-        .map(([s, n]) => `<div class="check-row"><span style="flex:1">${badge(s, s === "RUNNING" ? "green" : s.includes("FAIL") ? "red" : "grey")}</span><span class="num">${n}</span></div>`).join("")
-    : `<p class="muted">No profiles.</p>`;
-
-  $("#dashJobs").innerHTML = jobs.length
-    ? jobs.slice(0, 5).map((j) => `<div class="check-row"><span style="flex:1">
-        <span class="mono">${esc(j.id)}</span> <span class="muted">${esc(j.type || "")}</span></span>
-        ${badge(String(j.status || "unknown"), String(j.status).toLowerCase() === "done" || String(j.status).toLowerCase() === "completed" ? "green" : String(j.status).toLowerCase().includes("fail") ? "red" : "cyan")}
-      </div>`).join("")
-    : `<p class="muted">No jobs recorded.</p>`;
-
-  const sys = cache.sysHealth;
-  $("#dashSys").innerHTML = sys ? `
-    <dl class="kv">
-      <dt>App</dt><dd class="mono">${esc(sys.app || "—")} ${esc(sys.version || "")}</dd>
-      <dt>Chrome</dt><dd>${sys.chrome_ok ? badge("found", "green") : badge("missing", "red")} <span class="mono muted">${esc(sys.chrome_path || "")}</span></dd>
-      <dt>Profiles dir writable</dt><dd>${sys.profiles_writable ? "yes" : "no"}</dd>
-      <dt>Slots</dt><dd class="mono">${esc(JSON.stringify(sys.slots ?? "—"))}</dd>
-      <dt>Max concurrent</dt><dd class="num">${esc(sys.maxConcurrentProfiles ?? "—")}</dd>
-      <dt>Sandbox</dt><dd class="mono">${esc(sys.sandbox ? (sys.sandbox.ok ? "ok" : sys.sandbox.reason || "not ok") : "—")}</dd>
-    </dl>
-    <p class="note">Source: GET /api/health (unauthenticated by design).</p>`
-    : `<p class="muted">System info unavailable.</p>`;
+}
+function auditRow(a) {
+  const ok = a.ok === true ? badge("ok", "green") : a.ok === false ? badge("failed", "red") : NA;
+  return `<tr>
+    <td class="muted small">${esc(fmtDate(a.ts || a.time || a.created))}</td>
+    <td><span class="mono">${esc(a.action || a.type || "—")}</span></td>
+    <td>${a.profile_id || a.profileId ? `<a href="#/profile/${encodeURIComponent(a.profile_id || a.profileId)}">${esc(shortId(a.profile_id || a.profileId))}</a>` : NA}</td>
+    <td>${ok}</td>
+  </tr>`;
 }
 
 /* ============================== Profiles ============================== */
-const profView = {
-  q: "", fClient: "", fTag: "", fDevice: "", fNetwork: "", fHealth: "", fFp: "",
-  sort: "name", dir: 1, page: 0, per: 25, selected: new Set(),
+const PAGE_SIZE = 25;
+const pv = {
+  q: "", status: "", clientId: "", tag: "",
+  items: [], total: null, offset: 0, cursor: null, useCursor: false,
+  selected: new Set(), metrics: {}, metricsLoading: false,
+  initialized: false,
 };
-function fpWarnCount(p) {
-  const r = cache.fp[p.id];
-  if (!r) return null;
-  return Array.isArray(r.warnings) ? r.warnings.length : 0;
+
+function pvQueryParams() {
+  const p = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  if (pv.useCursor && pv.cursor) p.set("cursor", pv.cursor);
+  else if (!pv.useCursor) p.set("offset", String(pv.offset));
+  if (pv.q) p.set("q", pv.q);
+  if (pv.status) p.set("status", pv.status);
+  if (pv.clientId) p.set("clientId", pv.clientId);
+  if (pv.tag) p.set("tag", pv.tag);
+  return p.toString();
+}
+
+async function pvFetch() {
+  const r = await apiGet("/api/profiles?" + pvQueryParams());
+  if (!r.ok) {
+    return { error: r.status === 401 ? "unauthorized" : "GET /api/profiles failed (" + r.status + ")" };
+  }
+  const d = r.data || {};
+  const items = Array.isArray(d) ? d : (d.items || []);
+  let nextCursor = null, total = null;
+  if (!Array.isArray(d)) {
+    if (typeof d.next_cursor === "string") { pv.useCursor = true; nextCursor = d.next_cursor || null; }
+    if (typeof d.total === "number") total = d.total;
+  }
+  return { items, nextCursor, total };
 }
 
 async function vProfiles(view, query) {
-  if (query.q) profView.q = query.q;
-  const [profiles, healthMap, clients] = await Promise.all([loadProfiles(), loadHealthMap(), loadClients()]);
-  if (cache._profilesFailed) {
-    view.innerHTML = emptyState("⚠", "Could not load profiles", "GET /api/profiles failed. Check the backend and retry.",
-      `<button class="btn btn-primary" onclick="location.reload()">Retry</button>`);
-    return;
-  }
-  renderProfilesTable(view, profiles, healthMap, clients);
+  pv.q = query.q || pv.q || "";
+  pv.status = query.status || "";
+  pv.clientId = query.clientId || "";
+  pv.selected = new Set();
+  pv.offset = 0; pv.cursor = null; pv.useCursor = false; pv.metrics = {};
+  pv.initialized = false;
 
-  // Lazy per-row enrichment: fingerprint warnings + network egress (visible rows only)
-  const visible = currentRows(profiles, healthMap).slice(
-    profView.page * profView.per, profView.page * profView.per + profView.per);
-  visible.forEach(async (p) => {
-    const [fp, nh] = await Promise.all([loadFp(p.id), loadNetHealth(p.id)]);
-    if (!document.body.contains($("#view"))) return;
-    const row = $(`tr[data-pid="${cssEsc(p.id)}"]`);
-    if (!row) return;
-    const fpCell = row.querySelector(".c-fp");
-    const ipCell = row.querySelector(".c-ip");
-    if (fpCell && fp) {
-      const w = Array.isArray(fp.warnings) ? fp.warnings.length : 0;
-      fpCell.innerHTML = w ? badge(w + " warning" + (w > 1 ? "s" : ""), "amber") : badge("clean", "green");
-    }
-    if (ipCell && nh) {
-      const ip = nh.proxyHealth && nh.proxyHealth.egress_ip || nh.egressIp || (nh.proxyHealth && nh.proxyHealth.egressIp);
-      ipCell.innerHTML = ip ? `<span class="mono">${esc(ip)}</span>` : NA;
-    }
-  });
-}
-
-function currentRows(profiles, healthMap) {
-  const q = profView.q.trim().toLowerCase();
-  let rows = profiles.filter((p) => {
-    if (q) {
-      const hay = [p.name, p.id, p.clientId, (p.tags || []).join(" "), p.proxyHost, p.deviceId, p.notes]
-        .filter(Boolean).join(" ").toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    if (profView.fClient && p.clientId !== profView.fClient) return false;
-    if (profView.fTag && !(p.tags || []).includes(profView.fTag)) return false;
-    if (profView.fDevice) {
-      const d = String(p.deviceId || "").toLowerCase();
-      if (profView.fDevice === "mobile" && !/mobile|android|iphone/i.test(d + " " + (p.userAgent || ""))) return false;
-      if (profView.fDevice === "desktop" && /mobile|android|iphone/i.test(d + " " + (p.userAgent || ""))) return false;
-      if (profView.fDevice === "set" && !p.deviceId) return false;
-      if (profView.fDevice === "unset" && p.deviceId) return false;
-    }
-    if (profView.fNetwork) {
-      const hasProxy = !!p.proxyHost;
-      if (profView.fNetwork === "proxy" && !hasProxy) return false;
-      if (profView.fNetwork === "direct" && hasProxy) return false;
-    }
-    if (profView.fHealth) {
-      const h = healthMap[p.id];
-      const st = h ? String(h.status || "").toLowerCase() : "unknown";
-      if (profView.fHealth === "healthy" && st !== "healthy") return false;
-      if (profView.fHealth === "error" && !(st === "proxy_failed" || st === "degraded")) return false;
-    }
-    if (profView.fFp) {
-      const w = fpWarnCount(p);
-      if (profView.fFp === "warn" && !(w > 0)) return false;
-      if (profView.fFp === "clean" && w !== 0) return false;
-    }
-    return true;
-  });
-  const key = profView.sort, dir = profView.dir;
-  rows.sort((a, b) => {
-    let x, y;
-    switch (key) {
-      case "name": x = (a.name || "").toLowerCase(); y = (b.name || "").toLowerCase(); break;
-      case "runtime": x = isRunning(a) ? 1 : 0; y = isRunning(b) ? 1 : 0; break;
-      case "health": x = (healthMap[a.id] || {}).status || ""; y = (healthMap[b.id] || {}).status || ""; break;
-      case "lastActive": x = a.lastActiveAt || a.updatedAt || a.createdAt || ""; y = b.lastActiveAt || b.updatedAt || b.createdAt || ""; break;
-      default: x = String(a[key] || ""); y = String(b[key] || "");
-    }
-    return (x < y ? -1 : x > y ? 1 : 0) * dir;
-  });
-  return rows;
-}
-
-function renderProfilesTable(view, profiles, healthMap, clients) {
-  const rows = currentRows(profiles, healthMap);
-  const pages = Math.max(1, Math.ceil(rows.length / profView.per));
-  if (profView.page >= pages) profView.page = pages - 1;
-  const slice = rows.slice(profView.page * profView.per, profView.page * profView.per + profView.per);
-  const sel = profView.selected;
-  const allTags = [...new Set(profiles.flatMap((p) => p.tags || []))].sort();
-
-  const th = (label, key) => {
-    const arrow = profView.sort === key ? (profView.dir === 1 ? " ▲" : " ▼") : "";
-    return `<th class="sortable" data-sort="${key}">${esc(label)}${arrow}</th>`;
-  };
-  const opt = (v, cur, label) => `<option value="${esc(v)}" ${cur === v ? "selected" : ""}>${esc(label)}</option>`;
+  const [clients] = await Promise.all([loadClients(), loadDevices()]);
 
   view.innerHTML = `
-    <div class="toolbar">
-      <input type="search" id="pfQ" placeholder="Search name, id, tags, proxy…" value="${esc(profView.q)}" style="width:260px" aria-label="Search profiles">
-      <select id="pfClient" aria-label="Filter by client"><option value="">All clients</option>
-        ${clients.map((c) => opt(c.id, profView.fClient, c.name || c.id)).join("")}</select>
-      <select id="pfTag" aria-label="Filter by tag"><option value="">All tags</option>
-        ${allTags.map((t) => opt(t, profView.fTag, t)).join("")}</select>
-      <select id="pfDevice" aria-label="Filter by device">
-        ${opt("", profView.fDevice, "Any device")}${opt("set", profView.fDevice, "Device set")}${opt("unset", profView.fDevice, "No device")}${opt("mobile", profView.fDevice, "Mobile-like")}${opt("desktop", profView.fDevice, "Desktop-like")}
-      </select>
-      <select id="pfNetwork" aria-label="Filter by network">
-        ${opt("", profView.fNetwork, "Any network")}${opt("proxy", profView.fNetwork, "Proxy")}${opt("direct", profView.fNetwork, "Direct")}
-      </select>
-      <select id="pfHealth" aria-label="Filter by health">
-        ${opt("", profView.fHealth, "Any health")}${opt("healthy", profView.fHealth, "Healthy")}${opt("error", profView.fHealth, "Errors")}
-      </select>
-      <select id="pfFp" aria-label="Filter by fingerprint">
-        ${opt("", profView.fFp, "Any fingerprint")}${opt("warn", profView.fFp, "Has warnings")}${opt("clean", profView.fFp, "Clean")}
-      </select>
-      <div class="spacer"></div>
-      <span class="muted">${rows.length} of ${profiles.length}</span>
+    <div class="action-bar" id="pvBar">
+      <span class="bar-title">Profiles</span>
+      <span class="sel-count" id="selCount" hidden></span>
+      <div class="btn-row" id="bulkBtns" hidden>
+        <button class="btn btn-sm" data-bulk="start">${IC.play} Start</button>
+        <button class="btn btn-sm" data-bulk="stop">${IC.stop} Stop</button>
+        <button class="btn btn-sm" data-bulk="park">${IC.park} Park</button>
+        <button class="btn btn-sm btn-danger" data-bulk="delete">${IC.trash} Delete</button>
+      </div>
+      <span class="spacer"></span>
+      <div class="filter-row">
+        <input type="search" id="pvSearch" placeholder="Search name, tag, UA…" value="${esc(pv.q)}" aria-label="Search profiles">
+        <select id="pvStatus" aria-label="Status filter">
+          <option value="">All states</option>
+          <option value="running">Running</option>
+          <option value="idle">Stopped</option>
+          <option value="parked">Parked</option>
+          <option value="error">Error</option>
+        </select>
+        <select id="pvGroup" aria-label="Group filter">
+          <option value="">All groups</option>
+          ${clients.map((c) => `<option value="${esc(c.id)}">${esc(c.name || c.id)}</option>`).join("")}
+        </select>
+        <button class="btn btn-sm" id="pvClear">Clear</button>
+        <button class="btn btn-sm" id="pvExport" title="Download the currently listed profiles as JSON (proxy passwords stripped)">Export</button>
+      </div>
     </div>
+    <div id="pvTableWrap">${skelTable(8, 8)}</div>
+    <div class="pager" id="pvPager" hidden>
+      <button class="btn btn-sm" id="pvPrev">← Prev</button>
+      <button class="btn btn-sm" id="pvNext">Next →</button>
+      <span class="spacer"></span>
+      <span id="pvPageInfo"></span>
+    </div>`;
 
-    <div class="bulk-bar" id="bulkBar" ${sel.size ? "" : "hidden"}>
-      <span><span class="sel-count">${sel.size}</span> selected</span>
-      <button class="btn btn-sm" data-bulk="launch">▶ Launch</button>
-      <button class="btn btn-sm" data-bulk="stop">■ Close</button>
-      <button class="btn btn-sm" data-bulk="restart">↻ Restart</button>
-      <button class="btn btn-sm" data-bulk="tile">▦ Tile</button>
-      <button class="btn btn-sm" data-bulk="clone">⧉ Clone</button>
-      <button class="btn btn-sm" data-bulk="backup">💾 Backup</button>
-      <button class="btn btn-sm" data-bulk="health">🩺 Health check</button>
-      <button class="btn btn-sm" data-bulk="export">⇩ Export</button>
-      <button class="btn btn-sm btn-ghost" data-bulk="clear">Clear</button>
-    </div>
+  $("#pvStatus").value = pv.status;
+  $("#pvGroup").value = pv.clientId;
 
-    <div class="tbl-wrap"><table class="tbl" aria-label="Profiles">
-      <thead><tr>
-        <th style="width:34px"><input type="checkbox" id="pfAll" aria-label="Select all on page"></th>
-        ${th("Profile", "name")}${th("Group", "clientId")}<th>Device</th><th>OS</th><th>IP</th><th>Country</th>
-        <th>Proxy</th><th>Fingerprint</th>${th("Health", "health")}${th("Runtime", "runtime")}${th("Last active", "lastActive")}<th>Actions</th>
-      </tr></thead>
-      <tbody>
-      ${slice.length ? slice.map((p) => profileRow(p, healthMap, sel.has(p.id))).join("") : `<tr><td colspan="14">${emptyState("◉", "No profiles match", "Adjust the search or filters.")}</td></tr>`}
-      </tbody>
-    </table>
-    <div class="pager">
-      <button class="btn btn-sm" id="pgPrev" ${profView.page === 0 ? "disabled" : ""}>‹ Prev</button>
-      <span>Page ${profView.page + 1} of ${pages}</span>
-      <button class="btn btn-sm" id="pgNext" ${profView.page >= pages - 1 ? "disabled" : ""}>Next ›</button>
-      <div class="spacer"></div><span>25 per page</span>
-    </div></div>`;
-
-  const rerender = () => renderProfilesTable(view, profiles, healthMap, clients);
-  const debQ = debounce((v) => { profView.q = v; profView.page = 0; rerender(); }, 280);
-  $("#pfQ").addEventListener("input", (e) => debQ(e.target.value));
-  $("#pfClient").onchange = (e) => { profView.fClient = e.target.value; profView.page = 0; rerender(); };
-  $("#pfTag").onchange = (e) => { profView.fTag = e.target.value; profView.page = 0; rerender(); };
-  $("#pfDevice").onchange = (e) => { profView.fDevice = e.target.value; profView.page = 0; rerender(); };
-  $("#pfNetwork").onchange = (e) => { profView.fNetwork = e.target.value; profView.page = 0; rerender(); };
-  $("#pfHealth").onchange = (e) => { profView.fHealth = e.target.value; profView.page = 0; rerender(); };
-  $("#pfFp").onchange = (e) => { profView.fFp = e.target.value; profView.page = 0; rerender(); };
-  $$("th.sortable", view).forEach((thEl) => {
-    thEl.onclick = () => {
-      const k = thEl.dataset.sort;
-      if (profView.sort === k) profView.dir *= -1; else { profView.sort = k; profView.dir = 1; }
-      rerender();
-    };
-  });
-  $("#pgPrev").onclick = () => { if (profView.page > 0) { profView.page--; rerender(); } };
-  $("#pgNext").onclick = () => { if (profView.page < pages - 1) { profView.page++; rerender(); } };
-
-  const allBox = $("#pfAll");
-  allBox.checked = slice.length > 0 && slice.every((p) => sel.has(p.id));
-  allBox.onchange = () => {
-    slice.forEach((p) => allBox.checked ? sel.add(p.id) : sel.delete(p.id));
-    rerender();
+  const debSearch = debounce(() => { pv.q = $("#pvSearch").value.trim(); pvReset(); loadProfilesPage(); }, 350);
+  $("#pvSearch").addEventListener("input", debSearch);
+  $("#pvStatus").onchange = (e) => { pv.status = e.target.value; pvReset(); loadProfilesPage(); };
+  $("#pvGroup").onchange = (e) => { pv.clientId = e.target.value; pvReset(); loadProfilesPage(); };
+  $("#pvClear").onclick = () => {
+    pv.q = ""; pv.status = ""; pv.clientId = ""; pv.tag = "";
+    $("#pvSearch").value = ""; $("#pvStatus").value = ""; $("#pvGroup").value = "";
+    pvReset(); loadProfilesPage();
   };
-  $$('input[data-sel]', view).forEach((cb) => {
-    cb.onchange = () => { cb.checked ? sel.add(cb.dataset.sel) : sel.delete(cb.dataset.sel); rerender(); };
+  $("#pvExport").onclick = () => exportProfiles(pv.items || []);
+  $("#bulkBtns").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-bulk]");
+    if (!b) return;
+    const ids = Array.from(pv.selected);
+    if (b.dataset.bulk === "start") actLaunch(ids);
+    else if (b.dataset.bulk === "stop") actStop(ids);
+    else if (b.dataset.bulk === "park") actPark(ids, true);
+    else if (b.dataset.bulk === "delete") actDelete(ids);
   });
-  $$("[data-bulk]", view).forEach((b) => { b.onclick = () => bulkAction(b.dataset.bulk, profiles); });
-  $$("[data-row]", view).forEach((b) => {
-    b.onclick = (e) => { e.stopPropagation(); rowAction(b.dataset.row, b.dataset.pid, profiles); };
+  $("#pvPrev").onclick = () => { pvPrevPage(); };
+  $("#pvNext").onclick = () => { pvNextPage(); };
+
+  pv.initialized = true;
+  loadProfilesPage();
+}
+function pvReset() { pv.offset = 0; pv.cursor = null; pv.useCursor = false; pv.selected = new Set(); pv.metrics = {}; }
+
+async function loadProfilesPage() {
+  if (!pv.initialized) return;
+  const wrap = $("#pvTableWrap");
+  if (!wrap) return;
+  wrap.innerHTML = skelTable(8, 8);
+  const res = await pvFetch();
+  if (res.error) {
+    wrap.innerHTML = emptyState("Couldn't load profiles", res.error, `<button class="btn" onclick="loadProfilesPage()">Retry</button>`);
+    return;
+  }
+  pv.items = res.items;
+  pv.total = res.total;
+  pv.nextCursor = res.nextCursor;
+  renderProfilesTable();
+  lazyLoadMetrics();
+  updateBulkBar();
+  updatePager();
+}
+
+function renderProfilesTable() {
+  const wrap = $("#pvTableWrap");
+  if (!wrap) return;
+  if (!pv.items.length) {
+    wrap.innerHTML = `<div class="table-card">${emptyState("No profiles found",
+      "Adjust the filters, or create your first profile.",
+      `<button class="btn btn-primary" onclick="openWizard()">New profile</button>`)}</div>`;
+    $("#pvPager").hidden = true;
+    return;
+  }
+  const rows = pv.items.map(profileRow).join("");
+  wrap.innerHTML = `<div class="table-card"><div class="table-scroll"><table class="grid">
+    <thead><tr>
+      <th class="row-check"><input type="checkbox" id="pvAll" aria-label="Select all"></th>
+      <th>Status</th><th>Profile</th><th>Group</th><th>Device</th>
+      <th>Proxy</th><th>Fingerprint</th><th>CPU / Mem</th><th>Actions</th>
+    </tr></thead><tbody id="pvBody">${rows}</tbody></table></div></div>`;
+  const all = $("#pvAll");
+  all.checked = pv.items.length > 0 && pv.items.every((p) => pv.selected.has(p.id));
+  all.onchange = () => {
+    pv.items.forEach((p) => { all.checked ? pv.selected.add(p.id) : pv.selected.delete(p.id); });
+    $$("#pvBody tr").forEach((tr) => tr.classList.toggle("selected", pv.selected.has(tr.dataset.pid)));
+    $$("#pvBody input.row-sel").forEach((c) => { c.checked = all.checked; });
+    updateBulkBar();
+  };
+  $("#pvBody").addEventListener("change", (e) => {
+    const c = e.target.closest("input.row-sel");
+    if (!c) return;
+    const tr = c.closest("tr");
+    c.checked ? pv.selected.add(tr.dataset.pid) : pv.selected.delete(tr.dataset.pid);
+    tr.classList.toggle("selected", c.checked);
+    updateBulkBar();
+  });
+  $("#pvBody").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b) return;
+    const id = b.closest("tr").dataset.pid;
+    const act = b.dataset.act;
+    if (act === "start") actLaunch([id]);
+    else if (act === "stop") actStop([id]);
+    else if (act === "restart") actRestart(id);
+    else if (act === "park") actPark([id], true);
+    else if (act === "unpark") actPark([id], false);
+    else if (act === "delete") actDelete([id]);
   });
 }
 
-function profileRow(p, healthMap, checked) {
-  const h = healthMap[p.id];
-  const osGuess = osFromProfile(p);
-  const country = NA; // filled lazily? network-health has no country; keep honest "—"
-  return `<tr data-pid="${esc(p.id)}" class="${checked ? "selected" : ""}">
-    <td><input type="checkbox" data-sel="${esc(p.id)}" ${checked ? "checked" : ""} aria-label="Select ${esc(p.name || p.id)}"></td>
-    <td><a class="rowlink" href="#/profile/${esc(p.id)}">${esc(p.name || p.id)}</a>
-      <div class="muted" style="font-size:11px"><span class="mono">${shortId(p.id)}</span></div></td>
-    <td>${p.clientId ? esc(clientName(p.clientId) || p.clientId) : NA}</td>
-    <td>${p.deviceId ? `<span class="mono">${esc(p.deviceId)}</span>` : NA}</td>
-    <td>${osGuess}</td>
-    <td class="c-ip">${NA}</td>
-    <td>${country}</td>
-    <td>${proxyLabel(p)}</td>
-    <td class="c-fp"><span class="muted">…</span></td>
-    <td>${h ? healthBadge(h.status) : NA}</td>
-    <td>${runBadge(p)}${p.cdpPort ? ` <span class="mono muted">:${esc(p.cdpPort)}</span>` : ""}</td>
-    <td class="muted">${esc(timeAgo(p.lastActiveAt || p.updatedAt) || "—")}</td>
-    <td><div class="inline-actions">
-      <button class="btn btn-sm" data-row="launch" data-pid="${esc(p.id)}" title="Launch">▶</button>
-      <button class="btn btn-sm" data-row="stop" data-pid="${esc(p.id)}" title="Stop">■</button>
-      <button class="btn btn-sm" data-row="clone" data-pid="${esc(p.id)}" title="Clone">⧉</button>
-      <button class="btn btn-sm" data-row="backup" data-pid="${esc(p.id)}" title="Backup">💾</button>
-      <button class="btn btn-sm btn-danger" data-row="delete" data-pid="${esc(p.id)}" title="Delete">🗑</button>
+function deviceBadgeFor(p) {
+  const devId = p.deviceId || p.device_id;
+  if (!devId) return NA;
+  const d = deviceById(devId);
+  if (!d) return badge(shortId(devId), "grey");
+  return `<span title="${esc(d.manufacturer || "")} ${esc(d.model || "")}">${esc(d.name || devId)}</span> ${supportBadge(d.support)}`;
+}
+
+function profileRow(p) {
+  const id = p.id;
+  const running = isRunning(p);
+  const parked = p.status === "parked";
+  const group = clientName(p.clientId) || p.clientId || "";
+  const sel = pv.selected.has(id) ? " selected" : "";
+  const checked = pv.selected.has(id) ? " checked" : "";
+  const m = pv.metrics[id];
+  const metricHtml = m ? metricCell(m) : '<span class="muted metric-pending" data-metric>—</span>';
+  return `<tr data-pid="${esc(id)}" class="${sel.trim()}">
+    <td class="row-check"><input type="checkbox" class="row-sel" aria-label="Select ${esc(p.name || id)}"${checked}></td>
+    <td data-cell="status">${runDot(p)}</td>
+    <td><span class="profile-name"><a href="#/profile/${encodeURIComponent(id)}">${esc(p.name || id)}</a></span>
+      <div class="small muted mono">${esc(shortId(id))}</div></td>
+    <td>${group ? esc(group) : NA}</td>
+    <td data-cell="device">${deviceBadgeFor(p)}</td>
+    <td data-cell="proxy">${proxyLabel(p)}</td>
+    <td class="small">${fpSummary(p)}</td>
+    <td class="metric-cell" data-cell="metrics">${metricHtml}</td>
+    <td><div class="row-actions">
+      <button class="icon-btn" data-act="view" title="Open detail" onclick="location.hash='#/profile/${encodeURIComponent(id)}'">${IC.eye}</button>
+      ${running
+        ? `<button class="icon-btn" data-act="stop" title="Stop">${IC.stop}</button>
+           <button class="icon-btn" data-act="restart" title="Restart">${IC.restart}</button>`
+        : parked
+          ? `<button class="icon-btn" data-act="unpark" title="Unpark">${IC.park}</button>`
+          : `<button class="icon-btn" data-act="start" title="Start">${IC.play}</button>`}
+      ${!running && !parked ? `<button class="icon-btn" data-act="park" title="Park">${IC.park}</button>` : ""}
+      <button class="icon-btn danger" data-act="delete" title="Delete">${IC.trash}</button>
     </div></td>
   </tr>`;
 }
 
-function osFromProfile(p) {
-  const fp = cache.fp[p.id];
-  const plat = fp && fp.fingerprint && fp.fingerprint.platform;
-  if (plat) return esc(plat);
-  const ua = p.userAgent || "";
-  if (/Windows/i.test(ua)) return "Win32";
-  if (/Macintosh|Mac OS X/i.test(ua)) return "MacIntel";
-  if (/Android/i.test(ua)) return "Android";
-  if (/iPhone|iPad/i.test(ua)) return "iOS";
-  if (/Linux/i.test(ua)) return "Linux";
-  return NA;
+function metricCell(m) {
+  /* Backend contract (v1.7.0): {cpu_percent, memory_rss_mb, ...}; tolerate alternates */
+  const cpu = m.cpu_percent != null ? Math.round(m.cpu_percent)
+    : (m.cpu_pct != null ? Math.round(m.cpu_pct) : null);
+  const mem = m.memory_rss_mb != null ? Math.round(m.memory_rss_mb) + " MB"
+    : (m.mem_mb != null ? Math.round(m.mem_mb) + " MB"
+    : (m.mem_bytes != null ? fmtBytes(m.mem_bytes) : null));
+  if (cpu == null && mem == null) return NA;
+  const bar = cpu != null ? `<span class="bar-mini"><i style="width:${Math.min(100, cpu)}%"></i></span>` : "";
+  return `${bar}<span>${cpu != null ? cpu + "%" : "—"}</span> <span class="muted">/</span> <span>${mem || "—"}</span>`;
+}
+/* Metrics endpoint may not exist (404) — degrade cell to "—" */
+async function lazyLoadMetrics() {
+  if (pv.metricsLoading) return;
+  pv.metricsLoading = true;
+  const ids = pv.items.map((p) => p.id).filter((id) => !pv.metrics[id]);
+  await Promise.all(ids.map(async (id) => {
+    try {
+      const r = await apiGet(`/api/profiles/${encodeURIComponent(id)}/metrics`);
+      pv.metrics[id] = r.ok && r.data ? (r.data.metrics || r.data) : null;
+    } catch (e) { pv.metrics[id] = null; }
+  }));
+  pv.metricsLoading = false;
+  $$("#pvBody tr[data-pid]").forEach((tr) => {
+    const cell = tr.querySelector('[data-cell="metrics"]');
+    if (cell && cell.querySelector(".metric-pending")) cell.innerHTML = metricCell(pv.metrics[tr.dataset.pid]);
+  });
 }
 
-async function bulkAction(kind, profiles) {
-  const ids = [...profView.selected];
-  if (!ids.length && kind !== "clear") { toast("Nothing selected", "err"); return; }
-  switch (kind) {
-    case "clear": profView.selected.clear(); route(); break;
-    case "launch": await actLaunch(ids); break;
-    case "stop": await actStop(ids); break;
-    case "restart": {
-      toast("Restarting: stopping first…");
-      const s = await apiPost("/api/jobs", { type: ids.length > 1 ? "bulk_stop" : "stop_profile", profileIds: ids });
-      if (!(s.ok && s.data && s.data.ok)) { toast("Stop step failed", "err"); break; }
-      await waitForJob(s.data.job.id);
-      await actLaunch(ids);
-      break;
-    }
-    case "tile": {
-      const r = await apiPost("/api/windows/tile", { profileIds: ids });
-      toast(r.ok && r.data && r.data.ok ? "Tile request sent" : "Tile failed: " + esc((r.data && r.data.error) || r.error || "?"), r.ok ? "ok" : "err");
-      break;
-    }
-    case "clone": openCloneModal(ids); break;
-    case "backup": {
-      for (const id of ids) await apiPost(`/api/profiles/${encodeURIComponent(id)}/backup`, { includeUserData: true });
-      toast(`Backup requested for ${ids.length} profile(s)`, "ok");
-      invalidate("backups");
-      break;
-    }
-    case "health": {
-      toast("Refreshing health…");
-      for (const id of ids) { await apiGet(`/api/profiles/${encodeURIComponent(id)}/health`); await loadNetHealth(id, true); }
-      invalidate("health"); route();
-      break;
-    }
-    case "export": exportProfiles(profiles.filter((p) => profView.selected.has(p.id))); break;
+function updateBulkBar() {
+  const n = pv.selected.size;
+  const cnt = $("#selCount"), bulk = $("#bulkBtns");
+  if (!cnt || !bulk) return;
+  cnt.hidden = n === 0; bulk.hidden = n === 0;
+  cnt.textContent = n + " selected";
+}
+function updatePager() {
+  const pager = $("#pvPager");
+  if (!pager) return;
+  const hasPrev = pv.useCursor ? pv.cursorStack && pv.cursorStack.length > 0 : pv.offset > 0;
+  const hasNext = pv.useCursor ? !!pv.nextCursor : (pv.total == null || pv.offset + pv.items.length < pv.total);
+  pager.hidden = !hasPrev && !hasNext && pv.total == null;
+  $("#pvPrev").disabled = !hasPrev;
+  $("#pvNext").disabled = !hasNext;
+  const info = [];
+  if (pv.total != null) {
+    const from = pv.offset + 1, to = pv.offset + pv.items.length;
+    info.push(`${from}–${to} of ${pv.total}`);
+  } else if (pv.items.length) {
+    info.push(`${pv.items.length} shown`);
+  }
+  info.push(`${PAGE_SIZE}/page`);
+  $("#pvPageInfo").textContent = info.join(" · ");
+}
+async function pvPrevPage() {
+  if (pv.useCursor && pv.cursorStack && pv.cursorStack.length) {
+    pv.cursor = pv.cursorStack.pop();
+  } else {
+    pv.offset = Math.max(0, pv.offset - PAGE_SIZE);
+  }
+  pv.selected = new Set(); pv.metrics = {};
+  await loadProfilesPage();
+}
+async function pvNextPage() {
+  if (pv.useCursor) {
+    pv.cursorStack = pv.cursorStack || [];
+    pv.cursorStack.push(pv.cursor);
+    pv.cursor = pv.nextCursor;
+  } else {
+    pv.offset += PAGE_SIZE;
+  }
+  pv.selected = new Set(); pv.metrics = {};
+  await loadProfilesPage();
+}
+/* Used by action buttons rendered in HTML strings */
+async function refreshProfilesTable(keepSelection) {
+  if (currentRoute && currentRoute.page === "profiles" && pv.initialized) {
+    if (!keepSelection) pv.selected = new Set();
+    await loadProfilesPage();
   }
 }
-async function waitForJob(jobId, tries = 30) {
-  for (let i = 0; i < tries; i++) {
-    const r = await apiGet(`/api/jobs/${encodeURIComponent(jobId)}`);
-    const st = String(r.data && r.data.job && r.data.job.status || "").toLowerCase();
-    if (["done", "completed", "failed", "cancelled", "canceled"].includes(st)) return st;
-    await new Promise((r2) => setTimeout(r2, 1000));
-  }
-  return "timeout";
+/* Live-update a single row in place (status events) */
+function patchProfileRow(id, patch) {
+  const tr = document.querySelector(`#pvBody tr[data-pid="${CSS.escape(id)}"]`);
+  if (!tr) return;
+  const idx = pv.items.findIndex((p) => p.id === id);
+  if (idx >= 0) pv.items[idx] = Object.assign({}, pv.items[idx], patch);
+  const p = idx >= 0 ? pv.items[idx] : Object.assign({ id }, patch);
+  const statusCell = tr.querySelector('[data-cell="status"]');
+  if (statusCell) statusCell.innerHTML = runDot(p);
+  if (currentRoute && currentRoute.page === "profiles") updatePager();
 }
-async function rowAction(kind, id, profiles) {
-  switch (kind) {
-    case "launch": await actLaunch([id]); break;
-    case "stop": await actStop([id]); break;
-    case "clone": openCloneModal([id]); break;
-    case "backup": {
-      const r = await apiPost(`/api/profiles/${encodeURIComponent(id)}/backup`, { includeUserData: true });
-      toast(r.ok ? "Backup requested" : "Backup failed", r.ok ? "ok" : "err");
-      invalidate("backups");
-      break;
-    }
-    case "delete": await actDelete(id); break;
-  }
-  setTimeout(() => { invalidate("profiles", "health"); }, 1200);
+
+/* ============================== Detail helpers ============================== */
+async function loadFp(profileId, force) {
+  if (!force && cache.fp[profileId]) return cache.fp[profileId];
+  const r = await apiGet(`/api/profiles/${encodeURIComponent(profileId)}/fingerprint`);
+  cache.fp[profileId] = r.ok ? r.data : null;
+  return cache.fp[profileId];
 }
-function openCloneModal(ids) {
-  openModal(`Clone ${ids.length} profile${ids.length > 1 ? "s" : ""}`, `
-    <label class="fld">Clone mode
-      <select id="cloneMode">
-        <option value="config_only">Config only — settings, no cookies or session</option>
-        <option value="config_and_cookies">Config + cookies — settings and stored cookies</option>
-        <option value="full_session">Full session — complete copy including browser data</option>
-      </select></label>
-    <p class="note">Uses POST /api/profiles/:id/clone with the selected mode.</p>`,
-    `<button class="btn" id="mCancel">Cancel</button>
-     <button class="btn btn-primary" id="mClone">Clone</button>`);
-  $("#mCancel").onclick = closeModal;
-  $("#mClone").onclick = async () => {
-    const mode = $("#cloneMode").value;
-    let n = 0;
-    for (const id of ids) {
-      const r = await apiPost(`/api/profiles/${encodeURIComponent(id)}/clone`, { mode });
-      if (r.ok && r.data && r.data.ok) n++;
-    }
-    closeModal();
-    toast(`Cloned ${n}/${ids.length}`, n === ids.length ? "ok" : "err");
-    invalidate("profiles"); route();
-  };
+async function loadNetHealth(profileId, force) {
+  if (!force && cache.netHealth[profileId]) return cache.netHealth[profileId];
+  const r = await apiGet(`/api/profiles/${encodeURIComponent(profileId)}/network-health`);
+  cache.netHealth[profileId] = r.ok ? r.data : null;
+  return cache.netHealth[profileId];
+}
+async function loadJobs(force) {
+  if (!force && cache.jobs) return cache.jobs;
+  const r = await apiGet("/api/jobs?limit=100");
+  cache.jobs = (r.ok && r.data && Array.isArray(r.data.jobs)) ? r.data.jobs : [];
+  return cache.jobs;
 }
 
 /* ============================== Fingerprint inspector ============================== */
@@ -892,22 +938,21 @@ function fmtFpVal(v) {
   return esc(String(v));
 }
 function fpSections(fp, components) {
-  const sec = (title, rowsHtml, note) => `<div class="panel fp-sec"><h3>${esc(title)}</h3>
+  const sec = (title, rowsHtml, note) => `<div class="fp-sec"><h4>${esc(title)}</h4>
     ${note ? `<p class="note" style="margin:0 0 8px">${esc(note)}</p>` : ""}
-    <table class="compare-table"><thead><tr><th>Property</th><th>Expected</th><th>Runtime</th><th>Status</th></tr></thead>
-    <tbody>${rowsHtml}</tbody></table></div>`;
+    <div class="table-card"><div class="table-scroll"><table class="fp-table">
+    <tbody>${rowsHtml}</tbody></table></div></div></div>`;
 
   if (Array.isArray(components) && components.length) {
     return components.map((c) => {
       const rows = flattenFp(c.expected, "");
       const rt = c.runtime;
-      const body = rows.length ? rows.map(([prop, exp]) => {
-        const rv = rt ? lookupPath(rt, prop) : undefined;
-        return `<tr><td class="prop">${esc(prop)}</td><td>${fmtFpVal(exp)}</td>` +
-          `<td>${rt ? fmtFpVal(rv) : '<span class="muted">Not running</span>'}</td>` +
-          `<td>${statusBadge(c.status)}</td></tr>`;
-      }).join("") : `<tr><td colspan="4" class="muted">No expected values exposed for this section.</td></tr>`;
-      return sec(c.name || "Section", body, c.note);
+      const body = rows.length ? rows.map(([prop, exp]) =>
+        `<tr><td>${esc(prop)}</td><td>${fmtFpVal(exp)}</td>` +
+        `<td>${rt ? fmtFpVal(lookupPath(rt, prop)) : '<span class="muted">Not running</span>'}</td>` +
+        `<td>${statusBadge(c.status)}</td></tr>`).join("")
+        : `<tr><td colspan="4" class="muted">No expected values exposed for this section.</td></tr>`;
+      return sec(c.name || "Section", `<tr><th style="text-align:left">Property</th><th style="text-align:left">Expected</th><th style="text-align:left">Runtime</th><th style="text-align:left">Status</th></tr>` + body, c.note);
     }).join("");
   }
   /* Legacy fallback: flat fingerprint dict without section components. */
@@ -917,10 +962,9 @@ function fpSections(fp, components) {
   const gpu = f.gpu || {};
   const media = f.mediaDeviceIds || {};
   const row = (prop, expected) =>
-    `<tr><td class="prop">${esc(prop)}</td><td>${fmtFpVal(expected)}</td>` +
+    `<tr><td>${esc(prop)}</td><td>${fmtFpVal(expected)}</td>` +
     `<td><span class="muted">Not running</span></td><td>${statusBadge("UNKNOWN")}</td></tr>`;
-  const legacy = (title, rowsHtml) => sec(title, rowsHtml,
-    "Legacy report format — runtime values unavailable.");
+  const legacy = (title, rowsHtml) => sec(title, rowsHtml, "Legacy report format — runtime values unavailable.");
   return (
     legacy("Navigator", [
       row("userAgent", f.userAgent), row("platform", f.platform),
@@ -964,7 +1008,7 @@ async function renderFpInspector(container, profileId) {
   container.innerHTML = `<div class="skel" style="height:120px">&nbsp;</div>`;
   const rep = await loadFp(profileId);
   if (!rep) {
-    container.innerHTML = emptyState("🧬", "Fingerprint unavailable",
+    container.innerHTML = emptyState("Fingerprint unavailable",
       "GET /api/profiles/" + profileId + "/fingerprint did not return a report.");
     return;
   }
@@ -972,52 +1016,59 @@ async function renderFpInspector(container, profileId) {
   const warnings = rep.warnings || [];
   const components = Array.isArray(rep.components) ? rep.components : null;
   container.innerHTML = `
-    ${warnings.length ? `<div class="note" style="border-color:rgba(251,191,36,.4);color:var(--amber)">
-      <strong>${warnings.length} warning${warnings.length > 1 ? "s" : ""}:</strong><br>${warnings.map((w) => "• " + esc(w)).join("<br>")}</div>` : ""}
+    ${warnings.length ? `<div class="notice">
+      <div><strong>${warnings.length} warning${warnings.length > 1 ? "s" : ""}:</strong><br>${warnings.map((w) => "• " + esc(w)).join("<br>")}</div></div>` : ""}
     <p class="note">${esc(rep.summary || "")}${rep.generated_at ? " · generated " + esc(rep.generated_at) : ""}</p>
     ${fpSections(fp, components)}`;
 }
 
 /* ============================== Profile detail ============================== */
 const DETAIL_TABS = ["overview", "network", "fingerprint", "device", "cookies", "storage", "runtime", "health", "automation", "audit"];
+
 async function vProfileDetail(view, id, query) {
-  const profiles = await loadProfiles();
+  const r = await apiGet("/api/profiles?limit=500");
+  const profiles = r.ok ? (Array.isArray(r.data) ? r.data : (r.data.items || [])) : [];
   const p = profiles.find((x) => x.id === id);
   if (!p) {
-    view.innerHTML = emptyState("◉", "Profile not found", "It may have been deleted.",
+    view.innerHTML = emptyState("Profile not found", "It may have been deleted.",
       `<a class="btn btn-primary" href="#/profiles">Back to profiles</a>`);
     return;
   }
   const tab = DETAIL_TABS.includes(query.tab) ? query.tab : "overview";
+  const running = isRunning(p);
   view.innerHTML = `
-    <div class="toolbar">
+    <div class="detail-head">
       <a class="btn btn-sm btn-ghost" href="#/profiles">‹ Profiles</a>
-      <div><strong style="font-size:16px">${esc(p.name || p.id)}</strong>
-        <span class="mono muted" style="font-size:12px">${esc(p.id)}</span></div>
-      <div class="spacer"></div>
-      ${runBadge(p)}
-      <div class="inline-actions">
-        <button class="btn btn-sm" id="dLaunch">▶ Launch</button>
-        <button class="btn btn-sm" id="dStop">■ Stop</button>
-        <button class="btn btn-sm" id="dEdit">✎ Edit</button>
-        <button class="btn btn-sm" id="dClone">⧉ Clone</button>
-        <button class="btn btn-sm btn-danger" id="dDelete">🗑 Delete</button>
+      <div><h2>${esc(p.name || p.id)}</h2>
+        <span class="mono muted small">${esc(p.id)}</span></div>
+      <span class="spacer"></span>
+      ${statusBadge(p.status || (running ? "running" : "stopped"))}
+      <div class="btn-row">
+        ${running
+          ? `<button class="btn btn-sm" id="dStop">${IC.stop} Stop</button>
+             <button class="btn btn-sm" id="dRestart">${IC.restart} Restart</button>`
+          : `<button class="btn btn-sm" id="dLaunch">${IC.play} Launch</button>`}
+        <button class="btn btn-sm" id="dEdit">Edit</button>
+        <button class="btn btn-sm" id="dClone">Clone</button>
+        <button class="btn btn-sm btn-danger" id="dDelete">${IC.trash} Delete</button>
       </div>
     </div>
     <div class="tabs">${DETAIL_TABS.map((t) =>
-      `<button data-tab="${t}" class="${t === tab ? "active" : ""}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>
+      `<button class="tab ${t === tab ? "active" : ""}" data-tab="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}</div>
     <div id="tabBody"></div>`;
 
   $$("[data-tab]", view).forEach((b) => {
     b.onclick = () => { location.hash = `#/profile/${encodeURIComponent(id)}?tab=${b.dataset.tab}`; };
   });
-  $("#dLaunch").onclick = () => actLaunch([id]);
-  $("#dStop").onclick = () => actStop([id]);
+  const dl = $("#dLaunch"); if (dl) dl.onclick = () => actLaunch([id]);
+  const ds = $("#dStop"); if (ds) ds.onclick = () => actStop([id]);
+  const dr = $("#dRestart"); if (dr) dr.onclick = () => actRestart(id);
   $("#dEdit").onclick = () => openProfileEdit(p);
   $("#dClone").onclick = () => openCloneModal([id]);
-  $("#dDelete").onclick = () => actDelete(id);
+  $("#dDelete").onclick = () => actDelete([id]);
 
   const body = $("#tabBody");
+  body.innerHTML = `<div class="skel" style="height:160px">&nbsp;</div>`;
   const tabs = {
     overview: () => dOverview(body, p),
     network: () => dNetwork(body, p),
@@ -1037,97 +1088,98 @@ function kvRows(pairs) {
   return `<dl class="kv">${pairs.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
 }
 async function dOverview(body, p) {
-  const clients = await loadClients();
-  body.innerHTML = `<div class="grid cards-2">
-    <div class="panel"><h3>Identity</h3>${kvRows([
+  await loadClients();
+  body.innerHTML = `<div class="form-grid">
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Identity</h3>${kvRows([
       ["Name", val(p.name)], ["ID", `<span class="mono">${esc(p.id)}</span>`],
       ["Client", val(clientName(p.clientId) || p.clientId)],
       ["Tags", (p.tags || []).length ? (p.tags || []).map((t) => `<span class="chip">${esc(t)}</span>`).join("") : NA],
       ["Notes", val(p.notes)], ["Start URL", val(p.startUrl)],
       ["Created", val(p.createdAt)], ["Color", p.color ? `<span class="mono">${esc(p.color)}</span>` : NA],
-    ])}</div>
-    <div class="panel"><h3>Configuration</h3>${kvRows([
-      ["Device", val(p.deviceId)], ["Network mode", val(p.networkMode)],
+    ])}</div></div>
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Configuration</h3>${kvRows([
+      ["Device", p.deviceId ? `${esc(p.deviceId)} ${supportBadge((deviceById(p.deviceId) || {}).support)}` : NA],
+      ["Network mode", val(p.networkMode)],
       ["Proxy", proxyLabel(p)], ["Language", val(p.language)],
       ["Timezone", val(p.timezone)], ["WebRTC", val(p.webrtcMode)],
       ["Seed", p.seed != null ? `<span class="mono">${esc(p.seed)}</span>` : NA],
-    ])}</div>
+    ])}</div></div>
   </div>`;
 }
 async function dNetwork(body, p) {
   body.innerHTML = `<div class="skel" style="height:100px">&nbsp;</div>`;
   const nh = await loadNetHealth(p.id, true);
-  // New contract: POST /api/profiles/<id>/network/test (tolerate 404)
+  /* New contract: POST /api/profiles/<id>/network/test (tolerate 404) */
   let nt = null;
   const r = await apiPost(`/api/profiles/${encodeURIComponent(p.id)}/network/test`, {});
   if (r.ok) nt = r.data;
 
   const ph = nh && nh.proxyHealth;
   body.innerHTML = `
-    <div class="panel"><h3>Connection</h3>${kvRows([
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Connection</h3>${kvRows([
       ["Mode", val(nh && nh.mode)],
-      ["Status", nh ? (nh.status === "DIRECT" ? badge("Direct", "cyan") : (nh.ok ? badge("OK", "green") : badge("Failed", "red"))) : NA],
+      ["Status", nh ? (nh.status === "DIRECT" ? badge("Direct", "blue") : (nh.ok ? badge("OK", "green") : badge("Failed", "red"))) : NA],
       ["Egress IP", ph ? val(ph.egress_ip || ph.egressIp) : NA],
       ["Latency", ph && ph.latency_ms != null ? `<span class="num">${esc(ph.latency_ms)} ms</span>` : NA],
       ["Message", val(nh && nh.message)],
     ])}
     <p class="note">Source: GET /api/profiles/:id/network-health${nt ? " + POST /api/profiles/:id/network/test" : " (new network/test endpoint not available — showing existing network-health)"}.</p>
-    <div class="inline-actions">
-      <button class="btn btn-sm" id="nTest">↻ Re-check</button>
+    <div class="btn-row" style="margin-top:10px">
+      <button class="btn btn-sm" id="nTest">Re-check</button>
       ${p.proxyHost ? `<button class="btn btn-sm" id="nAdhoc">Test proxy config</button>` : ""}
-    </div></div>
-    ${nt ? `<div class="panel"><h3>Extended network test</h3>${kvRows([
+    </div></div></div>
+    ${nt ? `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Extended network test</h3>${kvRows([
       ["Health", nt.health ? statusBadge(nt.health) : NA],
       ["Egress IP", val(nt.egress_ip)], ["Country", val(nt.country)],
       ["Timezone", val(nt.timezone)], ["Latency", nt.latency_ms != null ? `<span class="num">${esc(nt.latency_ms)} ms</span>` : NA],
       ["DNS", nt.dns ? statusBadge(nt.dns.status) + " " + val(nt.dns.detail) : NA],
       ["IPv6", nt.ipv6 ? statusBadge(nt.ipv6.status) + " " + val(nt.ipv6.detail) : NA],
       ["Error", val(nt.error)],
-    ])}</div>` : ""}`;
+    ])}</div></div>` : ""}`;
   $("#nTest").onclick = () => dNetwork(body, p);
   const adhoc = $("#nAdhoc");
   if (adhoc) adhoc.onclick = async () => {
     const t = await apiPost("/api/proxy/test", { host: p.proxyHost, port: p.proxyPort, username: p.proxyUser, password: p.proxyPass, protocol: p.proxyType || "http" });
-    toast(t.ok && t.data && (t.data.ok || t.data.success) ? "Proxy test passed" : "Proxy test failed: " + esc((t.data && t.data.error) || t.error || "?"), t.ok ? "ok" : "err");
+    toast(t.ok && t.data && (t.data.ok || t.data.success) ? "Proxy test passed" : "Proxy test failed: " + apiErr(t), t.ok ? "ok" : "err");
   };
 }
 async function dFingerprint(body, p) { await renderFpInspector(body, p.id); }
 async function dDevice(body, p) {
   body.innerHTML = `<div class="skel" style="height:80px">&nbsp;</div>`;
-  let detail = null, failed = false;
-  if (p.deviceId) {
+  let detail = deviceById(p.deviceId), failed = false;
+  if (p.deviceId && !detail) {
     const r = await apiGet(`/api/devices/${encodeURIComponent(p.deviceId)}`);
     if (r.ok) detail = r.data; else failed = true;
   }
   body.innerHTML = `
-    <div class="panel"><h3>Assigned device</h3>${kvRows([
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Assigned device</h3>${kvRows([
       ["Device ID", val(p.deviceId)],
       ["Support", detail ? supportBadge(detail.support) : NA],
       ["Validation date", detail ? val(detail.validation_date) : NA],
     ])}
     ${!p.deviceId ? `<p class="note">No device preset assigned to this profile.</p>` : ""}
     ${failed ? `<p class="note">GET /api/devices/${esc(p.deviceId)} failed — device library may be unavailable.</p>` : ""}
-    </div>
+    </div></div>
     ${detail ? deviceDetailHtml(detail) : ""}`;
 }
 function deviceDetailHtml(d) {
   const cm = d.capability_matrix || {};
   const rows = Object.entries(cm).map(([k, v]) =>
     `<tr><td class="prop">${esc(k)}</td><td>${statusBadge(v.status)}</td><td class="muted">${esc(v.note || "—")}</td></tr>`).join("");
-  return `<div class="panel"><h3>Capability matrix</h3>
-    ${rows ? `<table class="compare-table"><thead><tr><th>Component</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="muted">No capability data.</p>`}
-    </div>
-    <div class="panel"><h3>Limitations</h3>
+  return `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Capability matrix</h3>
+    ${rows ? `<div class="table-card"><table class="grid"><thead><tr><th>Component</th><th>Status</th><th>Note</th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="muted">No capability data.</p>`}
+    </div></div>
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Limitations</h3>
     ${(d.limitations || []).length ? "<ul>" + d.limitations.map((l) => `<li>${esc(l)}</li>`).join("") + "</ul>" : `<p class="muted">None reported.</p>`}
-    </div>
-    <div class="panel"><h3>Specification</h3>${kvRows([
+    </div></div>
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Specification</h3>${kvRows([
       ["Manufacturer", val(d.manufacturer)], ["Model", val(d.model)],
       ["Platform", val(d.platform || d.os)], ["Category", val(d.category)],
       ["Viewport", d.viewport ? `<span class="mono">${esc(d.viewport.width)}×${esc(d.viewport.height)}</span>` : NA],
       ["Device scale factor", val(d.device_scale_factor)],
       ["Touch", d.touch == null ? NA : (d.touch ? "yes" : "no")],
       ["Mobile", d.mobile == null ? NA : (d.mobile ? "yes" : "no")],
-    ])}</div>`;
+    ])}</div></div>`;
 }
 async function dCookies(body, p) {
   body.innerHTML = `<div class="skel" style="height:100px">&nbsp;</div>`;
@@ -1136,19 +1188,19 @@ async function dCookies(body, p) {
   body.innerHTML = `
     <div class="toolbar">
       <div class="spacer"></div>
-      <button class="btn btn-sm" id="ckExport">⇩ Export</button>
-      <button class="btn btn-sm" id="ckImport">⇧ Import</button>
+      <button class="btn btn-sm" id="ckExport">Export</button>
+      <button class="btn btn-sm" id="ckImport">Import</button>
     </div>
-    ${cookies.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+    ${cookies.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
       <th>Name</th><th>Value</th><th>Domain</th><th>Path</th><th>Expires</th><th>Secure</th><th>HttpOnly</th></tr></thead>
       <tbody>${cookies.map((c) => `<tr>
         <td class="mono">${esc(c.name || "")}</td>
         <td class="mono muted">${esc(String(c.value || "").slice(0, 40))}${String(c.value || "").length > 40 ? "…" : ""}</td>
         <td class="mono">${esc(c.domain || "")}</td><td class="mono">${esc(c.path || "")}</td>
         <td class="muted">${esc(c.expires || c.expirationDate || "")}</td>
-        <td>${c.secure ? "✓" : "—"}</td><td>${c.httpOnly || c.httponly ? "✓" : "—"}</td>
-      </tr>`).join("")}</tbody></table></div>`
-      : emptyState("🍪", "No cookies", "This profile has no stored cookies, or the endpoint returned none.")}
+        <td>${c.secure ? "yes" : "—"}</td><td>${c.httpOnly || c.httponly ? "yes" : "—"}</td>
+      </tr>`).join("")}</tbody></table></div></div>`
+      : emptyState("No cookies", "This profile has no stored cookies, or the endpoint returned none.")}
     <p class="note">Source: GET /api/profiles/:id/cookies. Cookie values are truncated in this view.</p>`;
   $("#ckExport").onclick = async () => {
     const e = await apiGet(`/api/profiles/${encodeURIComponent(p.id)}/cookies/export`);
@@ -1161,7 +1213,7 @@ async function dCookies(body, p) {
   };
   $("#ckImport").onclick = () => {
     openModal("Import cookies", `
-      <label class="fld">Paste cookies JSON (array)
+      <label class="field"><span class="field-label">Paste cookies JSON (array)</span>
         <textarea id="ckJson" rows="8" placeholder='[{"name":"...","value":"...","domain":"..."}]'></textarea></label>`,
       `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mImport">Import</button>`);
     $("#mCancel").onclick = closeModal;
@@ -1177,15 +1229,15 @@ async function dCookies(body, p) {
 }
 async function dStorage(body, p) {
   const h = (await loadHealthMap())[p.id];
-  body.innerHTML = `<div class="panel"><h3>Storage</h3>${kvRows([
+  body.innerHTML = `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Storage</h3>${kvRows([
     ["User data dir", h && h.user_data_dir ? `<span class="mono">${esc(h.user_data_dir)}</span>` : NA],
     ["Storage accessible", h ? (h.storage_accessible ? badge("yes", "green") : badge("no", "red")) : NA],
   ])}
-  <p class="note">The backend does not expose per-profile disk usage; only accessibility and the data directory are available.</p></div>`;
+  <p class="note">The backend does not expose per-profile disk usage; only accessibility and the data directory are available.</p></div></div>`;
 }
 async function dRuntime(body, p) {
   const h = (await loadHealthMap(true))[p.id];
-  body.innerHTML = `<div class="panel"><h3>Runtime</h3>${kvRows([
+  body.innerHTML = `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Runtime</h3>${kvRows([
     ["Launch state", h ? badge(h.launch_state || "—", h.launch_state === "RUNNING" ? "green" : "grey") : NA],
     ["Process alive", h ? (h.process_alive ? badge("yes", "green") : badge("no", "grey")) : NA],
     ["PID", h ? num(h.pid) : NA],
@@ -1196,17 +1248,17 @@ async function dRuntime(body, p) {
     ["Last error", h ? val(h.last_error) : NA],
     ["Checked at", h && h.checked_at ? esc(new Date(h.checked_at * 1000).toLocaleString()) : NA],
   ])}
-  <p class="note">Source: GET /api/profiles/:id/health.</p></div>`;
+  <p class="note">Source: GET /api/profiles/:id/health.</p></div></div>`;
 }
 async function dHealth(body, p) {
   body.innerHTML = `<div class="skel" style="height:100px">&nbsp;</div>`;
   const r = await apiGet(`/api/profiles/${encodeURIComponent(p.id)}/health`);
   const h = r.ok ? r.data : null;
-  // New contract: GET /api/profiles/<id>/consistency (tolerate 404)
+  /* New contract: GET /api/profiles/<id>/consistency (tolerate 404) */
   const cr = await apiGet(`/api/profiles/${encodeURIComponent(p.id)}/consistency`);
   const cons = cr.ok ? cr.data : null;
   body.innerHTML = `
-    <div class="panel"><h3>Health snapshot</h3>${h ? kvRows([
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Health snapshot</h3>${h ? kvRows([
       ["Overall", h.overallOk ? badge("healthy", "green") : badge(h.status || "unknown", h.status === "proxy_failed" ? "red" : "amber")],
       ["Network mode", val(h.network_mode)],
       ["Proxy OK", h.proxy_ok == null ? NA : (h.proxy_ok ? badge("yes", "green") : badge("no", "red"))],
@@ -1214,35 +1266,35 @@ async function dHealth(body, p) {
       ["Fingerprint loaded", h.fingerprint_loaded ? badge("yes", "green") : badge("no", "amber")],
       ["Extension loaded", h.extension_loaded == null ? NA : (h.extension_loaded ? badge("yes", "green") : badge("no", "amber"))],
     ]) : `<p class="muted">Health endpoint did not return data.</p>`}
-    <div class="inline-actions" style="margin-top:10px"><button class="btn btn-sm" id="hRefresh">↻ Refresh</button></div></div>
-    <div class="panel"><h3>Consistency checks</h3>
+    <div class="btn-row" style="margin-top:10px"><button class="btn btn-sm" id="hRefresh">Refresh</button></div></div></div>
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Consistency checks</h3>
     ${cons && Array.isArray(cons.checks) ? `
       <div style="margin-bottom:10px">${statusBadge(cons.status)} <span class="muted">overall</span></div>
-      <table class="compare-table"><thead><tr><th>Domain</th><th>Status</th><th>Expected</th><th>Actual</th><th>Message</th></tr></thead>
+      <div class="table-card"><table class="grid"><thead><tr><th>Domain</th><th>Status</th><th>Expected</th><th>Actual</th><th>Message</th></tr></thead>
       <tbody>${cons.checks.map((c) => `<tr><td class="prop">${esc(c.domain)}</td><td>${statusBadge(c.status)}</td>
-        <td>${fmtFpVal(c.expected)}</td><td>${fmtFpVal(c.actual)}</td><td style="font-family:var(--font)">${esc(c.message || "—")}</td></tr>`).join("")}</tbody></table>
+        <td>${fmtFpVal(c.expected)}</td><td>${fmtFpVal(c.actual)}</td><td>${esc(c.message || "—")}</td></tr>`).join("")}</tbody></table></div>
       <p class="note">Source: GET /api/profiles/:id/consistency.</p>`
       : `<p class="muted">Consistency endpoint not available for this profile (GET /api/profiles/:id/consistency returned ${cr.status}).</p>`}
-    </div>`;
+    </div></div>`;
   $("#hRefresh").onclick = () => dHealth(body, p);
 }
 async function dAutomation(body, p) {
   const jobs = (await loadJobs(true)).filter((j) => (j.profileIds || []).includes(p.id));
-  body.innerHTML = jobs.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+  body.innerHTML = jobs.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
     <th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Created</th><th></th></tr></thead><tbody>
     ${jobs.map((j) => `<tr><td class="mono">${esc(j.id)}</td><td>${esc(j.type || "")}</td>
-      <td>${badge(String(j.status || ""), "cyan")}</td>
-      <td>${j.progress != null ? `<div class="prog"><i style="width:${Math.min(100, j.progress)}%"></i></div>` : NA}</td>
-      <td class="muted">${esc(timeAgo(j.created_at || j.createdAt) || "—")}</td>
-      <td><button class="btn btn-sm btn-danger" data-cancel="${esc(j.id)}">Cancel</button></td></tr>`).join("")}
-    </tbody></table></div>`
-    : emptyState("⚙", "No jobs for this profile", "Queue a launch or stop from the Profiles page, or create one below.");
+      <td>${jobStatusBadge(j.status)}</td>
+      <td>${j.progress != null ? `<div class="progress" style="min-width:90px"><i style="width:${Math.min(100, j.progress)}%"></i></div>` : NA}</td>
+      <td class="muted">${esc(timeAgo(j.created_at || j.createdAt))}</td>
+      <td><button class="btn btn-xs btn-danger" data-cancel="${esc(j.id)}">Cancel</button></td></tr>`).join("")}
+    </tbody></table></div></div>`
+    : emptyState("No jobs for this profile", "Queue a launch or stop from the Profiles page, or create one below.");
   body.insertAdjacentHTML("beforeend", `
-    <div class="panel" style="margin-top:14px"><h3>Queue a job</h3>
-    <div class="inline-actions">
-      <button class="btn btn-sm" id="aLaunch">▶ Launch job</button>
-      <button class="btn btn-sm" id="aStop">■ Stop job</button>
-    </div></div>`);
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Queue a job</h3>
+    <div class="btn-row">
+      <button class="btn btn-sm" id="aLaunch">${IC.play} Launch job</button>
+      <button class="btn btn-sm" id="aStop">${IC.stop} Stop job</button>
+    </div></div></div>`);
   $$("[data-cancel]", body).forEach((b) => b.onclick = async () => {
     const r = await apiPost(`/api/jobs/${encodeURIComponent(b.dataset.cancel)}/cancel`, {});
     toast(r.ok ? "Job cancelled" : "Cancel failed", r.ok ? "ok" : "err");
@@ -1255,25 +1307,25 @@ async function dAudit(body, p) {
   const r = await apiGet("/api/audit?limit=200");
   const items = (r.ok && r.data && Array.isArray(r.data.items)) ? r.data.items
     .filter((e) => e.profileId === p.id || (e.detail && JSON.stringify(e.detail).includes(p.id))) : [];
-  body.innerHTML = items.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+  body.innerHTML = items.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
     <th>Time</th><th>Action</th><th>Result</th><th>Detail</th></tr></thead><tbody>
-    ${items.map((e) => `<tr><td class="muted" style="white-space:nowrap">${esc(e.ts || "")}</td>
+    ${items.map((e) => `<tr><td class="muted small" style="white-space:nowrap">${esc(e.ts || "")}</td>
       <td class="mono">${esc(e.action || "")}</td>
       <td>${e.ok ? badge("ok", "green") : badge("fail", "red")}</td>
-      <td class="mono muted">${esc(JSON.stringify(e.detail ?? "")).slice(0, 120)}</td></tr>`).join("")}
-    </tbody></table></div>`
-    : emptyState("📜", "No audit entries", "No recorded actions reference this profile.");
+      <td class="mono muted small">${esc(JSON.stringify(e.detail ?? "")).slice(0, 120)}</td></tr>`).join("")}
+    </tbody></table></div></div>`
+    : emptyState("No audit entries", "No recorded actions reference this profile.");
 }
 function openProfileEdit(p) {
   openModal("Edit profile — " + (p.name || p.id), `
     <div class="form-grid">
-      <label class="fld">Name<input type="text" id="eName" value="${esc(p.name || "")}"></label>
-      <label class="fld">Start URL<input type="url" id="eUrl" value="${esc(p.startUrl || "")}"></label>
-      <label class="fld">Tags (comma separated)<input type="text" id="eTags" value="${esc((p.tags || []).join(", "))}"></label>
-      <label class="fld">Notes<input type="text" id="eNotes" value="${esc(p.notes || "")}"></label>
-      <label class="fld">Device ID<input type="text" id="eDevice" value="${esc(p.deviceId || "")}"></label>
-      <label class="fld">Language<input type="text" id="eLang" value="${esc(p.language || "")}"></label>
-      <label class="fld">Timezone<input type="text" id="eTz" value="${esc(p.timezone || "")}"></label>
+      <label class="field"><span class="field-label">Name</span><input type="text" id="eName" value="${esc(p.name || "")}"></label>
+      <label class="field"><span class="field-label">Start URL</span><input type="url" id="eUrl" value="${esc(p.startUrl || "")}"></label>
+      <label class="field"><span class="field-label">Tags (comma separated)</span><input type="text" id="eTags" value="${esc((p.tags || []).join(", "))}"></label>
+      <label class="field"><span class="field-label">Notes</span><input type="text" id="eNotes" value="${esc(p.notes || "")}"></label>
+      <label class="field"><span class="field-label">Device ID</span><input type="text" id="eDevice" value="${esc(p.deviceId || "")}"></label>
+      <label class="field"><span class="field-label">Language</span><input type="text" id="eLang" value="${esc(p.language || "")}"></label>
+      <label class="field"><span class="field-label">Timezone</span><input type="text" id="eTz" value="${esc(p.timezone || "")}"></label>
     </div>`,
     `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSave">Save</button>`);
   $("#mCancel").onclick = closeModal;
@@ -1290,7 +1342,26 @@ function openProfileEdit(p) {
     if (r.ok && r.data && r.data.ok) {
       toast("Profile updated" + ((r.data.warnings || []).length ? ` (${r.data.warnings.length} fingerprint warning(s))` : ""), "ok");
       invalidate("profiles"); route();
-    } else toast("Update failed: " + esc((r.data && r.data.error) || r.error || "?"), "err");
+    } else toast("Update failed: " + apiErr(r), "err");
+  };
+}
+async function openCloneModal(ids) {
+  openModal("Clone profile",
+    `<label class="field"><span class="field-label">New name</span><input type="text" id="clName" placeholder="Copy of …"></label>
+     <label class="checkbox"><input type="checkbox" id="clCookies"> Copy stored cookies</label>`,
+    `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mClone">Clone</button>`);
+  $("#mCancel").onclick = closeModal;
+  $("#mClone").onclick = async () => {
+    const name = $("#clName").value.trim();
+    const copyCookies = $("#clCookies").checked;
+    closeModal();
+    for (const id of ids) {
+      const r = await apiPost(`/api/profiles/${encodeURIComponent(id)}/duplicate`, { name, copyCookies });
+      if (!(r.ok && r.data && r.data.ok)) toast("Clone failed for " + id + ": " + apiErr(r), "err");
+    }
+    toast("Cloned", "ok");
+    invalidate("profiles");
+    if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
   };
 }
 
@@ -1311,15 +1382,15 @@ function openWizard() {
 }
 function wizardShell(inner, foot) {
   const steps = WIZ_STEPS.map((s, i) =>
-    `<div class="wstep ${i === wiz.step ? "active" : i < wiz.step ? "done" : ""}">${i + 1}. ${s}</div>`).join("");
-  openModal("New Profile", `<div class="wizard-steps">${steps}</div><div id="wizBody">${inner}</div>`, foot);
+    `<div class="wiz-step ${i === wiz.step ? "now" : i < wiz.step ? "done" : ""}"><span class="n">${i + 1}</span>${s}</div>`).join("");
+  openModal("New Profile", `<div class="wizard-steps">${steps}</div><div id="wizBody">${inner}</div>`, foot, true);
 }
-function wizFoot(back, nextLabel, nextFn) {
+function wizFoot(back, nextLabel) {
   return `${back ? `<button class="btn" id="wBack">‹ Back</button>` : ""}
     <button class="btn" id="wCancel">Cancel</button>
     <button class="btn btn-primary" id="wNext">${esc(nextLabel)}</button>`;
 }
-function bindWizFoot(back, nextLabel, nextFn) {
+function bindWizFoot(back, nextFn) {
   $("#wCancel").onclick = () => { closeModal(); wiz = null; };
   if (back) $("#wBack").onclick = () => { wiz.step--; renderWizard(); };
   $("#wNext").onclick = nextFn;
@@ -1339,15 +1410,15 @@ async function wBasic() {
   const clients = await loadClients();
   wizardShell(`
     <div class="form-grid">
-      <label class="fld">Profile name *<input type="text" id="wbName" value="${esc(wiz.basic.name)}" placeholder="e.g. shopper-01"></label>
-      <label class="fld">Client<select id="wbClient"><option value="">— none —</option>
+      <label class="field"><span class="field-label">Profile name *</span><input type="text" id="wbName" value="${esc(wiz.basic.name)}" placeholder="e.g. shopper-01"></label>
+      <label class="field"><span class="field-label">Client</span><select id="wbClient"><option value="">— none —</option>
         ${clients.map((c) => `<option value="${esc(c.id)}" ${wiz.basic.clientId === c.id ? "selected" : ""}>${esc(c.name || c.id)}</option>`).join("")}</select></label>
-      <label class="fld">Tags (comma separated)<input type="text" id="wbTags" value="${esc(wiz.basic.tags)}"></label>
-      <label class="fld">Start URL<input type="url" id="wbUrl" value="${esc(wiz.basic.startUrl)}"></label>
-      <label class="fld" style="grid-column:1/-1">Notes<textarea id="wbNotes" rows="2">${esc(wiz.basic.notes)}</textarea></label>
+      <label class="field"><span class="field-label">Tags (comma separated)</span><input type="text" id="wbTags" value="${esc(wiz.basic.tags)}"></label>
+      <label class="field"><span class="field-label">Start URL</span><input type="url" id="wbUrl" value="${esc(wiz.basic.startUrl)}"></label>
+      <label class="field" style="grid-column:1/-1"><span class="field-label">Notes</span><textarea id="wbNotes" rows="2">${esc(wiz.basic.notes)}</textarea></label>
     </div>`,
-    wizFoot(false, "Next: Device ›", null));
-  bindWizFoot(false, "Next: Device ›", () => {
+    wizFoot(false, "Next: Device ›"));
+  bindWizFoot(false, () => {
     const name = $("#wbName").value.trim();
     if (!name) { toast("Profile name is required", "err"); return; }
     wiz.basic = {
@@ -1359,16 +1430,15 @@ async function wBasic() {
   });
 }
 
-/* Step 2 — Device */
+/* Step 2 — Device (with support badges) */
 async function wDevice() {
-  wizardShell(`<div class="skel" style="height:160px">&nbsp;</div>`,
-    wizFoot(true, "Next: Network ›", () => { wiz.step = 2; renderWizard(); }));
-  bindWizFoot(true, "Next: Network ›", () => { wiz.step = 2; renderWizard(); });
+  wizardShell(`<div class="skel" style="height:160px">&nbsp;</div>`, wizFoot(true, "Next: Network ›"));
+  bindWizFoot(true, () => { wiz.step = 2; renderWizard(); });
 
   const devices = await loadDevices();
-  if (!devices) {
-    $("#wizBody").innerHTML = emptyState("📱", "Device library unavailable",
-      "GET /api/devices failed. You can continue without a device preset — the backend will generate a default fingerprint.");
+  if (!devices.length) {
+    $("#wizBody").innerHTML = emptyState("Device library unavailable",
+      "GET /api/devices failed or returned no presets. You can continue without a device preset — the backend will generate a default fingerprint.");
     return;
   }
   const tab = wiz.deviceTab;
@@ -1382,10 +1452,10 @@ async function wDevice() {
   $("#wizBody").innerHTML = `
     <div class="tabs">
       ${["desktop", "mobile", "tablet"].map((t) =>
-        `<button data-dt="${t}" class="${t === tab ? "active" : ""}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
+        `<button class="tab ${t === tab ? "active" : ""}" data-dt="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
     </div>
-    ${list.length ? `<div class="device-grid">${list.map((d) => `
-      <div class="device-card ${wiz.deviceId === d.id ? "selected" : ""}" data-dev="${esc(d.id)}">
+    ${list.length ? `<div class="device-pick">${list.map((d) => `
+      <div class="device-pick-card ${wiz.deviceId === d.id ? "picked" : ""}" data-dev="${esc(d.id)}">
         <div class="nm">${esc(d.name || d.model || d.id)}</div>
         <div class="meta">${esc(d.manufacturer || "")} ${esc(d.model || "")}<br>
           ${d.viewport ? `${esc(d.viewport.width)}×${esc(d.viewport.height)}` : "?"} · DPR ${esc(d.device_scale_factor ?? "?")} · ${d.touch ? "touch" : "no touch"}<br>
@@ -1401,7 +1471,7 @@ async function wDevice() {
   });
 }
 
-/* Step 3 — Network */
+/* Step 3 — Network (with connection test) */
 async function wNetwork() {
   const gateways = await loadGateways();
   const n = wiz.net;
@@ -1420,28 +1490,28 @@ async function wNetwork() {
     </div>
     <div id="netFields" style="margin-top:14px"></div>
     <div id="netTestOut" style="margin-top:12px"></div>`,
-    wizFoot(true, "Next: Fingerprint ›", () => { wiz.step = 3; renderWizard(); }));
-  bindWizFoot(true, "Next: Fingerprint ›", () => { wiz.step = 3; renderWizard(); });
+    wizFoot(true, "Next: Fingerprint ›"));
+  bindWizFoot(true, () => { wiz.step = 3; renderWizard(); });
 
   const drawFields = () => {
     const f = $("#netFields");
     if (n.mode === "direct") { f.innerHTML = `<p class="note">Direct connection — no proxy fields needed.</p>`; return; }
     if (n.mode === "gateway") {
-      f.innerHTML = `<label class="fld">Gateway<select id="wnGw">
+      f.innerHTML = `<label class="field"><span class="field-label">Gateway</span><select id="wnGw">
         ${gateways.map((g) => `<option value="${esc(g.id)}" ${n.gatewayId === g.id ? "selected" : ""}>${esc(g.name || g.id)} (${esc(g.providerType || "?")})</option>`).join("")}
         </select></label>
-        ${gateways.length ? "" : `<p class="note">No gateways configured. Add one under Gateways first.</p>`}`;
+        ${gateways.length ? "" : `<p class="note">No gateways configured. Add one under Network › Gateways first.</p>`}`;
       const sel = $("#wnGw");
       if (sel) sel.onchange = (e) => { n.gatewayId = e.target.value; };
       return;
     }
     f.innerHTML = `<div class="form-grid">
-      <label class="fld">Host *<input type="text" id="wnHost" value="${esc(n.host)}" placeholder="203.0.113.10"></label>
-      <label class="fld">Port *<input type="number" id="wnPort" value="${esc(n.port)}" placeholder="8080"></label>
-      <label class="fld">Username<input type="text" id="wnUser" value="${esc(n.user)}" autocomplete="off"></label>
-      <label class="fld">Password<input type="password" id="wnPass" value="${esc(n.pass)}" autocomplete="off"></label>
+      <label class="field"><span class="field-label">Host *</span><input type="text" id="wnHost" value="${esc(n.host)}" placeholder="203.0.113.10"></label>
+      <label class="field"><span class="field-label">Port *</span><input type="number" id="wnPort" value="${esc(n.port)}" placeholder="8080"></label>
+      <label class="field"><span class="field-label">Username</span><input type="text" id="wnUser" value="${esc(n.user)}" autocomplete="off"></label>
+      <label class="field"><span class="field-label">Password</span><input type="password" id="wnPass" value="${esc(n.pass)}" autocomplete="off"></label>
     </div>
-    <div class="inline-actions" style="margin-top:10px">
+    <div class="btn-row" style="margin-top:10px">
       <button class="btn btn-sm" id="wnTest">Test connection</button>
     </div>
     <p class="note">Uses POST /api/proxy/test for ad-hoc checks. Passwords are never displayed or logged.</p>`;
@@ -1463,14 +1533,14 @@ async function wNetwork() {
     const t = wiz.netTest, out = $("#netTestOut");
     if (!t) { out.innerHTML = ""; return; }
     const ok = t.ok || t.success;
-    out.innerHTML = `<div class="panel"><h3>Test result ${ok ? badge("pass", "green") : badge("fail", "red")}</h3>${kvRows([
+    out.innerHTML = `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Test result ${ok ? badge("pass", "green") : badge("fail", "red")}</h3>${kvRows([
       ["Egress IP", val(t.egress_ip || t.egressIp)],
       ["Country", val(t.country)],
       ["Latency", t.latency_ms != null ? `<span class="num">${esc(t.latency_ms)} ms</span>` : NA],
       ["DNS", t.dns ? esc(JSON.stringify(t.dns)) : NA],
       ["IPv6", t.ipv6 ? esc(JSON.stringify(t.ipv6)) : NA],
       ["Error", val(t.error)],
-    ])}</div>`;
+    ])}</div></div>`;
   };
   drawFields(); drawTestOut();
   $$("[data-mode]", $("#wizBody")).forEach((c) => c.onclick = () => {
@@ -1500,8 +1570,8 @@ async function wFingerprint() {
     </div>
     <div class="section-head"><h2>Capability status${wiz.deviceId ? " — " + esc(wiz.deviceId) : ""}</h2></div>
     <div id="capList"></div>`,
-    wizFoot(true, "Next: Consistency ›", () => { wiz.step = 4; renderWizard(); }));
-  bindWizFoot(true, "Next: Consistency ›", () => { wiz.step = 4; renderWizard(); });
+    wizFoot(true, "Next: Consistency ›"));
+  bindWizFoot(true, () => { wiz.step = 4; renderWizard(); });
 
   $$("[data-fpm]", $("#wizBody")).forEach((c) => c.onclick = () => {
     wiz.fpMode = c.dataset.fpm;
@@ -1509,9 +1579,9 @@ async function wFingerprint() {
   });
   const cl = $("#capList");
   if (caps && Object.keys(caps).length) {
-    cl.innerHTML = `<table class="compare-table"><thead><tr><th>Component</th><th>Status</th><th>Note</th></tr></thead><tbody>
+    cl.innerHTML = `<div class="table-card"><table class="grid"><thead><tr><th>Component</th><th>Status</th><th>Note</th></tr></thead><tbody>
       ${Object.entries(caps).map(([k, v]) => `<tr><td class="prop">${esc(k)}</td><td>${statusBadge(v.status)}</td><td class="muted">${esc(v.note || "—")}</td></tr>`).join("")}
-      </tbody></table><p class="note">Source: GET /api/devices/${esc(wiz.deviceId)} capability_matrix.</p>`;
+      </tbody></table></div><p class="note">Source: GET /api/devices/${esc(wiz.deviceId)} capability_matrix.</p>`;
   } else {
     cl.innerHTML = `<p class="muted">${wiz.deviceId
       ? "No capability data for this device (endpoint missing or empty)."
@@ -1522,7 +1592,6 @@ async function wFingerprint() {
 /* Step 5 — Consistency (local pre-flight; server check runs after creation) */
 function wConsistency() {
   const checks = [];
-  // Device vs network
   const dev = (cache.devices || []).find((d) => d.id === wiz.deviceId);
   const mobileDev = dev && /mobile|android|iphone/i.test(String(dev.category || "") + String(dev.model || ""));
   checks.push({
@@ -1538,7 +1607,7 @@ function wConsistency() {
     expected: mobileDev ? "mobile profile" : "desktop profile",
     actual: mobileDev ? "mobile preset" : "no preset",
     message: wiz.deviceId
-      ? `Device preset “${wiz.deviceId}” selected; fingerprint will be derived from it.`
+      ? `Device preset "${wiz.deviceId}" selected; fingerprint will be derived from it.`
       : "No device preset — backend will generate a default (desktop-class) fingerprint.",
   });
   if (wiz.net.mode !== "direct" && wiz.netTest) {
@@ -1559,15 +1628,15 @@ function wConsistency() {
     The server-side consistency check (<span class="mono">GET /api/profiles/:id/consistency</span>)
     runs after the profile is created and is shown in the profile's Health tab.</p>
     <div style="margin-bottom:10px">${statusBadge(overall)} <span class="muted">pre-flight overall</span></div>
-    <table class="compare-table"><thead><tr><th>Domain</th><th>Status</th><th>Expected</th><th>Actual</th><th>Message</th></tr></thead>
+    <div class="table-card"><table class="grid"><thead><tr><th>Domain</th><th>Status</th><th>Expected</th><th>Actual</th><th>Message</th></tr></thead>
     <tbody>${checks.map((c) => `<tr><td class="prop">${esc(c.domain)}</td><td>${statusBadge(c.status)}</td>
       <td>${esc(c.expected)}</td><td>${esc(c.actual)}</td>
-      <td style="font-family:var(--font)">${esc(c.message)}</td></tr>`).join("")}</tbody></table>`,
-    wizFoot(true, "Next: Review ›", () => {
-      if (overall === "ERROR" && !confirm("Pre-flight found errors. Continue anyway?")) return;
-      wiz.step = 5; renderWizard();
-    }));
-  bindWizFoot(true, "Next: Review ›", () => { wiz.step = 5; renderWizard(); });
+      <td>${esc(c.message)}</td></tr>`).join("")}</tbody></table></div>`,
+    wizFoot(true, "Next: Review ›"));
+  bindWizFoot(true, () => {
+    if (overall === "ERROR" && !confirm("Pre-flight found errors. Continue anyway?")) return;
+    wiz.step = 5; renderWizard();
+  });
 }
 
 /* Step 6 — Review + create */
@@ -1616,33 +1685,135 @@ function wReview() {
     if (r.ok && r.data && r.data.ok && r.data.profile) {
       const np = r.data.profile;
       closeModal(); wiz = null;
-      toast(`Profile “${np.name || np.id}” created` +
+      toast(`Profile "${np.name || np.id}" created` +
         ((r.data.warnings || []).length ? ` — ${r.data.warnings.length} fingerprint warning(s)` : ""), "ok");
       invalidate("profiles");
       location.hash = `#/profile/${encodeURIComponent(np.id)}`;
     } else {
       btn.disabled = false; btn.textContent = "Create profile";
-      toast("Create failed: " + esc((r.data && (r.data.error || r.data.message)) || r.error || "unknown"), "err");
+      toast("Create failed: " + apiErr(r), "err");
     }
   };
 }
 
-/* ============================== Fingerprints page ============================== */
-async function vFingerprints(view, query) {
-  const profiles = await loadProfiles();
-  if (!profiles.length) {
-    view.innerHTML = emptyState("🧬", "No profiles", "Create a profile to inspect its fingerprint.");
+/* ============================== Device Library ============================== */
+const devView = { q: "", cat: "", support: "" };
+
+async function loadAllProfiles(force) {
+  if (!force && cache.profiles) return cache.profiles;
+  const r = await apiGet("/api/profiles?limit=500");
+  if (!r.ok) { cache.profiles = []; return []; }
+  cache.profiles = Array.isArray(r.data) ? r.data : (r.data.items || []);
+  return cache.profiles;
+}
+
+async function vDevices(view, query) {
+  const devices = await loadDevices(true);
+  if (!devices.length) {
+    view.innerHTML = emptyState("Device library unavailable",
+      "GET /api/devices failed or returned no presets. The device preset service may not be implemented yet.",
+      `<button class="btn btn-primary" onclick="location.reload()">Retry</button>`);
     return;
   }
-  const selId = query.id || profiles[0].id;
+  const q = devView.q.trim().toLowerCase();
+  const rows = devices.filter((d) => {
+    if (q) {
+      const hay = [d.name, d.manufacturer, d.model, d.platform, d.category, d.id].filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (devView.cat) {
+      const hay = (String(d.category || "") + " " + String(d.platform || "")).toLowerCase();
+      if (devView.cat === "ios" && !/ios|iphone|ipad/.test(hay)) return false;
+      else if (!hay.includes(devView.cat)) return false;
+    }
+    if (devView.support) {
+      if (String(d.support || "").toUpperCase() !== devView.support) return false;
+    }
+    return true;
+  });
+
   view.innerHTML = `
-    <div class="toolbar">
-      <label class="fld" style="min-width:280px">Profile
-        <select id="fpSel">${profiles.map((p) =>
-          `<option value="${esc(p.id)}" ${p.id === selId ? "selected" : ""}>${esc(p.name || p.id)}</option>`).join("")}</select>
-      </label>
-      <div class="spacer"></div>
-      <a class="btn btn-sm" id="fpOpen" href="#/profile/${esc(selId)}?tab=fingerprint">Open in profile view</a>
+    <div class="action-bar">
+      <span class="bar-title">Device Library</span>
+      <span class="spacer"></span>
+      <div class="filter-row">
+        <input type="search" id="dvQ" placeholder="Search devices…" value="${esc(devView.q)}" aria-label="Search devices">
+        <select id="dvCat" aria-label="Category filter">
+          <option value="">All categories</option>
+          ${["android", "ios", "tablet", "mobile", "desktop"].map((c) =>
+            `<option value="${c}" ${devView.cat === c ? "selected" : ""}>${c[0].toUpperCase() + c.slice(1)}</option>`).join("")}
+        </select>
+        <select id="dvSup" aria-label="Support filter">
+          <option value="">All support levels</option>
+          ${["VALIDATED", "PARTIAL", "PENDING", "UNSUPPORTED"].map((s) =>
+            `<option value="${s}" ${devView.support === s ? "selected" : ""}>${s[0] + s.slice(1).toLowerCase()}</option>`).join("")}
+        </select>
+      </div>
+    </div>
+    <p class="note" style="margin:0 0 12px">${rows.length} of ${devices.length} presets</p>
+    ${rows.length ? `<div class="device-grid">${rows.map((d) => `
+      <div class="device-card" data-dev="${esc(d.id)}" role="button" tabindex="0" aria-label="${esc(d.name || d.id)}">
+        <div class="nm">${esc(d.name || d.model || d.id)} ${supportBadge(d.support)}</div>
+        <div class="meta">
+          ${esc(d.manufacturer || "")} ${esc(d.model || "")}<br>
+          ${esc(d.platform || d.os || "")} · ${esc(d.category || "—")}<br>
+          ${d.viewport ? `${esc(d.viewport.width)}×${esc(d.viewport.height)}` : "—"} · DPR ${esc(d.device_scale_factor ?? "—")} · ${d.touch ? "touch" : "no touch"}
+        </div>
+        <div class="badges">${badge(d.mobile ? "Mobile" : "Desktop", d.mobile ? "blue" : "grey")}</div>
+      </div>`).join("")}</div>`
+      : emptyState("No devices match", "Adjust the search or filters.")}`;
+
+  const deb = debounce((v) => { devView.q = v; vDevices(view, query); }, 280);
+  $("#dvQ").addEventListener("input", (e) => deb(e.target.value));
+  $("#dvCat").onchange = (e) => { devView.cat = e.target.value; vDevices(view, query); };
+  $("#dvSup").onchange = (e) => { devView.support = e.target.value; vDevices(view, query); };
+  $$("[data-dev]", view).forEach((c) => {
+    c.onclick = () => openDeviceDrawer(c.dataset.dev);
+    c.onkeydown = (e) => { if (e.key === "Enter") openDeviceDrawer(c.dataset.dev); };
+  });
+}
+
+async function openDeviceDrawer(id) {
+  openDrawer("Device preset", `<div class="skel" style="height:120px">&nbsp;</div>`);
+  let d = (cache.devices || []).find((x) => x.id === id);
+  if (!d) {
+    const r = await apiGet(`/api/devices/${encodeURIComponent(id)}`);
+    if (r.ok) d = r.data;
+  }
+  if (!d) {
+    $("#drawerBody").innerHTML = emptyState("Not found", "Device preset could not be loaded.");
+    return;
+  }
+  $("#drawerBody").innerHTML = `
+    <div class="toolbar-row"><h3 style="margin:0">${esc(d.name || d.model || d.id)}</h3><span class="spacer"></span>${supportBadge(d.support)}</div>
+    ${deviceDetailHtml(d)}
+    <div class="btn-row" style="margin-top:14px">
+      <button class="btn btn-primary" id="dvUse">Use in new profile</button>
+    </div>`;
+  $("#dvUse").onclick = () => {
+    closeDrawer();
+    openWizard();
+    setTimeout(() => { wiz.deviceId = id; wiz.deviceTab = "mobile"; wiz.step = 1; renderWizard(); }, 60);
+  };
+}
+
+/* ============================== Fingerprint page ============================== */
+async function vFingerprint(view, query) {
+  const profiles = await loadAllProfiles();
+  if (!profiles.length) {
+    view.innerHTML = emptyState("No profiles", "Create a profile to inspect its fingerprint.",
+      `<button class="btn btn-primary" onclick="openWizard()">New profile</button>`);
+    return;
+  }
+  const selId = (query.id && profiles.some((p) => p.id === query.id)) ? query.id : profiles[0].id;
+  view.innerHTML = `
+    <div class="action-bar">
+      <span class="bar-title">Profile</span>
+      <select id="fpSel" aria-label="Select profile" style="min-width:260px">
+        ${profiles.map((p) => `<option value="${esc(p.id)}" ${p.id === selId ? "selected" : ""}>${esc(p.name || p.id)}</option>`).join("")}
+      </select>
+      <span class="spacer"></span>
+      <a class="btn btn-sm" id="fpOpen" href="#/profile/${encodeURIComponent(selId)}?tab=fingerprint">Open in profile view</a>
     </div>
     <div id="fpBody"></div>`;
   const render = async (id) => {
@@ -1653,206 +1824,54 @@ async function vFingerprints(view, query) {
   await render(selId);
 }
 
-/* ============================== Devices page ============================== */
-const devView = { q: "", cat: "" };
-async function vDevices(view) {
-  const devices = await loadDevices();
-  if (!devices) {
-    view.innerHTML = emptyState("📱", "Device library unavailable",
-      "GET /api/devices failed. The device preset service may not be implemented yet.",
-      `<button class="btn btn-primary" onclick="location.reload()">Retry</button>`);
-    return;
-  }
-  const cats = [...new Set(devices.map((d) => String(d.category || "").toLowerCase()).filter(Boolean))].sort();
-  const q = devView.q.trim().toLowerCase();
-  const rows = devices.filter((d) => {
-    if (q) {
-      const hay = [d.name, d.manufacturer, d.model, d.platform, d.category, d.id].filter(Boolean).join(" ").toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    if (devView.cat) {
-      const c = String(d.category || "").toLowerCase();
-      if (devView.cat === "android" && !/android/.test(c + String(d.platform || "").toLowerCase())) return false;
-      if (devView.cat === "ios" && !/ios|iphone|ipad/.test(c + String(d.platform || "").toLowerCase())) return false;
-      if (devView.cat === "tablet" && !/tablet/.test(c)) return false;
-      if (devView.cat === "mobile" && !/mobile/.test(c)) return false;
-      if (devView.cat === "desktop" && !/desktop/.test(c)) return false;
-    }
-    return true;
-  });
+/* ============================== Network ============================== */
+const netView = { tab: "proxies" };
 
+async function vNetwork(view, query) {
+  const tab = query.tab || netView.tab || "proxies";
+  netView.tab = tab;
   view.innerHTML = `
-    <div class="toolbar">
-      <input type="search" id="dvQ" placeholder="Search devices…" value="${esc(devView.q)}" style="width:240px">
-      <select id="dvCat">
-        <option value="">All categories</option>
-        ${["android", "ios", "tablet", "mobile", "desktop"].map((c) =>
-          `<option value="${c}" ${devView.cat === c ? "selected" : ""}>${c[0].toUpperCase() + c.slice(1)}</option>`).join("")}
-      </select>
-      <div class="spacer"></div><span class="muted">${rows.length} of ${devices.length} presets</span>
+    <div class="tabs">
+      ${[["proxies", "Proxies"], ["gateways", "Gateways"], ["diagnostics", "Diagnostics"]].map(([t, label]) =>
+        `<button class="tab ${t === tab ? "active" : ""}" data-ntab="${t}">${label}</button>`).join("")}
     </div>
-    ${rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>Device</th><th>Manufacturer</th><th>OS</th><th>Category</th><th>Viewport</th><th>DPR</th><th>Touch</th><th>Support</th><th>Validated</th></tr></thead>
-      <tbody>${rows.map((d) => `<tr data-devrow="${esc(d.id)}" style="cursor:pointer">
-        <td><strong>${esc(d.name || d.model || d.id)}</strong><div class="muted mono" style="font-size:11px">${esc(d.id)}</div></td>
-        <td>${val(d.manufacturer)}</td><td>${val(d.platform || d.os)}</td><td>${val(d.category)}</td>
-        <td class="mono">${d.viewport ? `${esc(d.viewport.width)}×${esc(d.viewport.height)}` : "—"}</td>
-        <td class="num">${esc(d.device_scale_factor ?? "—")}</td>
-        <td>${d.touch == null ? "—" : (d.touch ? "✓" : "—")}</td>
-        <td>${supportBadge(d.support)}</td>
-        <td class="muted">${esc(d.validation_date || "—")}</td>
-      </tr>`).join("")}</tbody></table></div>`
-      : emptyState("📱", "No devices match", "Adjust the search or category filter.")}`;
-
-  const deb = debounce((v) => { devView.q = v; vDevices(view); }, 280);
-  $("#dvQ").addEventListener("input", (e) => deb(e.target.value));
-  $("#dvCat").onchange = (e) => { devView.cat = e.target.value; vDevices(view); };
-  $$("[data-devrow]", view).forEach((tr) => tr.onclick = () => openDeviceDrawer(tr.dataset.devrow));
+    <div id="netBody"></div>`;
+  $$("[data-ntab]", view).forEach((b) => b.onclick = () => { location.hash = `#/network?tab=${b.dataset.ntab}`; });
+  const body = $("#netBody");
+  if (tab === "proxies") await netProxies(body);
+  else if (tab === "gateways") await netGateways(body);
+  else await netDiagnostics(body);
 }
 
-async function openDeviceDrawer(id) {
-  openDrawer("Device preset", `<div class="skel" style="height:120px">&nbsp;</div>`);
-  let d = (cache.devices || []).find((x) => x.id === id);
-  if (!d || !d.capability_matrix) {
-    const r = await apiGet(`/api/devices/${encodeURIComponent(id)}`);
-    if (r.ok) { d = r.data; cache.deviceDetail[id] = d; }
-  }
-  if (!d) { $("#drawerBody").innerHTML = emptyState("📱", "Not found", "Device preset could not be loaded."); return; }
-  $("#drawerTitle").textContent = d.name || d.model || d.id;
-
-  let checksHtml = `<p class="muted">Validation checks unavailable.</p>`;
-  const vr = await apiGet(`/api/devices/${encodeURIComponent(id)}/validate`);
-  if (vr.ok && vr.data) {
-    const v = vr.data;
-    checksHtml = `
-      <div style="margin-bottom:8px">${statusBadge(v.status)} <span class="muted">validated ${esc(v.validated_at || "—")}</span></div>
-      ${(v.checks || []).map((c) => `<div class="check-row"><span style="flex:1">${esc(c.name)}</span>
-        ${statusBadge(c.status)}<span class="muted" style="font-size:12px">${esc(c.detail || "")}</span></div>`).join("")
-        || `<p class="muted">No checks reported.</p>`}
-      <p class="note">Source: GET /api/devices/${esc(id)}/validate.</p>`;
-  }
-  $("#drawerBody").innerHTML = `
-    <div class="panel"><h3>Preset</h3>${kvRows([
-      ["ID", `<span class="mono">${esc(d.id)}</span>`],
-      ["Manufacturer", val(d.manufacturer)], ["Model", val(d.model)],
-      ["Platform", val(d.platform || d.os)], ["Category", val(d.category)],
-      ["Viewport", d.viewport ? `<span class="mono">${esc(d.viewport.width)}×${esc(d.viewport.height)}</span>` : NA],
-      ["Device scale factor", val(d.device_scale_factor)],
-      ["Touch", d.touch == null ? NA : (d.touch ? "yes" : "no")],
-      ["Mobile", d.mobile == null ? NA : (d.mobile ? "yes" : "no")],
-      ["Support", supportBadge(d.support)],
-      ["Validation date", val(d.validation_date)],
-    ])}</div>
-    <div class="panel"><h3>Capability matrix</h3>
-      ${d.capability_matrix && Object.keys(d.capability_matrix).length
-        ? `<table class="compare-table"><thead><tr><th>Component</th><th>Status</th><th>Note</th></tr></thead><tbody>
-          ${Object.entries(d.capability_matrix).map(([k, cv]) => `<tr><td class="prop">${esc(k)}</td><td>${statusBadge(cv.status)}</td><td class="muted">${esc(cv.note || "—")}</td></tr>`).join("")}
-          </tbody></table>`
-        : `<p class="muted">No capability matrix data.</p>`}
-    </div>
-    <div class="panel"><h3>Limitations</h3>
-      ${(d.limitations || []).length ? "<ul>" + d.limitations.map((l) => `<li>${esc(l)}</li>`).join("") + "</ul>" : `<p class="muted">None reported.</p>`}
-    </div>
-    <div class="panel"><h3>Validation checks</h3>${checksHtml}</div>
-    <div class="inline-actions">
-      <button class="btn btn-primary" id="dvUse">Use in new profile</button>
-    </div>`;
-  $("#dvUse").onclick = () => { closeDrawer(); openWizard(); wiz.deviceId = id; wiz.step = 1; renderWizard(); };
-}
-
-/* ============================== Groups (clients + templates) ============================== */
-async function vGroups(view) {
-  const [clients, templates] = await Promise.all([loadClients(true), loadTemplates(true)]);
-  const crud = (kind, items, fields) => `
-    <div class="toolbar"><div class="spacer"></div>
-      <button class="btn btn-sm btn-primary" data-add="${kind}">＋ Add ${kind === "clients" ? "client" : "template"}</button></div>
-    ${items.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>Name</th>${fields.map((f) => `<th>${esc(f[1])}</th>`).join("")}<th>ID</th><th></th></tr></thead><tbody>
-      ${items.map((it) => `<tr><td><strong>${esc(it.name || it.id)}</strong></td>
-        ${fields.map(([k]) => `<td class="muted">${esc(it[k] ?? "—")}</td>`).join("")}
-        <td class="mono muted">${esc(it.id)}</td>
-        <td><div class="inline-actions">
-          <button class="btn btn-sm" data-edit="${kind}:${esc(it.id)}">Edit</button>
-          <button class="btn btn-sm btn-danger" data-del="${kind}:${esc(it.id)}">Delete</button>
-        </div></td></tr>`).join("")}</tbody></table></div>`
-      : emptyState("🏷", `No ${kind}`, `No ${kind} defined yet.`) }`;
-
-  view.innerHTML = `
-    <div class="section-head"><h2>Clients</h2></div>
-    <div id="grpClients">${crud("clients", clients, [["description", "Description"]])}</div>
-    <div class="section-head"><h2>Templates</h2></div>
-    <div id="grpTemplates">${crud("templates", templates, [["description", "Description"]])}</div>
-    <p class="note">Groups are organized through clients and templates — the backend exposes these via
-    <span class="mono">/api/clients</span> and <span class="mono">/api/templates</span>. Profiles reference a client via <span class="mono">clientId</span>.</p>`;
-
-  const ep = (kind) => `/api/${kind}`;
-  $$("[data-add]", view).forEach((b) => b.onclick = () => openGroupEdit(b.dataset.add, null));
-  $$("[data-edit]", view).forEach((b) => b.onclick = () => {
-    const [kind, id] = b.dataset.edit.split(/:(.+)/);
-    const list = kind === "clients" ? clients : templates;
-    openGroupEdit(kind, list.find((x) => x.id === id));
-  });
-  $$("[data-del]", view).forEach((b) => b.onclick = async () => {
-    const [kind, id] = b.dataset.del.split(/:(.+)/);
-    if (!confirm(`Delete this ${kind.slice(0, -1)}?`)) return;
-    const r = await apiDel(`${ep(kind)}/${encodeURIComponent(id)}`);
-    toast(r.ok ? "Deleted" : "Delete failed", r.ok ? "ok" : "err");
-    if (r.ok) { invalidate(kind); route(); }
-  });
-
-  function openGroupEdit(kind, item) {
-    const isNew = !item;
-    openModal((isNew ? "Add " : "Edit ") + kind.slice(0, -1), `
-      <div class="form-grid">
-        <label class="fld">Name *<input type="text" id="gName" value="${esc((item && item.name) || "")}"></label>
-        <label class="fld">Description<input type="text" id="gDesc" value="${esc((item && item.description) || "")}"></label>
-      </div>`,
-      `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSave">Save</button>`);
-    $("#mCancel").onclick = closeModal;
-    $("#mSave").onclick = async () => {
-      const name = $("#gName").value.trim();
-      if (!name) { toast("Name is required", "err"); return; }
-      const payload = { name, description: $("#gDesc").value.trim() };
-      const r = isNew ? await apiPost(ep(kind), payload)
-        : await apiPut(`${ep(kind)}/${encodeURIComponent(item.id)}`, payload);
-      closeModal();
-      toast(r.ok ? "Saved" : "Save failed", r.ok ? "ok" : "err");
-      if (r.ok) { invalidate(kind); route(); }
-    };
-  }
-}
-
-/* ============================== Proxies ============================== */
-async function vProxies(view) {
-  const profiles = await loadProfiles();
+async function netProxies(body) {
+  const profiles = await loadAllProfiles();
   const withProxy = profiles.filter((p) => p.proxyHost);
-  view.innerHTML = `
-    <div class="panel"><h3>Test a proxy</h3>
+  body.innerHTML = `
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Test a proxy</h3>
       <div class="form-grid">
-        <label class="fld">Protocol<select id="pxProto">
+        <label class="field"><span class="field-label">Protocol</span><select id="pxProto">
           <option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></label>
-        <label class="fld">Host *<input type="text" id="pxHost" placeholder="203.0.113.10"></label>
-        <label class="fld">Port *<input type="number" id="pxPort" placeholder="8080"></label>
-        <label class="fld">Username<input type="text" id="pxUser" autocomplete="off"></label>
-        <label class="fld">Password<input type="password" id="pxPass" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Host *</span><input type="text" id="pxHost" placeholder="203.0.113.10"></label>
+        <label class="field"><span class="field-label">Port *</span><input type="number" id="pxPort" placeholder="8080"></label>
+        <label class="field"><span class="field-label">Username</span><input type="text" id="pxUser" autocomplete="off"></label>
+        <label class="field"><span class="field-label">Password</span><input type="password" id="pxPass" autocomplete="off"></label>
       </div>
-      <div class="inline-actions" style="margin-top:12px">
+      <div class="btn-row" style="margin-top:12px">
         <button class="btn btn-primary" id="pxGo">Test connection</button>
       </div>
       <div id="pxOut" style="margin-top:12px"></div>
       <p class="note">Uses POST /api/proxy/test. Passwords are never displayed or logged.</p>
-    </div>
-    <div class="section-head"><h2>Profiles using proxies</h2><div class="spacer"></div>
-      <span class="muted">${withProxy.length} of ${profiles.length}</span></div>
-    ${withProxy.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+    </div></div>
+    <h3 class="section-title">Profiles using proxies <span class="muted small">${withProxy.length} of ${profiles.length}</span></h3>
+    ${withProxy.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
       <th>Profile</th><th>Proxy</th><th>Health</th><th>Egress IP</th></tr></thead><tbody>
       ${withProxy.map((p) => `<tr>
-        <td><a class="rowlink" href="#/profile/${esc(p.id)}">${esc(p.name || p.id)}</a></td>
+        <td><span class="profile-name"><a href="#/profile/${encodeURIComponent(p.id)}">${esc(p.name || p.id)}</a></span></td>
         <td>${proxyLabel(p)}</td>
         <td class="c-ph" data-ph="${esc(p.id)}"><span class="muted">…</span></td>
         <td class="c-ip" data-ip="${esc(p.id)}"><span class="muted">…</span></td>
-      </tr>`).join("")}</tbody></table></div>`
-      : emptyState("🌐", "No proxies in use", "No profiles currently have a proxy configured.")}`;
+      </tr>`).join("")}</tbody></table></div></div>`
+      : emptyState("No proxies in use", "No profiles currently have a proxy configured.")}`;
 
   $("#pxGo").onclick = async () => {
     const host = $("#pxHost").value.trim(), port = $("#pxPort").value.trim();
@@ -1864,52 +1883,50 @@ async function vProxies(view) {
     });
     const d = t.ok ? t.data : { ok: false, error: t.error || ("HTTP " + t.status) };
     const ok = d.ok || d.success;
-    $("#pxOut").innerHTML = `<div class="panel"><h3>Result ${ok ? badge("pass", "green") : badge("fail", "red")}</h3>${kvRows([
+    $("#pxOut").innerHTML = `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Result ${ok ? badge("pass", "green") : badge("fail", "red")}</h3>${kvRows([
       ["Egress IP", val(d.egress_ip || d.egressIp)], ["Country", val(d.country)],
       ["Latency", d.latency_ms != null ? `<span class="num">${esc(d.latency_ms)} ms</span>` : NA],
       ["Error", val(d.error)],
-    ])}</div>`;
+    ])}</div></div>`;
   };
 
-  // lazy health + egress for proxy profiles
+  /* lazy health + egress for proxy profiles */
   withProxy.forEach(async (p) => {
     const nh = await loadNetHealth(p.id);
-    if (!document.body.contains($("#view"))) return;
     const ph = nh && nh.proxyHealth;
-    const hc = document.querySelector(`[data-ph="${cssEsc(p.id)}"]`);
-    const ic = document.querySelector(`[data-ip="${cssEsc(p.id)}"]`);
+    const hc = document.querySelector(`[data-ph="${CSS.escape(p.id)}"]`);
+    const ic = document.querySelector(`[data-ip="${CSS.escape(p.id)}"]`);
     if (hc) hc.innerHTML = nh ? (nh.ok === false ? badge("failed", "red") : badge("ok", "green")) : NA;
     if (ic) ic.innerHTML = ph && (ph.egress_ip || ph.egressIp) ? `<span class="mono">${esc(ph.egress_ip || ph.egressIp)}</span>` : NA;
   });
 }
 
-/* ============================== Gateways ============================== */
-async function vGateways(view) {
+async function netGateways(body) {
   const gateways = await loadGateways(true);
-  view.innerHTML = `
+  body.innerHTML = `
     <div class="toolbar"><div class="spacer"></div>
-      <button class="btn btn-sm btn-primary" id="gwAdd">＋ Add gateway</button></div>
-    ${gateways.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+      <button class="btn btn-sm btn-primary" id="gwAdd">Add gateway</button></div>
+    ${gateways.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
       <th>Name</th><th>Provider</th><th>Health</th><th>ID</th><th></th></tr></thead><tbody>
       ${gateways.map((g) => `<tr>
         <td><strong>${esc(g.name || g.id)}</strong></td>
         <td>${val(g.providerType || g.provider)}</td>
         <td class="c-gh" data-gh="${esc(g.id)}"><span class="muted">…</span></td>
         <td class="mono muted">${esc(g.id)}</td>
-        <td><div class="inline-actions">
-          <button class="btn btn-sm" data-gw="health" data-id="${esc(g.id)}">Health</button>
-          <button class="btn btn-sm" data-gw="provision" data-id="${esc(g.id)}">Provision</button>
-          <button class="btn btn-sm" data-gw="edit" data-id="${esc(g.id)}">Edit</button>
-          <button class="btn btn-sm btn-danger" data-gw="del" data-id="${esc(g.id)}">Delete</button>
-        </div></td></tr>`).join("")}</tbody></table></div>`
-      : emptyState("🛰", "No gateways", "Add a gateway provider to route profile traffic through it.")}
-    <p class="note">Provider secrets are stored server-side and never returned by the API (safe view).</p>`;
+        <td><div class="row-actions">
+          <button class="btn btn-xs" data-gw="health" data-id="${esc(g.id)}">Health</button>
+          <button class="btn btn-xs" data-gw="provision" data-id="${esc(g.id)}">Provision</button>
+          <button class="btn btn-xs" data-gw="edit" data-id="${esc(g.id)}">Edit</button>
+          <button class="btn btn-xs btn-danger" data-gw="del" data-id="${esc(g.id)}">Delete</button>
+        </div></td></tr>`).join("")}</tbody></table></div></div>`
+      : emptyState("No gateways", "Add a gateway provider to route profile traffic through it.")}
+    <p class="note">Provider secrets are stored server-side and never returned by the API.</p>`;
 
-  $("#gwAdd").onclick = () => openGatewayEdit(null, gateways);
-  $$("[data-gw]", view).forEach((b) => b.onclick = async () => {
+  $("#gwAdd").onclick = () => openGatewayEdit(null);
+  $$("[data-gw]", body).forEach((b) => b.onclick = async () => {
     const id = b.dataset.id, kind = b.dataset.gw;
     if (kind === "health") {
-      const cell = document.querySelector(`[data-gh="${cssEsc(id)}"]`);
+      const cell = document.querySelector(`[data-gh="${CSS.escape(id)}"]`);
       if (cell) cell.innerHTML = `<span class="muted">checking…</span>`;
       const r = await apiGet(`/api/gateways/${encodeURIComponent(id)}/health`);
       const ok = r.ok && r.data && (r.data.ok || (r.data.health && r.data.health.ok));
@@ -1917,9 +1934,9 @@ async function vGateways(view) {
       if (!r.ok) toast("Health check failed", "err");
     } else if (kind === "provision") {
       const r = await apiPost(`/api/gateways/${encodeURIComponent(id)}/provision`, {});
-      toast(r.ok && r.data && r.data.ok ? "Provisioned" : "Provision failed: " + esc((r.data && r.data.error) || r.error || "?"), r.ok ? "ok" : "err");
+      toast(r.ok && r.data && r.data.ok ? "Provisioned" : "Provision failed: " + apiErr(r), r.ok ? "ok" : "err");
     } else if (kind === "edit") {
-      openGatewayEdit(gateways.find((g) => g.id === id), gateways);
+      openGatewayEdit(gateways.find((g) => g.id === id));
     } else if (kind === "del") {
       if (!confirm("Delete this gateway?")) return;
       const r = await apiDel(`/api/gateways/${encodeURIComponent(id)}`);
@@ -1928,23 +1945,21 @@ async function vGateways(view) {
     }
   });
 
-  // lazy health for all
   gateways.forEach(async (g) => {
     const r = await apiGet(`/api/gateways/${encodeURIComponent(g.id)}/health`);
-    if (!document.body.contains($("#view"))) return;
-    const cell = document.querySelector(`[data-gh="${cssEsc(g.id)}"]`);
+    const cell = document.querySelector(`[data-gh="${CSS.escape(g.id)}"]`);
     if (!cell) return;
     const ok = r.ok && r.data && (r.data.ok || (r.data.health && r.data.health.ok));
     cell.innerHTML = r.ok ? (ok ? badge("healthy", "green") : badge("unhealthy", "red")) : NA;
   });
 }
-function openGatewayEdit(g, gateways) {
+function openGatewayEdit(g) {
   const isNew = !g;
   openModal((isNew ? "Add" : "Edit") + " gateway", `
     <div class="form-grid">
-      <label class="fld">Name *<input type="text" id="gwName" value="${esc((g && g.name) || "")}"></label>
-      <label class="fld">Provider type<input type="text" id="gwType" value="${esc((g && (g.providerType || g.provider)) || "")}" placeholder="e.g. ssh, wireguard"></label>
-      <label class="fld" style="grid-column:1/-1">Config JSON (no secrets in this form — manage secrets server-side)
+      <label class="field"><span class="field-label">Name *</span><input type="text" id="gwName" value="${esc((g && g.name) || "")}"></label>
+      <label class="field"><span class="field-label">Provider type</span><input type="text" id="gwType" value="${esc((g && (g.providerType || g.provider)) || "")}" placeholder="e.g. ssh, wireguard"></label>
+      <label class="field" style="grid-column:1/-1"><span class="field-label">Config JSON (no secrets in this form — manage secrets server-side)</span>
         <textarea id="gwCfg" rows="5" placeholder='{"host":"...","port":22}'>${esc(g && g.config ? JSON.stringify(g.config, null, 2) : "")}</textarea></label>
     </div>
     <p class="note">Secrets are never displayed: the API returns a redacted (safe) view.</p>`,
@@ -1965,73 +1980,84 @@ function openGatewayEdit(g, gateways) {
   };
 }
 
-/* ============================== Automation & Tasks (jobs) ============================== */
-function jobStatusBadge(s) {
-  const v = String(s || "").toLowerCase();
-  if (["done", "completed"].includes(v)) return badge(s || "done", "green");
-  if (["failed", "error"].includes(v)) return badge(s || "failed", "red");
-  if (["cancelled", "canceled"].includes(v)) return badge(s || "cancelled", "grey");
-  if (["running", "in_progress"].includes(v)) return badge(s || "running", "cyan");
-  return badge(s || "queued", "amber");
+/* Diagnostics tab: per-profile network check with honest endpoint availability */
+async function netDiagnostics(body) {
+  const profiles = await loadAllProfiles();
+  body.innerHTML = `
+    <div class="action-bar">
+      <span class="bar-title">Profile</span>
+      <select id="dgSel" aria-label="Select profile" style="min-width:260px">
+        ${profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("")}
+      </select>
+      <button class="btn btn-primary btn-sm" id="dgGo">Run diagnostics</button>
+    </div>
+    <div id="dgOut">${emptyState("Network diagnostics", "Pick a profile and run the check.")}</div>`;
+  if (!profiles.length) {
+    body.innerHTML = emptyState("No profiles", "Create a profile first.");
+    return;
+  }
+  $("#dgGo").onclick = async () => {
+    const id = $("#dgSel").value;
+    $("#dgOut").innerHTML = `<div class="skel" style="height:120px">&nbsp;</div>`;
+    const r = await apiPost(`/api/profiles/${encodeURIComponent(id)}/network/test`, {});
+    if (r.status === 404) {
+      $("#dgOut").innerHTML = `<div class="notice info">The extended network test endpoint (POST /api/profiles/:id/network/test) is not available on this backend. Basic health is shown on the profile's Network tab instead.</div>`;
+      return;
+    }
+    if (!r.ok || !r.data) {
+      $("#dgOut").innerHTML = `<div class="notice err">Diagnostics failed: ${apiErr(r)}</div>`;
+      return;
+    }
+    const nt = r.data;
+    $("#dgOut").innerHTML = `<div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Diagnostics result</h3>${kvRows([
+      ["Health", nt.health ? statusBadge(nt.health) : NA],
+      ["Egress IP", val(nt.egress_ip)], ["Country", val(nt.country)],
+      ["Timezone", val(nt.timezone)], ["Latency", nt.latency_ms != null ? `<span class="num">${esc(nt.latency_ms)} ms</span>` : NA],
+      ["DNS", nt.dns ? statusBadge(nt.dns.status) + " " + val(nt.dns.detail) : NA],
+      ["IPv6", nt.ipv6 ? statusBadge(nt.ipv6.status) + " " + val(nt.ipv6.detail) : NA],
+      ["Error", val(nt.error)],
+    ])}</div></div>`;
+  };
 }
-function jobRows(jobs) {
-  return jobs.map((j) => {
-    const pct = j.progress != null ? Math.min(100, Math.max(0, Number(j.progress))) : null;
-    return `<tr><td class="mono">${esc(j.id)}</td><td>${esc(j.type || "")}</td>
-      <td>${jobStatusBadge(j.status)}</td>
-      <td style="min-width:120px">${pct != null ? `<div class="prog"><i style="width:${pct}%"></i></div>` : NA}</td>
-      <td class="num">${(j.profileIds || []).length}</td>
-      <td class="muted">${esc(timeAgo(j.created_at || j.createdAt) || "—")}</td>
-      <td>${j.error ? `<span class="muted" style="font-size:12px">${esc(String(j.error).slice(0, 80))}</span>` : NA}</td>
-      <td>${["queued", "running", "in_progress"].includes(String(j.status).toLowerCase())
-        ? `<button class="btn btn-sm btn-danger" data-jcancel="${esc(j.id)}">Cancel</button>` : ""}</td></tr>`;
-  }).join("");
-}
-function bindJobCancel(root, refresh) {
-  $$("[data-jcancel]", root).forEach((b) => b.onclick = async () => {
-    const r = await apiPost(`/api/jobs/${encodeURIComponent(b.dataset.jcancel)}/cancel`, {});
-    toast(r.ok ? "Job cancelled" : "Cancel failed", r.ok ? "ok" : "err");
-    invalidate("jobs"); refresh();
-  });
-}
-async function vAutomation(view) {
-  const [jobs, profiles] = await Promise.all([loadJobs(true), loadProfiles()]);
+
+/* ============================== Jobs ============================== */
+const jobsView = { cursor: null, useCursor: false, offset: 0, cache: [], nextCursor: null, unavailable: false };
+
+async function vJobs(view, query) {
+  jobsView.cursor = null; jobsView.useCursor = false; jobsView.offset = 0; jobsView.cache = [];
+
   view.innerHTML = `
-    <div class="panel"><h3>Queue a bulk job</h3>
+    <div class="card"><div class="card-body">
+      <h3 class="section-title" style="margin-top:0">Queue a bulk job</h3>
       <div class="form-grid">
-        <label class="fld">Job type<select id="jbType">
+        <label class="field"><span class="field-label">Job type</span><select id="jbType">
           <option value="bulk_launch">Bulk launch</option>
           <option value="bulk_stop">Bulk stop</option>
           <option value="launch_profile">Launch (single)</option>
           <option value="stop_profile">Stop (single)</option>
         </select></label>
-        <label class="fld">Start URL (optional)<input type="url" id="jbUrl" placeholder="https://…"></label>
-        <label class="fld">Profile IDs (comma separated, or pick below)<input type="text" id="jbIds" placeholder="profile_xxx, profile_yyy"></label>
-        <label class="fld">Options
+        <label class="field"><span class="field-label">Start URL (optional)</span><input type="url" id="jbUrl" placeholder="https://…"></label>
+        <label class="field"><span class="field-label">Profile IDs (comma separated)</span><input type="text" id="jbIds" placeholder="profile_xxx, profile_yyy"></label>
+        <label class="field"><span class="field-label">Options</span>
           <select id="jbDirect"><option value="">Default launch</option><option value="1">Direct (fast)</option></select></label>
       </div>
-      <label class="fld" style="margin-top:10px">Or select profiles
-        <select id="jbPick" multiple size="6" style="min-height:120px">
-          ${profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("")}
-        </select></label>
-      <div class="inline-actions" style="margin-top:12px">
+      <div class="btn-row" style="margin-top:12px">
         <button class="btn btn-primary" id="jbGo">Queue job</button>
       </div>
-      <p class="note">Job types come from the backend (<span class="mono">launch_profile, stop_profile, bulk_launch, bulk_stop</span>).
-      There is no rule/trigger engine in the current API — automation here means queued bulk operations.</p>
-    </div>
-    <div class="section-head"><h2>Job queue</h2><div class="spacer"></div>
-      <button class="btn btn-sm" id="jbRefresh">⟳ Refresh</button></div>
-    <div id="jbList">${jobs.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Profiles</th><th>Created</th><th>Error</th><th></th></tr></thead>
-      <tbody>${jobRows(jobs)}</tbody></table></div>`
-      : emptyState("⚙", "No jobs", "Queue a bulk job above.")}</div>`;
+      <p class="note">Job types come from the backend (<span class="mono">launch_profile, stop_profile, bulk_launch, bulk_stop</span>).</p>
+    </div></div>
+    <div class="toolbar-row"><h3 class="section-title" style="margin:0">Job queue</h3><span class="spacer"></span>
+      <button class="btn btn-sm" id="jbRefresh">Refresh</button></div>
+    <div id="jbList">${skelTable(8, 6)}</div>
+    <div class="pager" id="jbPager" hidden>
+      <button class="btn btn-sm" id="jbPrev">← Prev</button>
+      <button class="btn btn-sm" id="jbNext">Next →</button>
+      <span class="spacer"></span><span id="jbInfo"></span>
+    </div>`;
 
   $("#jbGo").onclick = async () => {
-    const typed = $("#jbIds").value.split(",").map((s) => s.trim()).filter(Boolean);
-    const picked = Array.from($("#jbPick").selectedOptions).map((o) => o.value);
-    const ids = [...new Set([...typed, ...picked])];
-    if (!ids.length) { toast("Select at least one profile", "err"); return; }
+    const ids = $("#jbIds").value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (!ids.length) { toast("Enter at least one profile ID", "err"); return; }
     const r = await apiPost("/api/jobs", {
       type: $("#jbType").value, profileIds: ids,
       url: $("#jbUrl").value.trim() || undefined,
@@ -2039,85 +2065,122 @@ async function vAutomation(view) {
     });
     if (r.ok && r.data && r.data.ok) {
       toast(`Job ${r.data.job.id} queued`, "ok");
-      invalidate("jobs"); vAutomation(view);
-    } else toast("Queue failed: " + esc((r.data && r.data.error) || r.error || "?"), "err");
+      invalidate("jobs"); loadJobsPage();
+    } else toast("Queue failed: " + apiErr(r), "err");
   };
-  $("#jbRefresh").onclick = () => { invalidate("jobs"); vAutomation(view); };
-  bindJobCancel(view, () => vAutomation(view));
-}
-async function vTasks(view) {
-  const jobs = await loadJobs(true);
-  view.innerHTML = `
-    <div class="toolbar"><div class="spacer"></div>
-      <button class="btn btn-sm" id="tRefresh">⟳ Refresh</button></div>
-    ${jobs.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Profiles</th><th>Created</th><th>Error</th><th></th></tr></thead>
-      <tbody>${jobRows(jobs)}</tbody></table></div>`
-      : emptyState("✓", "No tasks", "Background jobs will appear here. Create one under Automation.")}
-    <p class="note">Source: GET /api/jobs. Auto-refresh is off — use ⟳ Refresh.</p>`;
-  $("#tRefresh").onclick = () => { invalidate("jobs"); vTasks(view); };
-  bindJobCancel(view, () => vTasks(view));
+  $("#jbRefresh").onclick = () => { invalidate("jobs"); jobsView.offset = 0; jobsView.cursor = null; loadJobsPage(); };
+  $("#jbPrev").onclick = () => { if (jobsView.useCursor) { /* cursor stack not kept; fall back to offset */ } jobsView.offset = Math.max(0, jobsView.offset - PAGE_SIZE); loadJobsPage(); };
+  $("#jbNext").onclick = () => { jobsView.offset += PAGE_SIZE; loadJobsPage(); };
+
+  loadJobsPage();
 }
 
-/* ============================== Extensions ============================== */
-async function vExtensions(view) {
-  const sys = cache.sysHealth || (await apiGet("/api/health")).data;
-  const extOk = sys && sys.extension_ok;
-  view.innerHTML = `
-    <div class="panel"><h3>Bundled extension</h3>${kvRows([
-      ["Manifest present", extOk ? badge("yes", "green") : badge("no", "amber")],
-      ["Note", `<span class="muted">The backend ships one bundled extension used for fingerprint/CDP injection. It is loaded automatically when profiles launch.</span>`],
-    ])}
-    <p class="note">Source: GET /api/health → extension_ok.</p></div>
-    ${emptyState("🧩", "No extension management API",
-      "The current backend does not expose per-profile extension install/uninstall endpoints, so there is nothing to list or manage here. Web-store extensions are controlled by the allowWebstoreExtensions setting (" + (sys ? String(sys.allowWebstoreExtensions) : "?") + ").")}`;
+async function jobsFetchPage() {
+  const p = new URLSearchParams({ limit: String(PAGE_SIZE) });
+  if (jobsView.useCursor && jobsView.cursor) p.set("cursor", jobsView.cursor);
+  const r = await apiGet("/api/jobs?" + p.toString());
+  if (r.status === 503) return { unavailable: true };
+  if (!r.ok) return { error: "GET /api/jobs failed (" + r.status + ")" };
+  const d = r.data || {};
+  const jobs = d.jobs || [];
+  if (typeof d.next_cursor === "string") {
+    jobsView.useCursor = true;
+    jobsView.nextCursor = d.next_cursor || null;
+    return { jobs, total: d.total };
+  }
+  /* No cursor contract from the backend yet — page client-side over a larger fetch */
+  if (!jobsView.cache.length) {
+    const full = await apiGet("/api/jobs?limit=500");
+    jobsView.cache = (full.ok && full.data && full.data.jobs) ? full.data.jobs : jobs;
+  }
+  const total = jobsView.cache.length;
+  const page = jobsView.cache.slice(jobsView.offset, jobsView.offset + PAGE_SIZE);
+  return { jobs: page, total };
 }
 
-/* ============================== Backups ============================== */
-async function vBackups(view) {
-  const r = await apiGet("/api/backups");
-  const backups = (r.ok && r.data && Array.isArray(r.data.backups)) ? r.data.backups : [];
-  view.innerHTML = `
-    ${backups.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>Backup</th><th>Profile</th><th>Created</th><th>Size</th><th></th></tr></thead><tbody>
-      ${backups.map((b) => {
-        const id = b.id || b.backupId || b.path || b.backupPath;
-        return `<tr>
-          <td class="mono">${esc(b.name || id || "backup")}</td>
-          <td>${val(b.profileId || b.profile_id)}</td>
-          <td class="muted">${esc(b.createdAt || b.created_at || b.ts || "—")}</td>
-          <td class="num">${b.size != null ? esc(b.size) : "—"}</td>
-          <td><button class="btn btn-sm" data-restore="${esc(id || "")}" ${id ? "" : "disabled"}>Restore</button></td>
-        </tr>`;
-      }).join("")}</tbody></table></div>`
-      : emptyState("💾", "No backups", "Backups appear here after using Backup on a profile.")}
-    <p class="note">Source: GET /api/backups. Restore uses POST /api/backups/restore with backupId/backupPath + optional profileId + passphrase. Passphrases are consumed by the endpoint and never logged.</p>`;
+function jobRows(jobs) {
+  return jobs.map((j) => {
+    const pct = j.progress != null ? Math.min(100, Math.max(0, Number(j.progress))) : null;
+    const running = ["queued", "pending", "running", "in_progress"].includes(String(j.status || "").toLowerCase());
+    return `<tr data-job="${esc(j.id)}">
+      <td class="mono">${esc(j.id)}</td><td>${esc(j.type || "")}</td>
+      <td data-jcell="status">${jobStatusBadge(j.status)}</td>
+      <td style="min-width:120px" data-jcell="progress">${pct != null ? `<div class="progress"><i style="width:${pct}%"></i></div>` : NA}</td>
+      <td class="num">${(j.profileIds || []).length}</td>
+      <td class="muted small">${esc(timeAgo(j.created_at || j.createdAt))}</td>
+      <td>${j.error ? `<span class="muted small">${esc(String(j.error).slice(0, 80))}</span>` : NA}</td>
+      <td>${running ? `<button class="btn btn-xs btn-danger" data-jcancel="${esc(j.id)}">Cancel</button>` : ""}</td></tr>`;
+  }).join("");
+}
 
-  $$("[data-restore]", view).forEach((b) => b.onclick = () => {
-    openModal("Restore backup", `
-      <label class="fld">Target profile ID (optional — defaults to the backup's profile)
-        <input type="text" id="rsPid" placeholder="profile_…"></label>
-      <label class="fld">Passphrase (if encrypted)<input type="password" id="rsPass" autocomplete="off"></label>
-      <p class="note">The passphrase is sent once to the restore endpoint and is never stored or logged by the UI.</p>`,
-      `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mGo">Restore</button>`);
-    $("#mCancel").onclick = closeModal;
-    $("#mGo").onclick = async () => {
-      const payload = { backupId: b.dataset.restore, profileId: $("#rsPid").value.trim() || undefined };
-      const pass = $("#rsPass").value;
-      if (pass) payload.passphrase = pass;
-      $("#rsPass").value = "";
-      const rr = await apiPost("/api/backups/restore", payload);
-      closeModal();
-      toast(rr.ok && rr.data && rr.data.ok ? "Restore completed" : "Restore failed: " + esc((rr.data && rr.data.error) || rr.error || "?"), rr.ok ? "ok" : "err");
-    };
+async function loadJobsPage() {
+  const list = $("#jbList");
+  if (!list) return;
+  const res = await jobsFetchPage();
+  if (res.unavailable) {
+    list.innerHTML = `<div class="notice">The job system is not initialized on this backend (GET /api/jobs returned 503). Jobs queued from this console will not run until the job service is started.</div>`;
+    $("#jbPager").hidden = true;
+    return;
+  }
+  if (res.error) {
+    list.innerHTML = emptyState("Couldn't load jobs", res.error, `<button class="btn" onclick="loadJobsPage()">Retry</button>`);
+    $("#jbPager").hidden = true;
+    return;
+  }
+  const jobs = res.jobs;
+  list.innerHTML = jobs.length
+    ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
+        <th>Job</th><th>Type</th><th>Status</th><th>Progress</th><th>Profiles</th><th>Created</th><th>Error</th><th></th></tr></thead>
+        <tbody>${jobRows(jobs)}</tbody></table></div></div>`
+    : emptyState("No jobs", "Queue a bulk job above, or start/stop profiles from the Profiles page.");
+  $$("[data-jcancel]", list).forEach((b) => b.onclick = async () => {
+    const r = await apiPost(`/api/jobs/${encodeURIComponent(b.dataset.jcancel)}/cancel`, {});
+    toast(r.ok ? "Job cancelled" : "Cancel failed", r.ok ? "ok" : "err");
+    invalidate("jobs"); jobsView.cache = []; loadJobsPage();
   });
+  /* pager */
+  const pager = $("#jbPager");
+  if (jobsView.useCursor) {
+    const hasNext = !!jobsView.nextCursor;
+    pager.hidden = !hasNext;
+    $("#jbNext").disabled = !hasNext;
+    $("#jbInfo").textContent = `${PAGE_SIZE}/page`;
+  } else {
+    const total = res.total || 0;
+    const hasPrev = jobsView.offset > 0, hasNext = jobsView.offset + jobs.length < total;
+    pager.hidden = !hasPrev && !hasNext;
+    $("#jbPrev").disabled = !hasPrev;
+    $("#jbNext").disabled = !hasNext;
+    $("#jbInfo").textContent = total ? `${jobsView.offset + 1}–${jobsView.offset + jobs.length} of ${total}` : "";
+  }
+}
+/* Live-update a job row in place */
+function patchJobRow(job) {
+  const tr = document.querySelector(`#jbList tr[data-job="${CSS.escape(job.id)}"]`);
+  if (!tr) return;
+  const sc = tr.querySelector('[data-jcell="status"]');
+  if (sc) sc.innerHTML = jobStatusBadge(job.status);
+  const pc = tr.querySelector('[data-jcell="progress"]');
+  if (pc && job.progress != null) pc.innerHTML = `<div class="progress"><i style="width:${Math.min(100, job.progress)}%"></i></div>`;
 }
 
-/* ============================== Audit ============================== */
-const auditView = { q: "", onlyFail: false };
-async function vAudit(view) {
+/* ============================== Audit Log ============================== */
+const auditView = { q: "", onlyFail: false, unavailable: false };
+
+async function vAudit(view, query) {
+  view.innerHTML = skelTable(5, 10);
   const r = await apiGet("/api/audit?limit=200");
+  if (r.status === 404) {
+    view.innerHTML = emptyState("Audit log unavailable",
+      "This backend does not expose GET /api/audit yet. Actions are not being recorded for display.");
+    return;
+  }
   const items = (r.ok && r.data && Array.isArray(r.data.items)) ? r.data.items : [];
+  if (!r.ok) {
+    view.innerHTML = emptyState("Couldn't load audit log", "GET /api/audit failed (" + r.status + ").",
+      `<button class="btn" onclick="route()">Retry</button>`);
+    return;
+  }
   const q = auditView.q.trim().toLowerCase();
   const rows = items.filter((e) => {
     if (auditView.onlyFail && e.ok !== false) return false;
@@ -2126,54 +2189,71 @@ async function vAudit(view) {
   }).reverse();
 
   view.innerHTML = `
-    <div class="toolbar">
-      <input type="search" id="auQ" placeholder="Filter action, profile, detail…" value="${esc(auditView.q)}" style="width:280px">
-      <label style="font-size:13px;color:var(--text-1)"><input type="checkbox" id="auFail" ${auditView.onlyFail ? "checked" : ""}> failures only</label>
-      <div class="spacer"></div><span class="muted">${rows.length} entries</span>
+    <div class="action-bar">
+      <span class="bar-title">Audit Log</span>
+      <input type="search" id="auQ" placeholder="Filter action, profile, detail…" value="${esc(auditView.q)}" style="width:260px" aria-label="Filter audit log">
+      <label class="checkbox"><input type="checkbox" id="auFail" ${auditView.onlyFail ? "checked" : ""}> failures only</label>
+      <span class="spacer"></span><span class="muted small">${rows.length} entries</span>
     </div>
-    ${rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>
+    ${rows.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
       <th>Time</th><th>Action</th><th>Profile</th><th>Result</th><th>Detail</th></tr></thead><tbody>
       ${rows.map((e) => `<tr>
-        <td class="muted" style="white-space:nowrap">${esc(e.ts || "")}</td>
+        <td class="muted small" style="white-space:nowrap">${esc(e.ts || "")}</td>
         <td class="mono">${esc(e.action || "")}</td>
-        <td>${e.profileId ? `<a class="rowlink mono" href="#/profile/${esc(e.profileId)}">${shortId(e.profileId)}</a>` : NA}</td>
+        <td>${e.profileId ? `<a class="mono" href="#/profile/${encodeURIComponent(e.profileId)}">${shortId(e.profileId)}</a>` : NA}</td>
         <td>${e.ok ? badge("ok", "green") : badge("fail", "red")}</td>
-        <td class="mono muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(JSON.stringify(e.detail ?? ""))}">${esc(JSON.stringify(e.detail ?? "").slice(0, 140))}</td>
-      </tr>`).join("")}</tbody></table></div>`
-      : emptyState("📜", "No audit entries", "Actions are recorded here as they happen.")}
+        <td class="mono muted small" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(JSON.stringify(e.detail ?? ""))}">${esc(JSON.stringify(e.detail ?? "").slice(0, 140))}</td>
+      </tr>`).join("")}</tbody></table></div></div>`
+      : emptyState("No audit entries", "Actions are recorded here as they happen.")}
     <p class="note">Source: GET /api/audit.</p>`;
 
-  const deb = debounce((v) => { auditView.q = v; vAudit(view); }, 280);
+  const deb = debounce((v) => { auditView.q = v; vAudit(view, query); }, 280);
   $("#auQ").addEventListener("input", (e) => deb(e.target.value));
-  $("#auFail").onchange = (e) => { auditView.onlyFail = e.target.checked; vAudit(view); };
+  $("#auFail").onchange = (e) => { auditView.onlyFail = e.target.checked; vAudit(view, query); };
 }
 
 /* ============================== Settings ============================== */
-async function vSettings(view) {
+async function vSettings(view, query) {
+  const tab = query.tab || "general";
   const sys = cache.sysHealth;
   view.innerHTML = `
-    <div class="grid cards-2">
-      <div class="panel"><h3>API access</h3>
-        <label class="fld">Bearer token (stored in this browser's localStorage)
+    <div class="tabs">
+      ${[["general", "General"], ["groups", "Clients & Templates"], ["backups", "Backups"], ["extensions", "Extensions"]].map(([t, label]) =>
+        `<button class="tab ${t === tab ? "active" : ""}" data-stab="${t}">${label}</button>`).join("")}
+    </div>
+    <div id="setBody"></div>`;
+  $$("[data-stab]", view).forEach((b) => b.onclick = () => { location.hash = `#/settings?tab=${b.dataset.stab}`; });
+  const body = $("#setBody");
+  if (tab === "general") setGeneral(body, sys);
+  else if (tab === "groups") await setGroups(body);
+  else if (tab === "backups") await setBackups(body);
+  else await setExtensions(body);
+}
+
+function setGeneral(body, sys) {
+  body.innerHTML = `
+    <div class="form-grid">
+      <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">API access</h3>
+        <label class="field"><span class="field-label">Bearer token (stored in this browser's localStorage)</span>
           <input type="password" id="sToken" value="${esc(apiToken)}" autocomplete="off"></label>
-        <div class="inline-actions" style="margin-top:12px">
+        <div class="btn-row" style="margin-top:12px">
           <button class="btn btn-primary" id="sSave">Save token</button>
           <button class="btn" id="sClear">Clear</button>
         </div>
         <p class="note">The backend only enforces a token when <span class="mono">MULTIPROFILE_API_TOKEN</span> is set server-side.
         If unset, all endpoints are open and no token is needed.</p>
-      </div>
-      <div class="panel"><h3>Maintenance</h3>
-        <div class="inline-actions">
-          <button class="btn" id="sReap">🧹 Reap orphaned browsers</button>
+      </div></div>
+      <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Maintenance</h3>
+        <div class="btn-row">
+          <button class="btn" id="sReap">Reap orphaned browsers</button>
           <button class="btn" id="sUpd">Check update status</button>
         </div>
         <div id="sOut" style="margin-top:12px"></div>
-      </div>
+      </div></div>
     </div>
-    <div class="panel"><h3>Backend health (GET /api/health)</h3>
-      <div class="code-block">${sys ? esc(JSON.stringify(sys, null, 2)) : "unavailable"}</div>
-    </div>`;
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Backend health (GET /api/health)</h3>
+      <pre class="mono small" style="white-space:pre-wrap">${sys ? esc(JSON.stringify(sys, null, 2)) : "unavailable"}</pre>
+    </div></div>`;
 
   $("#sSave").onclick = () => {
     apiToken = $("#sToken").value.trim();
@@ -2185,12 +2265,227 @@ async function vSettings(view) {
   $("#sClear").onclick = () => { apiToken = ""; localStorage.removeItem(TOKEN_KEY); $("#sToken").value = ""; toast("Token cleared"); };
   $("#sReap").onclick = async () => {
     const r = await apiPost("/api/maintenance/reap", {});
-    $("#sOut").innerHTML = `<p class="note">${r.ok ? `Reaped ${r.data && r.data.count != null ? r.data.count : "?"} orphan(s).` : "Reap failed: " + esc((r.data && r.data.error) || r.error || "?")}</p>`;
+    $("#sOut").innerHTML = `<p class="note">${r.ok ? `Reaped ${r.data && r.data.count != null ? r.data.count : "?"} orphan(s).` : "Reap failed: " + apiErr(r)}</p>`;
   };
   $("#sUpd").onclick = async () => {
     const r = await apiGet("/api/update/status");
     $("#sOut").innerHTML = `<p class="note">Update status: <span class="mono">${esc(r.ok ? JSON.stringify(r.data) : "unavailable (" + r.status + ")")}</span></p>`;
   };
+}
+
+async function setGroups(body) {
+  const [clients, templates] = await Promise.all([loadClients(true), loadTemplates(true)]);
+  const crud = (kind, items, fields) => `
+    <div class="toolbar"><div class="spacer"></div>
+      <button class="btn btn-sm btn-primary" data-add="${kind}">Add ${kind === "clients" ? "client" : "template"}</button></div>
+    ${items.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
+      <th>Name</th>${fields.map((f) => `<th>${esc(f[1])}</th>`).join("")}<th>ID</th><th></th></tr></thead><tbody>
+      ${items.map((it) => `<tr><td><strong>${esc(it.name || it.id)}</strong></td>
+        ${fields.map(([k]) => `<td class="muted">${esc(it[k] ?? "—")}</td>`).join("")}
+        <td class="mono muted">${esc(it.id)}</td>
+        <td><div class="row-actions">
+          <button class="btn btn-xs" data-edit="${kind}:${esc(it.id)}">Edit</button>
+          <button class="btn btn-xs btn-danger" data-del="${kind}:${esc(it.id)}">Delete</button>
+        </div></td></tr>`).join("")}</tbody></table></div></div>`
+      : emptyState(`No ${kind}`, `No ${kind} defined yet.`) }`;
+
+  body.innerHTML = `
+    <h3 class="section-title">Clients</h3>
+    <div id="grpClients">${crud("clients", clients, [["description", "Description"]])}</div>
+    <h3 class="section-title">Templates</h3>
+    <div id="grpTemplates">${crud("templates", templates, [["description", "Description"]])}</div>
+    <p class="note">Groups are organized through clients and templates — the backend exposes these via
+    <span class="mono">/api/clients</span> and <span class="mono">/api/templates</span>. Profiles reference a client via <span class="mono">clientId</span>.</p>`;
+
+  const ep = (kind) => `/api/${kind}`;
+  $$("[data-add]", body).forEach((b) => b.onclick = () => openGroupEdit(b.dataset.add, null));
+  $$("[data-edit]", body).forEach((b) => b.onclick = () => {
+    const [kind, id] = b.dataset.edit.split(/:(.+)/);
+    const list = kind === "clients" ? clients : templates;
+    openGroupEdit(kind, list.find((x) => x.id === id));
+  });
+  $$("[data-del]", body).forEach((b) => b.onclick = async () => {
+    const [kind, id] = b.dataset.del.split(/:(.+)/);
+    if (!confirm(`Delete this ${kind.slice(0, -1)}?`)) return;
+    const r = await apiDel(`${ep(kind)}/${encodeURIComponent(id)}`);
+    toast(r.ok ? "Deleted" : "Delete failed", r.ok ? "ok" : "err");
+    if (r.ok) { invalidate(kind); route(); }
+  });
+
+  function openGroupEdit(kind, item) {
+    const isNew = !item;
+    openModal((isNew ? "Add " : "Edit ") + kind.slice(0, -1), `
+      <div class="form-grid">
+        <label class="field"><span class="field-label">Name *</span><input type="text" id="gName" value="${esc((item && item.name) || "")}"></label>
+        <label class="field"><span class="field-label">Description</span><input type="text" id="gDesc" value="${esc((item && item.description) || "")}"></label>
+      </div>`,
+      `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSave">Save</button>`);
+    $("#mCancel").onclick = closeModal;
+    $("#mSave").onclick = async () => {
+      const name = $("#gName").value.trim();
+      if (!name) { toast("Name is required", "err"); return; }
+      const payload = { name, description: $("#gDesc").value.trim() };
+      const r = isNew ? await apiPost(ep(kind), payload)
+        : await apiPut(`${ep(kind)}/${encodeURIComponent(item.id)}`, payload);
+      closeModal();
+      toast(r.ok ? "Saved" : "Save failed", r.ok ? "ok" : "err");
+      if (r.ok) { invalidate(kind); route(); }
+    };
+  }
+}
+
+async function setBackups(body) {
+  const r = await apiGet("/api/backups");
+  const backups = (r.ok && r.data && Array.isArray(r.data.backups)) ? r.data.backups : [];
+  body.innerHTML = `
+    ${backups.length ? `<div class="table-card"><div class="table-scroll"><table class="grid"><thead><tr>
+      <th>Backup</th><th>Profile</th><th>Created</th><th>Size</th><th></th></tr></thead><tbody>
+      ${backups.map((b) => {
+        const id = b.id || b.backupId || b.path || b.backupPath;
+        return `<tr>
+          <td class="mono">${esc(b.name || id || "backup")}</td>
+          <td>${val(b.profileId || b.profile_id)}</td>
+          <td class="muted">${esc(b.createdAt || b.created_at || b.ts || "—")}</td>
+          <td class="num">${b.size != null ? esc(b.size) : "—"}</td>
+          <td><button class="btn btn-xs" data-restore="${esc(id || "")}" ${id ? "" : "disabled"}>Restore</button></td>
+        </tr>`;
+      }).join("")}</tbody></table></div></div>`
+      : emptyState("No backups", "Backups appear here after using Backup on a profile.")}
+    <p class="note">Source: GET /api/backups. Restore uses POST /api/backups/restore with backupId/backupPath + optional profileId + passphrase. Passphrases are consumed by the endpoint and never logged.</p>`;
+
+  $$("[data-restore]", body).forEach((b) => b.onclick = () => {
+    openModal("Restore backup", `
+      <label class="field"><span class="field-label">Target profile ID (optional — defaults to the backup's profile)</span>
+        <input type="text" id="rsPid" placeholder="profile_…"></label>
+      <label class="field"><span class="field-label">Passphrase (if encrypted)</span><input type="password" id="rsPass" autocomplete="off"></label>
+      <p class="note">The passphrase is sent once to the restore endpoint and is never stored or logged by the UI.</p>`,
+      `<button class="btn" id="mCancel">Cancel</button><button class="btn btn-primary" id="mGo">Restore</button>`);
+    $("#mCancel").onclick = closeModal;
+    $("#mGo").onclick = async () => {
+      const payload = { backupId: b.dataset.restore, profileId: $("#rsPid").value.trim() || undefined };
+      const pass = $("#rsPass").value;
+      if (pass) payload.passphrase = pass;
+      $("#rsPass").value = "";
+      const rr = await apiPost("/api/backups/restore", payload);
+      closeModal();
+      toast(rr.ok && rr.data && rr.data.ok ? "Restore completed" : "Restore failed: " + apiErr(rr), rr.ok ? "ok" : "err");
+    };
+  });
+}
+
+async function setExtensions(body) {
+  const sys = cache.sysHealth || (await apiGet("/api/health")).data;
+  const extOk = sys && sys.extension_ok;
+  body.innerHTML = `
+    <div class="card"><div class="card-body"><h3 class="section-title" style="margin-top:0">Bundled extension</h3>${kvRows([
+      ["Manifest present", extOk ? badge("yes", "green") : badge("no", "amber")],
+      ["Note", `<span class="muted">The backend ships one bundled extension used for fingerprint/CDP injection. It is loaded automatically when profiles launch.</span>`],
+    ])}
+    <p class="note">Source: GET /api/health → extension_ok.</p></div></div>
+    ${emptyState("No extension management API",
+      "The current backend does not expose per-profile extension install/uninstall endpoints, so there is nothing to list or manage here.")}`;
+}
+
+/* ============================== Live updates ==============================
+ * Chain: WebSocket /ws/events → SSE /api/events/stream → poll every 15s.
+ * Everything degrades gracefully; failures never break the console. */
+const live = { mode: "idle", ws: null, es: null, pollTimer: null, started: false };
+
+function handleEvent(ev) {
+  if (!ev || typeof ev !== "object") return;
+  const type = String(ev.type || ev.event || "");
+  if (type === "profile.status" || type === "profile_status") {
+    const id = ev.profile_id || ev.profileId || ev.id;
+    const status = ev.status || ev.state;
+    if (id && status) patchProfileRow(id, { status });
+    if (currentRoute && currentRoute.page === "dashboard") { /* dashboard refreshes on next visit */ }
+  } else if (type === "job.progress" || type === "job_progress" || type === "job.status") {
+    const job = { id: ev.job_id || ev.jobId || ev.id, status: ev.status, progress: ev.progress };
+    if (job.id) patchJobRow(job);
+  } else if (type === "profiles.changed" || type === "profiles_changed") {
+    invalidate("profiles");
+    if (currentRoute && currentRoute.page === "profiles") refreshProfilesTable(true);
+  } else if (type === "jobs.changed" || type === "jobs_changed") {
+    invalidate("jobs"); jobsView.cache = [];
+    if (currentRoute && currentRoute.page === "jobs") loadJobsPage();
+  }
+}
+
+function startPolling() {
+  if (live.pollTimer) return;
+  live.mode = "poll";
+  const tick = async () => {
+    try {
+      refreshHealthPill();
+      if (currentRoute && currentRoute.page === "profiles" && pv.initialized) {
+        const r = await apiGet("/api/profiles?" + new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(pv.offset) }).toString());
+        if (r.ok && r.data) {
+          const items = Array.isArray(r.data) ? r.data : (r.data.items || []);
+          items.forEach((p) => patchProfileRow(p.id, p));
+        }
+      }
+    } catch (e) { /* poll failures are silent */ }
+  };
+  tick();
+  live.pollTimer = setInterval(tick, 15000);
+}
+
+function startSSE() {
+  try {
+    const es = new EventSource("/api/events/stream");
+    live.es = es;
+    live.mode = "sse";
+    es.onmessage = (m) => {
+      try { handleEvent(JSON.parse(m.data)); } catch (e) { /* ignore malformed */ }
+    };
+    es.onerror = () => {
+      try { es.close(); } catch (e) {}
+      live.es = null;
+      startPolling();
+    };
+  } catch (e) {
+    startPolling();
+  }
+}
+
+function startLive() {
+  if (live.started) return;
+  live.started = true;
+  let ws;
+  try {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(proto + "//" + location.host + "/ws/events");
+  } catch (e) {
+    startSSE();
+    return;
+  }
+  live.ws = ws;
+  live.mode = "ws";
+  let opened = false;
+  const fallback = () => {
+    if (opened) return;
+    opened = true;
+    try { ws.close(); } catch (e) {}
+    live.ws = null;
+    startSSE();
+  };
+  ws.onopen = () => { opened = true; };
+  ws.onmessage = (m) => {
+    try { handleEvent(JSON.parse(m.data)); } catch (e) { /* ignore malformed */ }
+  };
+  ws.onerror = fallback;
+  ws.onclose = () => {
+    if (!opened) { startSSE(); return; }
+    /* Reconnect once; if that fails, fall back down the chain */
+    live.ws = null;
+    setTimeout(() => {
+      if (live.mode !== "ws") return;
+      live.started = false;
+      startLive();
+    }, 10000);
+  };
+  /* If the socket never opens, move on to SSE after 5s */
+  setTimeout(() => { if (!opened && live.mode === "ws") fallback(); }, 5000);
 }
 
 /* ============================== Global search ============================== */
@@ -2199,14 +2494,19 @@ function initSearch() {
   const run = debounce(async () => {
     const q = input.value.trim().toLowerCase();
     if (q.length < 2) { box.hidden = true; return; }
-    const profiles = await loadProfiles();
+    const profiles = await loadAllProfiles();
     const hits = profiles.filter((p) =>
       [p.name, p.id, (p.tags || []).join(" ")].filter(Boolean).join(" ").toLowerCase().includes(q)).slice(0, 8);
     if (!hits.length) { box.innerHTML = `<div style="padding:10px 12px" class="muted">No matches</div>`; box.hidden = false; return; }
     box.innerHTML = hits.map((p) =>
-      `<a href="#/profile/${esc(p.id)}">${isRunning(p) ? "🟢" : "⚪"} <strong>${esc(p.name || p.id)}</strong>
-       <span class="muted mono" style="font-size:11px">${shortId(p.id)}</span></a>`).join("");
+      `<div class="search-result" data-sid="${esc(p.id)}">${runDot(p)}
+       <span><strong>${esc(p.name || p.id)}</strong></span>
+       <span class="sub mono">${shortId(p.id)}</span></div>`).join("");
     box.hidden = false;
+    $$("[data-sid]", box).forEach((el) => el.onclick = () => {
+      location.hash = "#/profile/" + encodeURIComponent(el.dataset.sid);
+      box.hidden = true; input.value = "";
+    });
   }, 220);
   input.addEventListener("input", run);
   input.addEventListener("blur", () => setTimeout(() => { box.hidden = true; }, 200));
@@ -2225,12 +2525,12 @@ function init() {
   renderNav("dashboard");
   $("#btnNewProfile").onclick = openWizard;
   $("#btnRefresh").onclick = () => {
-    invalidate("profiles", "health", "jobs", "gateways", "backups", "audit", "clients", "templates");
+    invalidate("profiles", "healthMap", "jobs", "gateways", "clients", "templates", "devices");
     cache.fp = {}; cache.netHealth = {};
     route();
   };
-  $("#btnAuth").onclick = () => { authFailed = true; renderLogin(); };
-  $("#navToggle").onclick = () => $("#sidebar").classList.toggle("open");
+  $("#navCollapse").onclick = () => toggleSidebar(true);
+  $("#navExpand").onclick = () => toggleSidebar(false);
   $("#modalClose").onclick = closeModal;
   $("#modalBackdrop").addEventListener("click", (e) => { if (e.target.id === "modalBackdrop") closeModal(); });
   $("#drawerClose").onclick = closeDrawer;
@@ -2239,10 +2539,17 @@ function init() {
     if (e.key === "Escape") { closeModal(); closeDrawer(); }
   });
   window.addEventListener("hashchange", route);
+  initAuth();
   initSearch();
   refreshHealthPill();
   setInterval(refreshHealthPill, 30000);
+  try {
+    if (localStorage.getItem("mp_nav_collapsed") === "1") toggleSidebar(true);
+  } catch (e) {}
   if (!location.hash) location.hash = "#/dashboard";
+  hideLoginGate();
+  $("#app").hidden = false;
   route();
+  startLive();
 }
 document.addEventListener("DOMContentLoaded", init);

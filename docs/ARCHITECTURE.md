@@ -1,6 +1,6 @@
 # Multiprofile Linux — Architecture Specification
 
-Version: 1.6.0  
+Version: 1.7.0  
 Status: Production Grade Linux-Native Multi-Profile Browser Platform  
 
 ---
@@ -36,26 +36,34 @@ Multiprofile Linux is an enterprise-grade, clean-room, native Linux platform for
         |                                       |
         v                                       v
 +------------------------+           +----------------------------------+
-|  Job Queue & Executor  |           | Storage & Persistence Layer      |
-|  - In-process deque    |           | - ~/.local/share/multiprofile/   |
-|  - Concurrency Gate    |           |   ├── profiles.json (RLock)      |
-|    (Semaphore)         |           |   ├── gateways.json (chmod 0600) |
-|  - Slot & Window Tile  |           |   ├── clients.json               |
-|    Assignment          |           |   ├── templates.json             |
-+------------------------+           |   ├── cookies/<id>.json          |
-        |                            |   ├── backups/<id>/              |
-        v                            |   └── chrome-profiles/<id>/      |
-+------------------------------------+   - ~/.cache/multiprofile/       |
-| Browser Launcher & Lifecycle       |     └── runtime.json             |
-| 1. NetworkConfig resolution        +----------------------------------+
-| 2. ProxyHealthManager pre-check                                        
-|    (Fail-closed BLOCK)                                                 
-| 3. Hardware GPU probe (/dev/dri)                                       
-| 4. Sandbox args & Ozone X11 flags                                      
-| 5. Extension prep (inline config + proxy.json auth)                    
-| 6. Chromium process spawn (CDP on 127.0.0.1:<port>)                   
-| 7. CDP Identity Alignment (setUserAgentOverride / Client Hints)        
-| 8. Window Tiling (CDP setWindowBounds)                                 
+|  Control Plane         |           | Storage & Persistence Layer      |
+|  - SQLite WAL control  |           | - ~/.local/share/multiprofile/   |
+|    DB (recover-first)  |           |   ├── profiles.json (RLock)      |
+|  - Durable job queue   |           |   ├── gateways.json (chmod 0600) |
+|    (survives restart)  |           |   ├── clients.json               |
+|  - Worker pool +       |           |   ├── templates.json             |
+|    bounded launches    |           |   ├── cookies/<id>.json          |
+|  - Profile state       |           |   ├── backups/<id>/              |
+|    machine (validated) |           |   ├── chrome-profiles/<id>/      |
+|  - Browser supervisor  |           |   └── control.db (SQLite WAL:    |
+|    (crash watchdog)    |           |       profiles_runtime + jobs)   |
+|  - Idle parking,       |           | - ~/.cache/multiprofile/         |
+|    /proc metrics,      |           |     └── runtime.json             |
+|    audit JSONL         |           +----------------------------------+
++------------------------+
+        |
+        v
++------------------------------------------------------------------------+
+| Browser Launcher & Lifecycle (data plane, driven by the control plane)  |
+| 1. NetworkConfig resolution                                            |
+| 2. ProxyHealthManager pre-check (Fail-closed BLOCK)                     |
+| 3. Hardware GPU probe (/dev/dri)                                        |
+| 4. Sandbox args & Ozone X11 flags                                       |
+| 5. Extension prep (inline config + proxy.json auth)                     |
+| 6. Chromium process spawn (CDP on 127.0.0.1:<port>)                     |
+| 7. CDP Identity Alignment (setUserAgentOverride / Client Hints)         |
+| 8. Window Tiling (CDP setWindowBounds)                                 |
+| 9. Supervisor watches the PID; on crash -> bounded restart + re-tile    |
 +------------------------------------------------------------------------+
 ```
 
@@ -122,3 +130,120 @@ Multiprofile Linux is an enterprise-grade, clean-room, native Linux platform for
 - **Pure Math Calculation**: `GridCalculator` partitions the detected work area without margins or gaps when configured for edge-to-edge layout.
 - **X11 / Wayland Bridge**: Forces `--ozone-platform=x11` so Chromium's native window handles honor CDP `Browser.setWindowBounds` across Linux compositors.
 - **Idempotence**: Re-computing grid plans for $N$ profiles yields invariant geometry without coordinate drift or overlapping windows.
+
+### 3.9 Control Plane: Durable Jobs, State Machine, Supervisor (v1.7.0)
+
+**Control plane vs data plane.** The control plane is everything that decides
+*what should be running* (SQLite WAL control DB, durable job queue, worker
+pool, state machine, supervisor, parking). The data plane is the actual
+Chromium processes plus the launcher that spawns them. The control plane
+never assumes the data plane agrees with it — every supervisor pass
+reconciles observed PIDs against recorded state.
+
+- **Control DB** (`storage/db.py`): SQLite in WAL mode,
+  `~/.local/share/multiprofile/control.db` (override:
+  `MULTIPROFILE_CONTROL_DB`). Tables: `profiles_runtime` (state, pid,
+  cdp_port, heartbeat) and `jobs` (type, status, attempts, payload).
+- **`recover()`** (`storage/db.py`): runs FIRST at every boot, before any
+  worker starts. Jobs stuck `running` are re-queued with `attempts + 1`
+  (exhausted ones → `failed`, so poison jobs can't spin forever). Profiles
+  stuck in transitional states (`starting`/`stopping`) can no longer be
+  observed — their browser state is unknown — so they move to `error` with
+  an audit note. An explicit restart/recover action is required to leave
+  `error`.
+- **Durable queue + workers** (`jobs/queue.py`, `jobs/workers.py`,
+  `jobs/handlers.py`): `enqueue()` persists a job; a `ThreadPoolExecutor`
+  pool claims jobs (`running`) and dispatches by type (`launch`, `stop`,
+  `restart`, `park`, `health_check`, `consistency_check`) with a bounded
+  launch semaphore. The legacy in-process queue is preserved unchanged at
+  `jobs/legacy.py` with the same import surface.
+- **State machine** (`storage/state.py`): `stopped → starting → running →
+  stopping → stopped`, plus `idle`, `parked`, `error`. Every transition is
+  validated (`validate_transition`); invalid ones raise instead of silently
+  corrupting state. Every transition writes an audit note.
+- **Supervisor** (`browser/supervisor.py`): crash watchdog thread. Each
+  `interval_s` (default 10s) it checks every `running` profile's PID. On
+  death: audit `supervisor_browser_died` → state `error` → bounded restart
+  (max 3 attempts, exponential backoff) via the launcher → on success state
+  `running` + full grid re-tile via CDP (`tile_running()`). On exhaustion
+  the profile stays `error` with the reason recorded — the supervisor never
+  spins forever. See `docs/SUPERVISOR.md`.
+- **Startup wiring** (`api/server.py::create_app`): `recover()` →
+  `start_workers()` → `start_supervisor()` (the last guarded by
+  `supervisor_enabled` config). All three are fail-safe: the app boots even
+  if the control DB can't open (degrades with a warning, no durable jobs),
+  and a broken supervisor module can never take down the API. Tests set
+  `MULTIPROFILE_NO_BACKGROUND=1` to keep daemon threads out of pytest.
+
+### 3.10 Idle Parking, Metrics & Audit (v1.7.0)
+
+- **Idle parking** (`parking.py`, config `[parking]`): profiles idle longer
+  than `parking_idle_timeout_s` (default 1800s) may be parked — graceful
+  stop, profile data kept, state `parked`. A running non-park job blocks
+  parking; the in-flight `park` job itself doesn't self-block.
+- **Health staggering** (config `[health]`): health checks are jittered and
+  bounded (`health_max_concurrent`, default 4) so N profiles don't fire at
+  once. See `docs/SCALING.md`.
+- **Metrics** (`metrics.py`, config `[metrics]`, `api/metrics_routes.py`):
+  point-in-time CPU/mem sampling from `/proc` (no new dependencies);
+  samples cached at most 5s (`metrics_cache_ttl_s`). `GET
+  /api/metrics/summary` returns per-running-profile samples plus process
+  totals. Honest by construction: `PARTIAL` is reported when a PID is gone,
+  never fabricated.
+- **Audit + JSONL log** (`profile_log.py`): append-only JSONL profile log and
+  an audit trail (`supervisor_browser_died`, `job_finished`,
+  `profile_state_recovered`, …) surfaced in the console's Jobs/Audit views.
+
+### 3.11 API Hardening (v1.7.0)
+
+- **Pagination** (`api/pagination.py`): cursor-based keyset pagination on
+  list endpoints. Response: `{"items", "next_cursor", "limit", "total"}`.
+  Cursors are opaque base64url of `(sort_key, id)`; malformed cursors are
+  rejected with 400 `invalid_input`.
+- **Validation** (`api/validation.py`): invalid input is rejected with
+  `400 {"error": {"code": "invalid_input", ...}}` instead of tracebacks or
+  silent coercion.
+- **Auth** (`api/auth.py`): localhost (`127.0.0.1`/`::1`) stays frictionless
+  by deliberate tradeoff; remote (non-localhost) requests require a bearer
+  token (`MULTIPROFILE_API_TOKEN` or token file). With no token configured,
+  remote `/api/*` requests are rejected. The module docstring carries the
+  honest assessment of what this does and doesn't protect against.
+- **Live events** (`api/event_bus.py`, `api/events.py`, `api/sse.py`):
+  in-process pub/sub bus emitting `profile.status` and `job.progress`;
+  `GET /api/events/stream` re-emits them as Server-Sent Events
+  (`text/event-stream`, `: ping` keep-alive, optional `max_events=N` for
+  finite reads/tests). The console uses SSE with a polling fallback.
+  **Not done:** multi-process event broadcast — the bus is per-process;
+  see §5.
+
+### 3.12 Network Namespaces — pointer (v1.7.0)
+
+- `gateway/netns.py` is an **EXPERIMENTAL / NOT ACTIVE** scaffold for Linux
+  network namespaces (default off, no launcher wiring). Roadmap, risks, and
+  the activation checklist live in `docs/NETNS_ROADMAP.md`. Manual proxy
+  routing via `custom` remains the production path.
+
+## 4. Console (v1.7.0 restyle)
+
+Vanilla JS SPA (`src/static/`): sidebar navigation, dense profile table with
+cursor pagination, creation wizard, device library, Jobs and Audit views,
+SSE live updates with polling fallback. The Export button downloads the
+currently listed profiles as JSON with proxy passwords stripped.
+
+## 5. Known Limitations (honest)
+
+- **Multi-process event broadcast is NOT implemented.** The event bus is
+  in-process; two API server processes do not share events. A deployment
+  needing this must add a broker (Redis pub/sub) — the SSE envelope is
+  already broker-agnostic.
+- **Gateway providers (Azure, WireGuard) remain SCAFFOLD / NOT ACTIVE.**
+  `provision()` returns `not_implemented`. Netns is experimental and off.
+- **Single-host SQLite control plane.** WAL mode handles the app's own
+  concurrency, but it is not a multi-host store. See `docs/SCALING.md` for
+  the 100/500-profile guidance and when to add gateway hosts.
+- **Auth is localhost-trust.** Behind a reverse proxy everything looks
+  remote; deployments must terminate TLS and forward correctly. See
+  `api/auth.py`.
+- **No anti-bot evasion.** The platform does not attempt to be
+  "undetectable"; device presets declare what a Linux Chromium host cannot
+  reproduce.

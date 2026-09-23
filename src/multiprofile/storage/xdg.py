@@ -43,6 +43,13 @@ def runtime_state_path() -> Path:
 def github_accounts_path() -> Path:
     return data_dir() / "github-accounts.json"
 
+
+def control_db_path() -> Path:
+    """SQLite control-plane truth store (profiles_runtime, jobs)."""
+    p = data_dir() / "control.db"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
 def chrome_profile_dir(profile_id: str) -> Path:
     p = data_dir() / "chrome-profiles" / profile_id
     p.mkdir(parents=True, exist_ok=True)

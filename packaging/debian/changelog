@@ -1,3 +1,23 @@
+multiprofile-native (1.7.0) unstable; urgency=medium
+
+  * Browser supervisor: crash watchdog with PID checks, bounded restart
+    (max 3, backoff) and full CDP grid re-tile; exhaustion stays in error.
+  * Durable job queue: SQLite WAL-backed jobs survive restarts; recover()
+    re-queues orphaned jobs and marks stuck profiles error at boot.
+  * Profile state machine: stopped/starting/running/stopping/idle/parked/
+    error with validated transitions and audit notes.
+  * Idle parking: park idle profiles (graceful stop, data kept); /proc CPU/mem
+    metrics; JSONL profile log + audit trail; /api/metrics/summary.
+  * API hardening: cursor pagination, validation errors as 400 invalid_input,
+    bearer-token auth for remote requests (localhost exempt), SSE event stream
+    at /api/events/stream.
+  * Console restyle: sidebar, dense table, wizard, device library, jobs/audit
+    views, SSE with poll fallback.
+  * Netns: experimental Linux network-namespace support scaffold (NOT ACTIVE,
+    default off).
+
+ -- Multiprofile Native Maintainers <maintainers@localhost>  Wed, 23 Sep 2026 08:35:00 +0000
+
 multiprofile-native (1.6.0) unstable; urgency=medium
 
   * Device presets: 33 coherent device identities (Android, iOS-class, iPadOS-class,

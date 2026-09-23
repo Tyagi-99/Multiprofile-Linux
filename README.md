@@ -1,10 +1,10 @@
 # Multiprofile Linux
 
-[![Version](https://img.shields.io/badge/version-1.6.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Ubuntu-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)]()
-[![Tests](https://img.shields.io/badge/tests-202%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-835%20passed-brightgreen.svg)](tests/)
 
 A robust, enterprise-grade, clean-room native Linux platform for managing isolated browser profiles. Designed for software verification, testing laboratories, automation engineers, and multi-tenant environments requiring real per-profile network isolation, storage segregation, and deterministic hardware identities.
 
@@ -12,7 +12,15 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 
 ---
 
-## Key Capabilities (v1.6.0)
+## Key Capabilities (v1.7.0)
+
+### New in 1.7.0
+- **Browser Supervisor**: crash watchdog with bounded restart (max 3, backoff) and full CDP grid re-tile; exhaustion stays in `error` with a reason.
+- **Durable Jobs**: SQLite WAL-backed queue that survives restarts; `recover()` at every boot re-queues orphaned jobs and marks stuck profiles `error`.
+- **State Machine**: validated profile transitions (`stopped/starting/running/stopping/idle/parked/error`) with audit notes.
+- **Idle Parking & Metrics**: park idle profiles (data kept); `/proc` CPU/mem sampling; JSONL log + audit trail; `GET /api/metrics/summary`.
+- **API Hardening**: cursor pagination, 400 `invalid_input` validation errors, bearer-token auth for remote requests (localhost frictionless), SSE event stream at `/api/events/stream`.
+- **Console Restyle**: sidebar, dense table, wizard, device library, jobs/audit views, SSE with poll fallback.
 
 ### 1. Robust Network Isolation & Fail-Closed Safety
 - **Explicit Route Topology**: Every profile defines its own egress path via `NetworkConfig` (`DIRECT`, `HTTP_PROXY`, `HTTPS_PROXY`, `SOCKS5`, or `REMOTE_GATEWAY`).

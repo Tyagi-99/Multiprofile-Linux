@@ -73,6 +73,23 @@ from ..browser.health import get_profile_health, get_all_health
 
 from ..storage.xdg import chrome_profile_dir, data_dir, profiles_path
 from .user_agents import USER_AGENTS
+# v1.7.0 API hardening (Workstream 3): validation, cursor pagination, auth,
+# live events. WS1 (events bus / jobs table) and WS2 (metrics routes) are
+# wired defensively — the app must boot even if those modules are absent.
+from .auth import register_auth
+from .event_bus import emit_job_progress, emit_profile_status, get_bus
+from .pagination import paginate, parse_limit
+from .sse import register_events_routes
+from .validation import (
+    register_error_handlers,
+    require_json,
+    validate_clone_payload,
+    validate_job_payload,
+    validate_profile_payload,
+    validate_proxy_test_payload,
+    v_str,
+    ValidationError,
+)
 
 log = logging.getLogger("multiprofile.api")
 _reaper_started = False
@@ -138,24 +155,53 @@ def _with_launch_state(profiles: list) -> list:
         out.append(q)
     return out
 
+def _all_filtered_profiles(q=None, client_id=None, status=None, tag=None) -> list:
+    """Collect every profile matching the filters (filter_profiles caps its
+    own page at 500, so walk it until a short page)."""
+    out: list = []
+    offset = 0
+    while True:
+        result = filter_profiles(
+            q=q, client_id=client_id, status=status, tag=tag, limit=500, offset=offset
+        )
+        batch = result["items"] if isinstance(result, dict) else result
+        out.extend(batch)
+        if len(batch) < 500:
+            break
+        offset += 500
+    return out
+
+
+def _read_all_audit() -> list:
+    """Read the full audit log for keyset pagination (newest-unbounded)."""
+    try:
+        return read_audit(limit=1_000_000)
+    except Exception as e:
+        log.warning("audit read failed: %s", e)
+        return []
+
+
+def _runtime_state_name(profile_id: str) -> str | None:
+    """Best-effort current launch state name for event payloads."""
+    try:
+        rt = get_runtime(profile_id or "")
+    except Exception:
+        return None
+    if not rt:
+        return None
+    state = getattr(rt, "launch_state", None)
+    return getattr(state, "value", state)
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     _start_reaper()
 
-    @app.before_request
-    def _check_api_token():
-        token = os.environ.get("MULTIPROFILE_API_TOKEN") or ""
-        if not token:
-            return None
-        path = request.path or ""
-        if not path.startswith("/api/"):
-            return None
-        if path == "/api/health" and request.method == "GET":
-            return None
-        auth = request.headers.get("Authorization") or ""
-        if auth == f"Bearer {token}":
-            return None
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    # v1.7.0: validation errors -> 400 {"error": {"code": "invalid_input", ...}}
+    register_error_handlers(app)
+    # v1.7.0: non-localhost requests require a bearer token; localhost is
+    # exempt by deliberate tradeoff (see auth.py for the honest assessment).
+    register_auth(app)
 
     @app.get("/api/health")
     def health():
@@ -256,39 +302,29 @@ def create_app() -> Flask:
 
     @app.get("/api/profiles")
     def profiles():
-        if not request.args:
-            return jsonify(_with_launch_state(load_profiles()))
+        # Cursor pagination: ?cursor=<opaque>&limit=N (default 25, max 100,
+        # clamped silently, applied limit echoed back). Filters still apply
+        # before the keyset cut. Sort key is the profile id (unique, so no
+        # keyset bugs on ties).
         q = request.args.get("q")
         client_id = request.args.get("clientId")
         status = request.args.get("status")
         tag = request.args.get("tag")
-        try:
-            limit = int(request.args.get("limit", 50))
-        except ValueError:
-            limit = 50
-        try:
-            offset = int(request.args.get("offset", 0))
-        except ValueError:
-            offset = 0
-        result = filter_profiles(
-                q=q,
-                client_id=client_id,
-                status=status,
-                tag=tag,
-                limit=limit,
-                offset=offset,
-            )
-        if isinstance(result, dict) and "items" in result:
-            result = dict(result)
-            result["items"] = _with_launch_state(result["items"])
-            return jsonify(result)
-        if isinstance(result, list):
-            return jsonify(_with_launch_state(result))
-        return jsonify(result)
+        limit = parse_limit(request.args.get("limit"))
+        filtered = _all_filtered_profiles(q=q, client_id=client_id, status=status, tag=tag)
+        page = paginate(
+            filtered,
+            cursor=request.args.get("cursor"),
+            limit=limit,
+            key_fn=lambda p: (str(p.get("id") or ""), str(p.get("id") or "")),
+        )
+        page["items"] = _with_launch_state(page["items"])
+        return jsonify(page)
 
     @app.post("/api/profiles")
     def profiles_create():
-        payload = request.get_json(force=True, silent=True) or {}
+        payload = require_json()
+        validate_profile_payload(payload, partial=False)
         if "userAgentId" not in payload and "uaId" in payload:
             payload["userAgentId"] = payload["uaId"]
         profile = create_profile(payload)
@@ -298,7 +334,8 @@ def create_app() -> Flask:
 
     @app.put("/api/profiles/<profile_id>")
     def profiles_update(profile_id: str):
-        payload = request.get_json(force=True, silent=True) or {}
+        payload = require_json()
+        validate_profile_payload(payload, partial=True)
         updated = update_profile(profile_id, payload)
         if not updated:
             return jsonify({"error": "not found"}), 404
@@ -324,11 +361,19 @@ def create_app() -> Flask:
         if critical and not force:
             return jsonify({"ok": False, "error": "consistency_blocked", "warnings": critical}), 409
         payload = request.get_json(force=True, silent=True) or {}
+        # INTEGRATION POINT (WS1): best-effort profile.status event from the
+        # route. The browser supervisor should publish the authoritative
+        # transition from the real state machine once it exists.
+        old_state = _runtime_state_name(profile_id)
         result = launch_profile(
             profile_id,
             url=payload.get("url"),
             direct=bool(payload.get("direct", False)),
             cdp=bool(payload.get("cdp", False)),
+        )
+        emit_profile_status(
+            get_bus(), profile_id, old_state,
+            "running" if result.get("ok") else "error",
         )
         audit_log("launch", profile_id=profile_id, ok=bool(result.get("ok")), detail=result.get("error"))
         code = 200 if result.get("ok") else 500
@@ -336,7 +381,11 @@ def create_app() -> Flask:
 
     @app.post("/api/profiles/<profile_id>/stop")
     def profiles_stop(profile_id: str):
+        # INTEGRATION POINT (WS1): best-effort profile.status event from the
+        # route; the supervisor owns the authoritative transition.
+        old_state = _runtime_state_name(profile_id)
         result = stop_profile(profile_id)
+        emit_profile_status(get_bus(), profile_id, old_state, "idle")
         audit_log("stop", profile_id=profile_id, ok=bool(result.get("ok")), detail=result.get("error"))
         return jsonify(result)
 
@@ -368,10 +417,16 @@ def create_app() -> Flask:
 
     @app.post("/api/profiles/from-template")
     def profiles_from_template():
-        payload = request.get_json(force=True, silent=True) or {}
+        payload = require_json()
         tid = payload.get("templateId")
         if not tid:
             return jsonify({"error": "templateId required"}), 400
+        if not isinstance(tid, str):
+            raise ValidationError("templateId", "must be a string")
+        if "name" in payload and payload["name"] is not None:
+            v_str(payload["name"], "name", min_len=1, max_len=120)
+        if "clientId" in payload and payload["clientId"] is not None:
+            v_str(payload["clientId"], "clientId", min_len=1, max_len=128)
         tpl = get_template(tid)
         if not tpl:
             return jsonify({"error": "template not found"}), 404
@@ -443,7 +498,9 @@ def create_app() -> Flask:
 
     @app.post("/api/proxy/test")
     def proxy_test():
-        payload = request.get_json(force=True, silent=True) or {}
+        # Network config door: validate scheme whitelist, port range, timeout
+        # before anything touches the network.
+        payload = validate_proxy_test_payload(require_json())
         custom = payload.get("customProxy") or ""
         if not custom:
             host = payload.get("host") or payload.get("proxyHost")
@@ -509,17 +566,57 @@ def create_app() -> Flask:
             return jsonify({"error": "not found"}), 404
         return jsonify({"ok": True})
 
+    def _list_all_jobs() -> list:
+        """Best-effort full job list; None when the job system is missing."""
+        try:
+            try:
+                return list_jobs(limit=100_000)
+            except TypeError:
+                # Forward-compat: WS1's jobs table may not accept limit=.
+                return list_jobs()
+        except Exception as e:
+            log.warning("job system unavailable: %s", e)
+            return None
+
     @app.get("/api/jobs")
     def jobs_list():
-        try:
-            limit = int(request.args.get("limit", 50))
-        except ValueError:
-            limit = 50
-        return jsonify({"ok": True, "jobs": list_jobs(limit=limit)})
+        all_jobs = _list_all_jobs()
+        if all_jobs is None:
+            return (
+                jsonify(
+                    {
+                        "error": {
+                            "code": "unavailable",
+                            "message": "job system not initialized",
+                        }
+                    }
+                ),
+                503,
+            )
+        limit = parse_limit(request.args.get("limit"))
+        page = paginate(
+            all_jobs,
+            cursor=request.args.get("cursor"),
+            limit=limit,
+            # (createdAt, id): id tie-breaks identical timestamps.
+            key_fn=lambda j: (float(j.get("createdAt") or 0), str(j.get("id") or "")),
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "items": page["items"],
+                "jobs": page["items"],  # legacy key kept for the v1.6.0 UI
+                "next_cursor": page["next_cursor"],
+                "limit": page["limit"],
+                "total": page["total"],
+            }
+        )
 
     @app.post("/api/jobs")
     def jobs_create():
-        payload = request.get_json(force=True, silent=True) or {}
+        # Job enqueue door: type enum, profileIds, flags, url validated here —
+        # nothing invalid may reach the launcher/jobs layer.
+        payload = validate_job_payload(require_json())
         ids = payload.get("profileIds") or []
         if isinstance(ids, str):
             ids = [ids]
@@ -538,11 +635,37 @@ def create_app() -> Flask:
             )
         except ValueError as e:
             return jsonify({"ok": False, "error": str(e)}), 400
+        # INTEGRATION POINT (WS1): best-effort job.progress event from the
+        # route. The job worker should publish authoritative progress events
+        # (queued -> running -> completed/failed) once it exists.
+        emit_job_progress(
+            get_bus(), job.get("id"), job.get("type"),
+            ids[0] if ids else None, "queued", detail=f"{len(ids)} profile(s)",
+        )
         return jsonify({"ok": True, "job": job}), 201
 
     @app.get("/api/jobs/<job_id>")
     def jobs_get(job_id: str):
-        job = get_job(job_id)
+        try:
+            job = get_job(job_id)
+        except Exception as e:
+            log.warning("job lookup unavailable: %s", e)
+            job = None
+            unavailable = True
+        else:
+            unavailable = False
+        if unavailable:
+            return (
+                jsonify(
+                    {
+                        "error": {
+                            "code": "unavailable",
+                            "message": "job system not initialized",
+                        }
+                    }
+                ),
+                503,
+            )
         if not job:
             return jsonify({"error": "not found"}), 404
         return jsonify({"ok": True, "job": job})
@@ -597,11 +720,23 @@ def create_app() -> Flask:
 
     @app.get("/api/audit")
     def audit_list():
-        try:
-            limit = int(request.args.get("limit", 100))
-        except ValueError:
-            limit = 100
-        return jsonify({"ok": True, "items": read_audit(limit=limit)})
+        # Cursor pagination over the full log: ?cursor=&limit= (default 25,
+        # max 100). Sort key is (ts, line index) — index tie-breaks identical
+        # timestamps so entries are never skipped or duplicated.
+        limit = parse_limit(request.args.get("limit"))
+        entries = _read_all_audit()
+        pairs = [
+            ((str(e.get("ts") or ""), f"{i:010d}"), e)
+            for i, e in enumerate(entries)
+        ]
+        page = paginate(
+            pairs,
+            cursor=request.args.get("cursor"),
+            limit=limit,
+            key_fn=lambda pair: pair[0],
+        )
+        page["items"] = [entry for _, entry in page["items"]]
+        return jsonify({"ok": True, **page})
 
     @app.post("/api/maintenance/reap")
     def maintenance_reap():
@@ -713,10 +848,8 @@ def create_app() -> Flask:
     # ------------------------------------------------------------------ #
     @app.post("/api/profiles/<profile_id>/clone")
     def profiles_clone(profile_id: str):
-        payload = request.get_json(force=True, silent=True) or {}
-        mode = payload.get("mode") or "config_only"
-        if mode not in ("config_only", "config_and_cookies", "full_session"):
-            return jsonify({"error": "mode must be config_only|config_and_cookies|full_session"}), 400
+        payload = validate_clone_payload(require_json())
+        mode = payload.get("mode") or "config_only"  # validated above
         cloned = clone_profile(profile_id, mode=mode, name=payload.get("name"))
         if not cloned:
             return jsonify({"error": "not found"}), 404
@@ -851,5 +984,86 @@ def create_app() -> Flask:
         register_network_routes(app)
     except Exception as e:  # pragma: no cover - defensive
         log.warning("network routes not registered: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  v1.7.0 Workstream 3 routes                                          #
+    # ------------------------------------------------------------------ #
+    # Live events (SSE). WS-vs-SSE decision: flask-sock/gevent-websocket are
+    # not installed; SSE needs no new dependencies. Uses WS1's
+    # multiprofile.api.events bus when present (resolved lazily inside the
+    # bus accessor), else an in-process fallback bus.
+    try:
+        register_events_routes(app)
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("events routes not registered: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  Parallel workstream modules (guarded imports)                       #
+    # ------------------------------------------------------------------ #
+    # WS2 metrics routes — absent until Workstream 2 lands; guarded so the
+    # app boots either way.
+    try:
+        from .metrics_routes import register_metrics_routes
+        register_metrics_routes(app)
+    except ImportError:
+        log.info("metrics routes not present (Workstream 2 pending)")
+    except Exception as e:  # pragma: no cover - defensive
+        log.warning("metrics routes not registered: %s", e)
+    # ------------------------------------------------------------------ #
+    #  v1.7.0 startup sequence: control-plane recovery + durable job      #
+    #  workers + browser supervisor. Order matters: recover() FIRST so   #
+    #  workers only pick up jobs left in a sane state. Everything is     #
+    #  guarded: the app must boot even if the control DB cannot open or  #
+    #  the supervisor is disabled.                                       #
+    #                                                                    #
+    #  The test suite sets MULTIPROFILE_NO_BACKGROUND=1 so daemon        #
+    #  threads from create_app() cannot leak into the pytest process;    #
+    #  production deployments leave it unset.                           #
+    # ------------------------------------------------------------------ #
+    _background = os.environ.get("MULTIPROFILE_NO_BACKGROUND", "").strip().lower() not in (
+        "1", "true", "yes",
+    )
+    if not _background:
+        log.info("background services disabled (MULTIPROFILE_NO_BACKGROUND=1)")
+
+    if _background:
+        try:
+            from ..storage import db as _control_db
+
+            recovered = _control_db.recover()
+            log.info(
+                "control DB recovered: %d jobs re-queued, %d failed, %d profiles marked error",
+                recovered.get("recovered_jobs", 0),
+                recovered.get("failed_jobs", 0),
+                len(recovered.get("recovered_profiles", [])),
+            )
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning(
+                "control DB unavailable; continuing without durable jobs: %s", e
+            )
+            _background = False
+
+    if _background:
+        try:
+            from ..jobs import start_workers as _start_workers
+
+            _start_workers()
+            log.info("durable job workers started")
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning("job workers failed to start: %s", e)
+
+        # Browser supervisor (crash watchdog). start() is itself a no-op
+        # when disabled by config; the guard here keeps a broken
+        # supervisor module from ever taking down the API server.
+        try:
+            if get_settings().supervisor_enabled:
+                from ..browser.supervisor import start_supervisor as _start_sup
+
+                _start_sup()
+                log.info("browser supervisor started")
+            else:
+                log.info("browser supervisor disabled by config; skipping")
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning("browser supervisor failed to start; continuing without it: %s", e)
 
     return app

@@ -26,6 +26,8 @@ def xdg_isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    # Keep create_app() daemon threads (job workers, supervisor) out of pytest.
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
 
 
 @pytest.fixture()
@@ -176,9 +178,16 @@ def test_launch_unknown_device_id_records_note_not_traceback(client, monkeypatch
     monkeypatch.setattr(C, "apply_ua_override", lambda port, fp, ua: None)
 
     cr = client.post("/api/profiles", json={
-        "name": "w5-unknown-dev", "deviceId": "no-such-device", "proxyType": "none",
+        "name": "w5-unknown-dev", "proxyType": "none",
     })
+    # NOTE (v1.7.0 API hardening): the API boundary now rejects unknown
+    # device presets with 400 invalid_input, so the profile is seeded
+    # through the storage layer instead. The point under test — launcher
+    # resilience to a stale/unknown deviceId already in stored data —
+    # is unchanged.
+    from multiprofile.storage.profiles import update_profile
     pid = cr.get_json()["profile"]["id"]
+    assert update_profile(pid, {"deviceId": "no-such-device"}) is not None
     try:
         res = L.launch_profile(pid, url="about:blank", direct=True)
         notes = res.get("notes") or []

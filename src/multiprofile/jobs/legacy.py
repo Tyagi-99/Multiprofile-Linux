@@ -8,13 +8,13 @@ import uuid
 from collections import deque
 from typing import Any
 
-from .audit import audit_log
-from .browser import manager as browser_manager
-from .browser.grid import slot_rect_map
-from .browser.layout_manager import get_layout_manager
-from .browser.work_area import WorkAreaError
-from .config import get_settings
-from .storage.profiles import set_runtime
+from ..audit import audit_log
+from ..browser import manager as browser_manager
+from ..browser.grid import slot_rect_map
+from ..browser.layout_manager import get_layout_manager
+from ..browser.work_area import WorkAreaError
+from ..config import get_settings
+from ..storage.profiles import set_runtime
 
 log = logging.getLogger("multiprofile.jobs")
 
@@ -141,7 +141,7 @@ def _worker_loop() -> None:
 
 
 def _run_job(job_id: str) -> None:
-    from .browser.launcher import launch_profile, stop_profile
+    from ..browser.launcher import launch_profile, stop_profile
 
     with _lock:
         job = _jobs.get(job_id)

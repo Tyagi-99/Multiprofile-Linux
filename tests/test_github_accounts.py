@@ -107,6 +107,8 @@ def test_flask_connect_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.delenv("MULTIPROFILE_API_TOKEN", raising=False)
+    # Keep create_app() daemon threads (job workers, supervisor) out of pytest.
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
     from multiprofile.api.server import create_app
 
     fake = _FakeResp({"login": "Tyagi-99", "name": "Tyagi", "avatar_url": "https://avatars.example/u"})

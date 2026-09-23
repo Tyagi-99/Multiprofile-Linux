@@ -1,6 +1,6 @@
 # Multiprofile Linux — Remote Gateways & Cloud Egress
 
-Version: 1.6.0  
+Version: 1.7.0  
 Status: Clean Architecture & Honest Provider Status  
 
 ---
