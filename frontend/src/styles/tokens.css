@@ -1,0 +1,264 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   Multiprofile Linux Console — Design Tokens (Phase 1)
+   --------------------------------------------------------------------------
+   Single source of truth for color, type, spacing, radius, shadow, motion.
+   All components consume these tokens; no page styles its own palette.
+
+   Theming: `data-theme="light|dark"` on <html> (set pre-paint by layout
+   script; persisted as mp_theme, falls back to prefers-color-scheme).
+   Tailwind's `dark:` variant is rewired to that attribute below.
+   ========================================================================== */
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme inline {
+  /* ---- Brand: pine teal (from the Multiprofile mark) ---- */
+  --color-brand-50: var(--mp-brand-50);
+  --color-brand-100: var(--mp-brand-100);
+  --color-brand-200: var(--mp-brand-200);
+  --color-brand-300: var(--mp-brand-300);
+  --color-brand-400: var(--mp-brand-400);
+  --color-brand-500: var(--mp-brand-500);
+  --color-brand-600: var(--mp-brand-600);
+  --color-brand-700: var(--mp-brand-700);
+  --color-brand-800: var(--mp-brand-800);
+  --color-brand-900: var(--mp-brand-900);
+  --color-brand-on: var(--mp-brand-on); /* text/icon on brand fills */
+
+  /* ---- Surfaces (theme-switched below) ---- */
+  --color-surface-0: var(--mp-surface-0);
+  --color-surface-1: var(--mp-surface-1);
+  --color-surface-2: var(--mp-surface-2);
+  --color-surface-3: var(--mp-surface-3);
+  --color-border-subtle: var(--mp-border-subtle);
+  --color-border-strong: var(--mp-border-strong);
+
+  /* ---- Text ---- */
+  --color-ink-1: var(--mp-ink-1);
+  --color-ink-2: var(--mp-ink-2);
+  --color-ink-3: var(--mp-ink-3);
+
+  /* ---- Status: green=healthy/running, amber=warning, red=error,
+         blue=info, gray=inactive. Never restyle per-page. ---- */
+  --color-ok: var(--mp-ok);
+  --color-ok-dim: var(--mp-ok-dim);
+  --color-warn: var(--mp-warn);
+  --color-warn-dim: var(--mp-warn-dim);
+  --color-err: var(--mp-err);
+  --color-err-dim: var(--mp-err-dim);
+  --color-info: var(--mp-info);
+  --color-info-dim: var(--mp-info-dim);
+  --color-idle: var(--mp-idle);
+
+  /* ---- Type ---- */
+  --font-sans: "Geist", "Inter", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* ---- Radius ---- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+
+  /* ---- Shadows: restrained; elevation comes from layering, not glow ---- */
+  --shadow-1: var(--mp-shadow-1);
+  --shadow-2: var(--mp-shadow-2);
+  --shadow-3: var(--mp-shadow-3);
+
+  /* ---- Motion: fast, calm; respects prefers-reduced-motion ---- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-1: 80ms;
+  --dur-2: 140ms;
+  --dur-3: 220ms;
+}
+
+/* ---- Light: warm neutral, white surfaces, subtle gray borders ---- */
+:root,
+:root[data-theme="light"] {
+  --mp-brand-50: #effaf7;
+  --mp-brand-100: #d7f0e9;
+  --mp-brand-200: #b0e0d2;
+  --mp-brand-300: #7cc9b6;
+  --mp-brand-400: #46ac97;
+  --mp-brand-500: #0e7c6b; /* primary */
+  --mp-brand-600: #0c6a5c;
+  --mp-brand-700: #0b564b;
+  --mp-brand-800: #0d453d;
+  --mp-brand-900: #0e3a34;
+  --mp-brand-on: #ffffff; /* on brand-600 fill (light) */
+
+  --mp-surface-0: #f6f7f9; /* app background */
+  --mp-surface-1: #ffffff; /* raised surface */
+  --mp-surface-2: #f0f2f5; /* sunken / inset */
+  --mp-surface-3: #e7eaef; /* hover wash */
+  --mp-border-subtle: #e3e7ec;
+  --mp-border-strong: #cfd6de;
+
+  --mp-ink-1: #161b22; /* primary text */
+  --mp-ink-2: #4b5563; /* secondary */
+  --mp-ink-3: #8a94a1; /* tertiary / metadata */
+
+  --mp-ok: #16803c;
+  --mp-ok-dim: #e3f4e9;
+  --mp-warn: #b45309;
+  --mp-warn-dim: #fdf0dc;
+  --mp-err: #c92a2a;
+  --mp-err-dim: #fbe7e7;
+  --mp-info: #1d5fc2;
+  --mp-info-dim: #e3edfb;
+  --mp-idle: #8a94a1;
+
+  --mp-shadow-1: 0 1px 2px rgb(16 24 40 / 0.06);
+  --mp-shadow-2: 0 4px 12px rgb(16 24 40 / 0.08);
+  --mp-shadow-3: 0 12px 32px rgb(16 24 40 / 0.14);
+
+  color-scheme: light;
+}
+
+/* ---- Dark: deep blue-black, graphite surfaces, high-contrast type ---- */
+:root[data-theme="dark"] {
+  --mp-brand-50: #0e2a26;
+  --mp-brand-100: #123832;
+  --mp-brand-200: #175049;
+  --mp-brand-300: #1f6a5f;
+  --mp-brand-400: #2a8a7d;
+  --mp-brand-500: #35a894; /* primary, lifted for dark */
+  --mp-brand-on: #0b1512; /* on lifted brand fill (dark) */
+  --mp-brand-600: #5bbfae;
+  --mp-brand-700: #86d3c5;
+  --mp-brand-800: #b2e4d9;
+  --mp-brand-900: #dcf3ec;
+
+  --mp-surface-0: #0d1117; /* app background: blue-black */
+  --mp-surface-1: #151b24; /* raised surface: graphite */
+  --mp-surface-2: #1c2330; /* sunken / inset */
+  --mp-surface-3: #242d3d; /* hover wash */
+  --mp-border-subtle: #232c3a;
+  --mp-border-strong: #324052;
+
+  --mp-ink-1: #eef2f7;
+  --mp-ink-2: #a7b2c2;
+  --mp-ink-3: #6b7688;
+
+  --mp-ok: #3fb96f;
+  --mp-ok-dim: #12291c;
+  --mp-warn: #e8a13c;
+  --mp-warn-dim: #2e2210;
+  --mp-err: #ef5f5f;
+  --mp-err-dim: #2e1518;
+  --mp-info: #5b9cf6;
+  --mp-info-dim: #14233c;
+  --mp-idle: #6b7688;
+
+  --mp-shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --mp-shadow-2: 0 4px 12px rgb(0 0 0 / 0.45);
+  --mp-shadow-3: 0 12px 32px rgb(0 0 0 / 0.55);
+
+  color-scheme: dark;
+}
+
+/* ---- Base ---- */
+html {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background: var(--color-surface-0);
+  color: var(--color-ink-1);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* Visible, consistent focus for keyboard users */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* Monospace only for technical values: IPs, hashes, JSON, diagnostics */
+.tnum,
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ---- Tooltip (CSS-only, driven by .mp-tip[data-tip]) ---- */
+.mp-tip {
+  position: relative;
+}
+.mp-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 60;
+  white-space: nowrap;
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 6px 9px;
+  border-radius: var(--radius-md);
+  background: var(--color-ink-1);
+  color: var(--color-surface-0);
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transform: translateY(2px);
+  transition:
+    opacity var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out);
+}
+.mp-tip:hover::after,
+.mp-tip:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+.mp-tip-bottom::after {
+  top: calc(100% + 8px);
+  left: 50%;
+  translate: -50% 0;
+}
+.mp-tip-top::after {
+  bottom: calc(100% + 8px);
+  left: 50%;
+  translate: -50% 0;
+}
+.mp-tip-left::after {
+  right: calc(100% + 8px);
+  top: 50%;
+  translate: 0 -50%;
+}
+.mp-tip-right::after {
+  left: calc(100% + 8px);
+  top: 50%;
+  translate: 0 -50%;
+}
+
+/* ---- Dialog entrance ---- */
+@keyframes mp-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

@@ -13,3 +13,9 @@ uv.lock
 *.db-shm
 *.jsonl
 control.db*
+
+# Next.js frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/*.tsbuildinfo
