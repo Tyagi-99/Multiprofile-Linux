@@ -1,7 +1,9 @@
 from __future__ import annotations
+
 import argparse
-from .logging_setup import setup_logging
+
 from .app import open_ui, run_server, start_background_server
+from .logging_setup import setup_logging
 
 
 def main(argv: list[str] | None = None) -> None:

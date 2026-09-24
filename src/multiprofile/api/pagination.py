@@ -74,7 +74,7 @@ def decode_cursor(value: str | None) -> tuple[Any, Any] | None:
         payload = json.loads(raw.decode("utf-8"))
         return payload["k"], payload["id"]
     except (binascii.Error, ValueError, KeyError, UnicodeDecodeError, TypeError) as e:
-        raise ValidationError("cursor", f"malformed pagination cursor: {e}")
+        raise ValidationError("cursor", f"malformed pagination cursor: {e}") from e
 
 
 def paginate(

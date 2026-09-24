@@ -1,8 +1,6 @@
 """Tests for Worker 3 — ProfileConsistencyEngine. Pure logic: no network, no browser."""
 from __future__ import annotations
 
-import pytest
-
 from multiprofile.consistency import ProfileConsistencyEngine
 from multiprofile.fingerprint import build_fingerprint
 

@@ -19,10 +19,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from ._core import device_preset_for_profile
-
-from . import audio, battery, canvas, client_hints, fonts, hardware, media, navigator, network_info, plugins, screen, touch, webgl
-from ._core import normalize_seed
+from . import (
+    audio,
+    battery,
+    canvas,
+    client_hints,
+    fonts,
+    hardware,
+    media,
+    navigator,
+    network_info,
+    plugins,
+    screen,
+    touch,
+    webgl,
+)
+from ._core import device_preset_for_profile, normalize_seed
 
 _UNKNOWN_NOTE = "profile not running — runtime values require a live CDP session"
 
@@ -41,7 +53,7 @@ def _diff(expected: Any, runtime: Any, path: str = "") -> list[str]:
         if len(expected) != len(runtime):
             diffs.append(f"{path} (list length {len(expected)} != {len(runtime)})")
         else:
-            for i, (e, r) in enumerate(zip(expected, runtime)):
+            for i, (e, r) in enumerate(zip(expected, runtime, strict=False)):
                 diffs.extend(_diff(e, r, f"{path}[{i}]"))
     else:
         if expected != runtime:

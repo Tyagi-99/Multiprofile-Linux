@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 import logging
 import sys
+
 from .storage.xdg import cache_dir
+
 
 def setup_logging(level: str = "INFO") -> logging.Logger:
     log = logging.getLogger("multiprofile")

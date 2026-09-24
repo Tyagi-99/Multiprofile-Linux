@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 import threading
-import uuid
 import urllib.request
+import uuid
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request

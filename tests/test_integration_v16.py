@@ -215,6 +215,7 @@ def test_launch_device_emulation_persists_after_launch_returns(client):
     """
     import json
     import urllib.parse
+
     import websocket
 
     import multiprofile.browser.launcher as L

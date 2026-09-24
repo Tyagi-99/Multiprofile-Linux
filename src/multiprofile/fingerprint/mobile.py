@@ -20,7 +20,7 @@ is a one-liner over ``apply_cdp_plan`` with a CDP ``send`` function.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 

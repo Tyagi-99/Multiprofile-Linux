@@ -17,21 +17,19 @@ from multiprofile import fingerprint as fp_pkg
 from multiprofile.fingerprint import (
     MobileProfileConfig,
     apply_cdp_plan,
-    build_fingerprint,
-    fingerprint_inspector_data,
-    fingerprint_report,
-    normalize_seed,
-)
-from multiprofile.fingerprint import (
     audio,
     battery,
+    build_fingerprint,
     canvas,
     client_hints,
+    fingerprint_inspector_data,
+    fingerprint_report,
     fonts,
     hardware,
     media,
     navigator,
     network_info,
+    normalize_seed,
     plugins,
     screen,
     touch,
@@ -454,7 +452,7 @@ class TestFingerprintReport:
         assert "fingerprint" in r
 
     def test_report_warns_on_ua_platform_mismatch(self):
-        r = fingerprint_report({"id": "p1", "seed": 101, "userAgent": UA_IPHONE})
+        fingerprint_report({"id": "p1", "seed": 101, "userAgent": UA_IPHONE})
         # pool is iPhone so UA/platform agree -> no warnings; force mismatch:
         r2 = fingerprint_report({
             "id": "p1", "seed": 101,

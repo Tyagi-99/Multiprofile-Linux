@@ -4,14 +4,9 @@ Run: pytest tests/test_network.py -v
 """
 from __future__ import annotations
 
-import json
 import socket
 import threading
 import time
-from typing import Any
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,7 +68,7 @@ class TestNetworkConfig:
         assert not nc.needs_proxy_check()
 
     def test_to_dict_round_trip(self):
-        from multiprofile.network import NetworkConfig, NetworkMode, ProxyConfig, DNSPolicy, IPv6Policy
+        from multiprofile.network import DNSPolicy, IPv6Policy, NetworkConfig, NetworkMode, ProxyConfig
         nc = NetworkConfig(
             mode=NetworkMode.HTTP_PROXY,
             proxy=ProxyConfig(scheme="http", host="proxy.example.com", port=8080, username="user"),
@@ -193,8 +188,11 @@ class TestCheckProxyBeforeLaunch:
     def test_block_on_dead_proxy(self):
         """Dead proxy with BLOCK fallback must block launch."""
         from multiprofile.network import (
-            NetworkConfig, NetworkMode, ProxyConfig, ProxyFallback,
-            check_proxy_before_launch
+            NetworkConfig,
+            NetworkMode,
+            ProxyConfig,
+            ProxyFallback,
+            check_proxy_before_launch,
         )
         port = _free_port()  # Nothing listening here
         nc = NetworkConfig(
@@ -212,8 +210,11 @@ class TestCheckProxyBeforeLaunch:
     def test_warn_on_dead_proxy_allows_launch(self):
         """Dead proxy with WARN fallback must allow launch."""
         from multiprofile.network import (
-            NetworkConfig, NetworkMode, ProxyConfig, ProxyFallback,
-            check_proxy_before_launch
+            NetworkConfig,
+            NetworkMode,
+            ProxyConfig,
+            ProxyFallback,
+            check_proxy_before_launch,
         )
         port = _free_port()
         nc = NetworkConfig(
@@ -229,8 +230,11 @@ class TestCheckProxyBeforeLaunch:
     def test_alive_proxy_allows_launch(self):
         """Live proxy must allow launch."""
         from multiprofile.network import (
-            NetworkConfig, NetworkMode, ProxyConfig, ProxyFallback,
-            check_proxy_before_launch
+            NetworkConfig,
+            NetworkMode,
+            ProxyConfig,
+            ProxyFallback,
+            check_proxy_before_launch,
         )
         port = _free_port()
         _start_echo_server("127.0.0.1", port)
@@ -275,13 +279,13 @@ class TestChromeNetworkFlags:
         assert any("socks5://127.0.0.1:1080" in f for f in flags)
 
     def test_ipv6_disabled_flag(self):
-        from multiprofile.network import NetworkConfig, NetworkMode, IPv6Policy, chrome_network_flags
+        from multiprofile.network import IPv6Policy, NetworkConfig, NetworkMode, chrome_network_flags
         nc = NetworkConfig(mode=NetworkMode.DIRECT, ipv6_policy=IPv6Policy.DISABLED)
         flags = chrome_network_flags(nc)
         assert "--disable-ipv6" in flags
 
     def test_ipv6_enabled_no_flag(self):
-        from multiprofile.network import NetworkConfig, NetworkMode, IPv6Policy, chrome_network_flags
+        from multiprofile.network import IPv6Policy, NetworkConfig, NetworkMode, chrome_network_flags
         nc = NetworkConfig(mode=NetworkMode.DIRECT, ipv6_policy=IPv6Policy.ENABLED)
         flags = chrome_network_flags(nc)
         assert "--disable-ipv6" not in flags
@@ -293,7 +297,7 @@ class TestChromeNetworkFlags:
         assert any("disable_non_proxied_udp" in f for f in flags)
 
     def test_dns_proxy_resolved_flag(self):
-        from multiprofile.network import NetworkConfig, NetworkMode, ProxyConfig, DNSPolicy, chrome_network_flags
+        from multiprofile.network import DNSPolicy, NetworkConfig, NetworkMode, ProxyConfig, chrome_network_flags
         nc = NetworkConfig(
             mode=NetworkMode.HTTP_PROXY,
             proxy=ProxyConfig(scheme="http", host="proxy.example.com", port=8080),

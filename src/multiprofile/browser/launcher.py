@@ -23,13 +23,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..audit import audit_log
 from ..api import events
+from ..audit import audit_log
 from ..config import get_settings
 from ..cookies_store import load_cookies
 from ..fingerprint import build_fingerprint, normalize_seed
 from ..network import (
-    NetworkConfig,
     NetworkMode,
     ProxyHealthResult,
     check_proxy_before_launch,
@@ -520,7 +519,8 @@ def launch_profile(
     # ------------------------------------------------------------------
     if direct:
         # Explicit override: user wants DIRECT regardless of profile config
-        from ..network import NetworkConfig as _NC, NetworkMode as _NM
+        from ..network import NetworkConfig as _NC
+        from ..network import NetworkMode as _NM
         net = _NC(mode=_NM.DIRECT)
         notes.append("Network: DIRECT (caller override)")
     else:
@@ -792,8 +792,8 @@ def launch_profile(
         # continues.
         try:
             if device_preset is not None:
-                from .cdp_identity import open_pinned_cdp_session
                 from ..fingerprint.mobile import MobileProfileConfig, apply_cdp_plan
+                from .cdp_identity import open_pinned_cdp_session
                 _cfg = MobileProfileConfig.from_preset_dict(device_preset.to_mobile_config_dict())
                 _sess = open_pinned_cdp_session(debug_port)
                 if _sess is None:

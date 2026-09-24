@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 import logging
 import os
 import threading
 import time
 import webbrowser
-from typing import Optional
 
 from .api.server import create_app
 

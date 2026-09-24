@@ -5,8 +5,6 @@ import json
 from io import BytesIO
 from unittest.mock import patch
 
-import pytest
-
 from multiprofile.storage import github_accounts as gh
 
 

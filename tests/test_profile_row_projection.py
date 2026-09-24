@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from multiprofile.api.server import create_app, _operator_state, _with_launch_state
+from multiprofile.api.server import _operator_state, _with_launch_state, create_app
 from multiprofile.browser.runtime_state import (
     LaunchState,
     clear_all_runtimes,

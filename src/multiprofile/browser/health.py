@@ -8,7 +8,6 @@ multiple subsystems manually.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -66,11 +65,11 @@ class ProfileHealth:
 
 def get_profile_health(profile_id: str) -> ProfileHealth:
     """Build a ProfileHealth snapshot for a profile."""
+    from ..network import network_config_for_profile
     from ..storage.profiles import get_profile, pid_alive
-    from ..storage.xdg import chrome_profile_dir, data_dir
-    from ..network import network_config_for_profile, NetworkMode
-    from .runtime_state import get_runtime
+    from ..storage.xdg import chrome_profile_dir
     from .cdp_window import wait_for_cdp
+    from .runtime_state import get_runtime
 
     health = ProfileHealth(profile_id=profile_id)
 

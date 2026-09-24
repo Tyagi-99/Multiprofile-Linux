@@ -33,7 +33,6 @@ def parse_proxy(custom_proxy: str, proxy_type: str = "custom") -> dict[str, Any]
     host = None
     port = None
 
-    lower = raw.lower()
     if "://" in raw:
         # URL form
         # socks5h://user:pass@host:port

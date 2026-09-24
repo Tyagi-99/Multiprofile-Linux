@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from . import legacy
 from .handlers import DISPATCH, HandlerContext, JobHandlerError
-from .queue import JOB_TYPES, DEFAULT_MAX_ATTEMPTS, enqueue, get_job as get_durable_job
+from .queue import DEFAULT_MAX_ATTEMPTS, JOB_TYPES, enqueue, pending_count
+from .queue import get_job as get_durable_job
 from .queue import list_jobs as list_durable_jobs
-from .queue import pending_count
 from .workers import JobWorker, get_worker, start_workers, stop_workers
 
 # Legacy API preserved for the API server (server.py imports these names).

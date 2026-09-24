@@ -1,15 +1,16 @@
 from __future__ import annotations
+
 import json
 import logging
-import shutil
 import random
+import shutil
 import threading
 import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .xdg import profiles_path, secure_write_json, runtime_state_path
+from .xdg import profiles_path, runtime_state_path, secure_write_json
 
 log = logging.getLogger("multiprofile.storage.profiles")
 _lock = threading.RLock()
@@ -278,8 +279,10 @@ def clone_profile(
     session backups, not for routine profile creation.
     """
     import shutil as _shutil
+
+    from ..cookies_store import load_cookies as _lc
+    from ..cookies_store import save_cookies as _sc
     from .xdg import chrome_profile_dir as _cpd
-    from ..cookies_store import load_cookies as _lc, save_cookies as _sc
 
     src = get_profile(profile_id)
     if not src:

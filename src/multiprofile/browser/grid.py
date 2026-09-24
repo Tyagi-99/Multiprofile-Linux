@@ -4,8 +4,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .work_area import WorkArea
 from ..config import get_settings
+from .work_area import WorkArea
 
 
 @dataclass(frozen=True)

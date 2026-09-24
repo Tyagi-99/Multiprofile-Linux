@@ -39,3 +39,31 @@ dev = [
 markers = [
     "network: tests that require outbound network access",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Lint. Enforced in CI, so the selected set is one the tree actually passes.
+#
+# This is a deliberate floor, not the ceiling. The full default ruff run
+# reports ~1400 findings, dominated by BLE001 (blind except, x106) and S110
+# (try/except/pass, x37). Those are real -- they are exactly how a failure
+# gets swallowed -- but fixing them means deciding, case by case, which
+# exceptions are genuinely ignorable in a launch path that must never crash
+# a browser. That is Phase 2 cleanup, and silencing them with a blanket
+# ignore would be worse than leaving them visible. They are tracked in
+# AUDIT.md as H4 rather than hidden here.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["frontend", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = [
+  "E501",   # long lines: 25 remain, all in dense data literals
+  "B008",   # call-in-default: Flask route decorators legitimately do this
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # tests set XDG env vars before importing the package

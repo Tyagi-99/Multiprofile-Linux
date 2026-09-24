@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import socket
 import time
-from typing import Any
 
 from .provider import GatewayHealth, NetworkRoute, RemoteNetworkProvider
 

@@ -7,7 +7,7 @@ from typing import Any
 from ..config import get_settings
 from .cdp_window import CdpError, CdpWindowController
 from .grid import GridCalculator, Rect, SlotPlan, validate_equal_sizes, validate_no_overlap, validate_within_work_area
-from .runtime_state import LaunchState, clear_runtime, get_runtime, list_runtimes, set_launch_state, upsert_runtime
+from .runtime_state import LaunchState, get_runtime, list_runtimes, set_launch_state
 from .window_reaper import ReapPlan, chrome_owns_profile_dir, group_windows, plan_reap
 from .work_area import WorkArea, WorkAreaError, WorkAreaProvider
 

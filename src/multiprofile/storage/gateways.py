@@ -127,9 +127,8 @@ def delete_gateway(gateway_id: str) -> bool:
 
 def resolve_gateway(gateway_id: str) -> Any | None:
     """Resolve a gateway ID to a RemoteNetworkProvider instance."""
-    from ..gateway.provider import RemoteNetworkProvider
-    from ..gateway.custom import CustomGatewayProvider
     from ..gateway.azure import AzureGatewayProvider
+    from ..gateway.custom import CustomGatewayProvider
     from ..gateway.wireguard import WireGuardGatewayProvider
 
     gw = get_gateway(gateway_id, safe=False)

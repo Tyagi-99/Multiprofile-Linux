@@ -7,7 +7,6 @@ stubbed at the parking-module boundary.
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import time
@@ -363,7 +362,7 @@ def test_park_job_does_not_self_block(xdg_tmp, tmp_path, monkeypatch):
             parking, "_stop_via_launcher",
             lambda p: calls.append(p) or (set_runtime(p, "idle", None), {"ok": True, "stopped": 63000})[1],
         )
-        job_id = enqueue("park", pid, payload={})
+        enqueue("park", pid, payload={})
         claimed = db.claim_next_job()  # worker marks running before dispatch
         assert claimed and claimed["status"] == "running"
         # The guard sees the running park job but must not block on it:

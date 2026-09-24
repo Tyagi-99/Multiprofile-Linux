@@ -79,9 +79,9 @@ def _should_skip(rel: Path) -> bool:
 def _encrypt_bytes(plaintext: bytes, passphrase: str) -> bytes:
     """Encrypt bytes with AES-256-GCM.  Returns binary blob."""
     try:
+        from cryptography.hazmat.primitives import hashes as _h
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        from cryptography.hazmat.primitives import hashes as _h
     except ImportError as e:
         raise RuntimeError(
             "Encrypted backups require the 'cryptography' package. "
@@ -100,10 +100,10 @@ def _encrypt_bytes(plaintext: bytes, passphrase: str) -> bytes:
 def _decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
     """Decrypt a blob produced by _encrypt_bytes.  Raises on wrong passphrase."""
     try:
+        from cryptography.exceptions import InvalidTag
+        from cryptography.hazmat.primitives import hashes as _h
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        from cryptography.hazmat.primitives import hashes as _h
-        from cryptography.exceptions import InvalidTag
     except ImportError as e:
         raise RuntimeError(
             "Encrypted backups require the 'cryptography' package."
@@ -124,7 +124,7 @@ def _decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
     try:
         return aesgcm.decrypt(iv, ciphertext_with_tag, None)
     except InvalidTag:
-        raise ValueError("Decryption failed — wrong passphrase or corrupted backup")
+        raise ValueError("Decryption failed — wrong passphrase or corrupted backup") from None
 
 
 def _build_manifest(

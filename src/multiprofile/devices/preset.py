@@ -7,9 +7,8 @@ reproduce about the original hardware.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
-
 
 # Capability statuses — PARTIAL/UNAVAILABLE with documented reasons beat fake SUPPORTED.
 SUPPORTED = "SUPPORTED"

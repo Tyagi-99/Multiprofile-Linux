@@ -64,7 +64,7 @@ def assert_rows_fill(plan, area, *, gap=0, margin=0):
         hs = {rect.h for rect in row}
         assert len(hs) == 1
         heights.add(next(iter(hs)))
-        for a, b in zip(row, row[1:]):
+        for a, b in zip(row, row[1:], strict=False):  # pairwise: lengths differ by one
             assert a.x + a.w + gap + FRAME_GAP_X == b.x
             assert a.y == b.y
         if prev_bottom is None:

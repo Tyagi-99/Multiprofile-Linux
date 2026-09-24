@@ -19,7 +19,7 @@ _EXPECTED_POLICY = (
 
 
 def build(seed: int | None, profile: dict[str, Any], device_preset: Any = None) -> dict[str, Any]:
-    ctx = resolve_context(profile, device_preset, seed)
+    resolve_context(profile, device_preset, seed)  # validates inputs
     return {
         "expected": {
             "policy": _EXPECTED_POLICY,

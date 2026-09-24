@@ -6,7 +6,6 @@ in-process: WS1's ``multiprofile.api.events`` bus is used directly.
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 
@@ -179,7 +178,8 @@ def test_cursor_roundtrip_tie_break():
         {"id": "a", "ts": 5.0},  # tie on ts: id must break it
         {"id": "c", "ts": 6.0},
     ]
-    key = lambda it: (it["ts"], it["id"])
+    def key(it):
+        return (it["ts"], it["id"])
     p1 = paginate(items, cursor=None, limit=2, key_fn=key)
     assert [i["id"] for i in p1["items"]] == ["a", "b"]
     assert p1["next_cursor"]

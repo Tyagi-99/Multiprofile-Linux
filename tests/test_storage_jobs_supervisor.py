@@ -6,8 +6,6 @@ user data dir.
 """
 from __future__ import annotations
 
-import json
-import os
 import sqlite3
 import subprocess
 import sys
@@ -29,7 +27,6 @@ from multiprofile.storage.state import (
     ProfileState,
     validate_transition,
 )
-
 
 # ------------------------------------------------------------------ fixtures
 

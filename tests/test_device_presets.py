@@ -23,7 +23,7 @@ from multiprofile.devices import (
     find_chromium_binary,
     register_devices_routes,
 )
-from multiprofile.devices.preset import IPADOS, LINUX, MACOS, SUPPORTED, WINDOWS
+from multiprofile.devices.preset import IPADOS, LINUX, MACOS, WINDOWS
 from multiprofile.devices.registry import registry
 from multiprofile.devices.validator import FAIL, NOT_RUN, PASS, PENDING
 

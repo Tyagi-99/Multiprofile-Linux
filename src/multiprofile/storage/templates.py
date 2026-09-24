@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .xdg import templates_path, secure_write_json
+from .xdg import secure_write_json, templates_path
 
 _lock = threading.RLock()
 

@@ -6,10 +6,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -17,8 +15,8 @@ import pytest
 
 def _setup_xdg(tmp_path: Path, monkeypatch):
     """Redirect all XDG paths to a temp directory."""
-    import multiprofile.storage.xdg as xdg
     import multiprofile.cookies_store as cs
+    import multiprofile.storage.xdg as xdg
     monkeypatch.setattr(xdg, "data_dir", lambda: tmp_path / "data")
     monkeypatch.setattr(xdg, "config_dir", lambda: tmp_path / "config")
     monkeypatch.setattr(xdg, "cache_dir", lambda: tmp_path / "cache")
@@ -43,8 +41,8 @@ class TestProfileIsolation:
 
     def test_different_profile_ids(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.xdg as xdg
         import multiprofile.storage.profiles as prof
+        import multiprofile.storage.xdg as xdg
         p1 = prof.create_profile({"name": "Alpha"})
         p2 = prof.create_profile({"name": "Beta"})
         assert p1["id"] != p2["id"]
@@ -67,8 +65,8 @@ class TestProfileIsolation:
 
     def test_cookies_do_not_cross_contaminate(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
         import multiprofile.cookies_store as cs
+        import multiprofile.storage.profiles as prof
         p1 = prof.create_profile({"name": "Alpha"})
         p2 = prof.create_profile({"name": "Beta"})
         cs.save_cookies(p1["id"], [{"domain": ".alpha.com", "name": "sess", "value": "aaa"}])
@@ -122,8 +120,8 @@ class TestProfileIsolation:
 
     def test_clone_config_and_cookies_copies_cookies(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
         import multiprofile.cookies_store as cs
+        import multiprofile.storage.profiles as prof
         src = prof.create_profile({"name": "Source"})
         cs.save_cookies(src["id"], [{"domain": ".test.com", "name": "x", "value": "42"}])
         cloned = prof.clone_profile(src["id"], mode="config_and_cookies")
@@ -217,9 +215,9 @@ class TestFingerprintConsistency:
 class TestPlaintextBackup:
     def test_create_backup_ok(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "BackupTest"})
         result = bk.create_backup(p["id"], include_user_data=False)
@@ -229,10 +227,11 @@ class TestPlaintextBackup:
 
     def test_backup_has_manifest_v2(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
-        import multiprofile.audit as audit_mod
         import zipfile
+
+        import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "ManifestTest"})
         result = bk.create_backup(p["id"], include_user_data=False)
@@ -249,10 +248,11 @@ class TestPlaintextBackup:
 
     def test_manifest_has_no_secrets(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
-        import multiprofile.audit as audit_mod
         import zipfile
+
+        import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         # Profiles with credential-containing fields
         p = prof.create_profile({
@@ -266,9 +266,9 @@ class TestPlaintextBackup:
 
     def test_restore_plaintext_backup(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "RestoreMe", "notes": "original notes"})
         bk_result = bk.create_backup(p["id"], include_user_data=False)
@@ -280,10 +280,10 @@ class TestPlaintextBackup:
 
     def test_backup_roundtrip_cookies(self, tmp_path, monkeypatch):
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
         import multiprofile.cookies_store as cs
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "CookieBackup"})
         original_cookies = [
@@ -316,9 +316,9 @@ class TestEncryptedBackup:
         if not self._has_cryptography():
             pytest.skip("cryptography package not installed")
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "EncTest"})
         result = bk.create_backup(p["id"], include_user_data=False, passphrase="correct-horse")
@@ -333,9 +333,9 @@ class TestEncryptedBackup:
         if not self._has_cryptography():
             pytest.skip("cryptography package not installed")
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "WrongPass"})
         result = bk.create_backup(p["id"], include_user_data=False, passphrase="correct")
@@ -347,9 +347,9 @@ class TestEncryptedBackup:
         if not self._has_cryptography():
             pytest.skip("cryptography package not installed")
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "NoPPass"})
         result = bk.create_backup(p["id"], include_user_data=False, passphrase="mypass")
@@ -361,10 +361,10 @@ class TestEncryptedBackup:
         if not self._has_cryptography():
             pytest.skip("cryptography package not installed")
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
         import multiprofile.cookies_store as cs
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "EncRoundtrip", "notes": "secret notes"})
         cs.save_cookies(p["id"], [{"domain": ".x.com", "name": "tok", "value": "encval"}])
@@ -380,9 +380,9 @@ class TestEncryptedBackup:
         if not self._has_cryptography():
             pytest.skip("cryptography package not installed")
         _setup_xdg(tmp_path, monkeypatch)
-        import multiprofile.storage.profiles as prof
-        import multiprofile.backup as bk
         import multiprofile.audit as audit_mod
+        import multiprofile.backup as bk
+        import multiprofile.storage.profiles as prof
         monkeypatch.setattr(audit_mod, "audit_log", lambda *a, **k: None)
         p = prof.create_profile({"name": "SecretPass"})
         result = bk.create_backup(p["id"], include_user_data=False, passphrase="t0ps3cr3t")
@@ -404,7 +404,7 @@ class TestSecurityAudit:
         for line in src.splitlines():
             stripped = line.strip()
             if '"--disable-gpu"' in stripped and "cmd.append" in stripped:
-                assert False, f"Unconditional --disable-gpu found: {line}"
+                raise AssertionError(f"Unconditional --disable-gpu found: {line}")
 
     def test_disable_automation_controlled_flag(self):
         src = Path("src/multiprofile/browser/launcher.py").read_text(encoding="utf-8")
@@ -466,8 +466,8 @@ class TestWindowTiling:
         the work area gets pushed down by its own title bar and spills
         into the row below. The 1px frame gaps are not covered either.
         """
+        from multiprofile.browser.grid import TOP_CHROME_INSET, GridCalculator
         from multiprofile.browser.work_area import WorkArea
-        from multiprofile.browser.grid import GridCalculator, TOP_CHROME_INSET
 
         wa = WorkArea(x=0, y=0, w=1920, h=1080, source="test")
         calc = GridCalculator()
@@ -491,8 +491,8 @@ class TestWindowTiling:
 
     @pytest.mark.parametrize("n", [4, 9, 20])
     def test_grid_no_overlap(self, n):
-        from multiprofile.browser.work_area import WorkArea
         from multiprofile.browser.grid import GridCalculator
+        from multiprofile.browser.work_area import WorkArea
         wa = WorkArea(x=0, y=0, w=1920, h=1080, source="test")
         calc = GridCalculator()
         rects = calc.plan([f"p{i}" for i in range(n)], wa, gap=0, margin=0).rects()
@@ -506,8 +506,8 @@ class TestWindowTiling:
 
     @pytest.mark.parametrize("n", [4, 9, 20])
     def test_tile_idempotent(self, n):
-        from multiprofile.browser.work_area import WorkArea
         from multiprofile.browser.grid import GridCalculator
+        from multiprofile.browser.work_area import WorkArea
         wa = WorkArea(x=0, y=0, w=1920, h=1080, source="test")
         calc = GridCalculator()
         ids = [f"p{i}" for i in range(n)]

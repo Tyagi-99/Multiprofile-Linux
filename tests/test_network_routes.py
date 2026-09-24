@@ -5,7 +5,6 @@ hermetic (no network, no disk).
 """
 from __future__ import annotations
 
-import pytest
 from flask import Flask
 
 import multiprofile.network_routes as routes

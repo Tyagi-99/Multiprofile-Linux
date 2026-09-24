@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import socket
 import time
 import urllib.request
 from typing import Any
@@ -206,9 +205,7 @@ def _cdp_ws_send(port: int, method: str, params: dict[str, Any]) -> dict[str, An
     if not m:
         return None
     host_port = m.group(1)
-    path = m.group(2)
     host, _, port_s = host_port.partition(":")
-    ws_port = int(port_s) if port_s else port
 
     result: dict[str, Any] | None = None
     error_box: list[Exception] = []

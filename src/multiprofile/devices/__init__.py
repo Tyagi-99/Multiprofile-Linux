@@ -15,8 +15,8 @@ from .preset import (
     DevicePreset,
 )
 from .registry import DeviceRegistry, registry
-from .validator import DevicePresetValidator, find_chromium_binary
 from .routes import register_devices_routes
+from .validator import DevicePresetValidator, find_chromium_binary
 
 __all__ = [
     "ANDROID",

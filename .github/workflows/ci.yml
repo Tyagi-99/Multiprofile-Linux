@@ -1,0 +1,156 @@
+name: CI
+
+# There was no CI at all. Four tests had been failing since the grid rewrite
+# and nobody knew, because the habit was to run a five-file subset by hand.
+# Everything below runs on every push and every pull request.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor declared in pyproject. 3.12 is what the dev venv
+        # uses. 3.13 is here because the .deb runs on whatever system python3
+        # the distro ships, which on this machine is already ahead of the venv
+        # -- the shipped runtime was never the tested one.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install the project
+        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+
+      - name: Lint
+        run: uvx ruff check src/ tests/
+
+      - name: Test
+        env:
+          PYTHONPATH: src
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Test with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          uvx --with pytest --with pytest-cov --with flask \
+              --with websocket-client --with cryptography \
+              pytest tests/ -q --cov=multiprofile --cov-report=term \
+              --cov-report=xml --cov-fail-under=70
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+
+  frontend:
+    name: Console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+
+      - name: src/static must match a fresh build
+        # The .deb ships src/static, not the frontend source. If a console
+        # change is committed without re-running the export, the package
+        # silently ships the previous UI.
+        run: |
+          node scripts/sync-static.mjs
+          if ! git diff --quiet -- ../src/static; then
+            echo "::error::src/static is stale — run 'npm run publish' in frontend/ and commit the result"
+            git diff --stat -- ../src/static
+            exit 1
+          fi
+
+  package:
+    name: Build .deb
+    runs-on: ubuntu-latest
+    needs: [python, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the package
+        run: bash build-deb.sh
+      - name: Version markers must agree
+        # dpkg installs the Version from packaging/debian/control while the
+        # filename comes from build-deb.sh. If they drift, the package lies
+        # about what it is.
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib, sys
+          def grab(path, pattern):
+              text = pathlib.Path(path).read_text()
+              m = re.search(pattern, text, re.M)
+              return m.group(1) if m else None
+          found = {
+              "__init__.py": grab("src/multiprofile/__init__.py", r'__version__\s*=\s*"([^"]+)"'),
+              "pyproject.toml": grab("pyproject.toml", r'^version\s*=\s*"([^"]+)"'),
+              "build-deb.sh": grab("build-deb.sh", r'^VERSION=(\S+)'),
+              "debian/control": grab("packaging/debian/control", r'^Version:\s*(\S+)'),
+          }
+          print(found)
+          if len(set(found.values())) != 1 or None in found.values():
+              sys.exit("version markers disagree")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    # Advisory: a new CVE published upstream must not turn main red on its
+    # own, but it must be visible. Treat a failure here as a ticket.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Python dependencies
+        run: uvx pip-audit -r requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Console dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high
