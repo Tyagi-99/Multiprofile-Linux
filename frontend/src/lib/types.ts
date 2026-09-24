@@ -25,10 +25,41 @@ export interface Profile {
   color?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
-  /** Runtime state injected by the API (_with_launch_state). Null = never launched. */
+  /**
+   * Operator-facing state, normalised by the API from the finer LaunchState
+   * machine. This is what the table shows and colours.
+   */
+  state?: LaunchState | null;
+  /** Raw launch state — diagnostic detail, finer than `state`. */
   launchState: LaunchState | null;
   cdpPort?: number | null;
+  pid?: number | null;
+  /** Why the last launch failed, verbatim from the API. Shown in the row. */
+  launchError?: string | null;
+  launchErrorCode?: string | null;
+  /** Pre-launch proxy probe verdict. null = never checked, not "fine". */
+  proxyOk?: boolean | null;
+  egressIp?: string | null;
+  /** Epoch seconds. */
+  lastProxyCheck?: number | null;
+  /** ISO timestamp of the last launch, from control.db. */
+  lastLaunch?: string | null;
   [key: string]: unknown;
+}
+
+export interface NetworkHealth {
+  ok: boolean;
+  mode: string;
+  status?: string;
+  message?: string;
+  error?: string;
+  proxyHealth?: {
+    ok?: boolean;
+    latency_ms?: number | null;
+    egress_ip?: string | null;
+    error?: string | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface ProfilesPage {

@@ -141,17 +141,88 @@ def _start_reaper() -> None:
     threading.Thread(target=_loop, name="mp-reaper", daemon=True).start()
 
 
+# The launch state machine is finer-grained than the operator's vocabulary:
+# POSITIONING and CDP_READY are steps inside "starting", and five distinct
+# failures are all "error" to someone scanning a table. Collapse them here so
+# every client speaks the same four words the console colours.
+_OPERATOR_STATE = {
+    "RUNNING": "running",
+    "VERIFIED": "running",
+    "LAUNCHING": "starting",
+    "CDP_READY": "starting",
+    "WINDOW_FOUND": "starting",
+    "POSITIONING": "starting",
+    "CREATED": "stopped",
+    "LAUNCH_FAILED": "error",
+    "CDP_FAILED": "error",
+    "WINDOW_NOT_FOUND": "error",
+    "POSITION_FAILED": "error",
+    "VERIFY_FAILED": "error",
+}
+
+
+def _operator_state(launch_state: str | None) -> str | None:
+    """Collapse a LaunchState to the word the operator table shows."""
+    if not launch_state:
+        return None
+    return _OPERATOR_STATE.get(str(launch_state).upper())
+
+
 def _with_launch_state(profiles: list) -> list:
+    """Project runtime truth onto profile rows for the operator table.
+
+    The console has to scan state, proxy result, last launch and -- when a
+    launch failed -- the reason, without opening each profile. All of it
+    already exists: the in-memory registry holds the launch state, the proxy
+    probe result and the launch error, and control.db holds the durable
+    started_at. None of it reached the list response before, so a blocked
+    launch showed only as "error" with the reason swallowed.
+
+    Credential-free by construction: only the probe verdict and the egress IP
+    are exposed, never the proxy password.
+    """
+    try:
+        from ..storage import db as _control_db
+        durable = {r.get("profile_id"): r for r in _control_db.list_profile_runtimes()}
+    except Exception as e:  # noqa: BLE001 - listing must not fail on a DB hiccup
+        log.debug("control.db runtime lookup failed: %s", e)
+        durable = {}
+
     out = []
     for p in profiles:
         q = dict(p)
-        rt = get_runtime(q.get("id") or "")
+        pid = q.get("id") or ""
+        rt = get_runtime(pid)
         if rt:
             q["launchState"] = rt.launch_state.value if hasattr(rt.launch_state, "value") else rt.launch_state
             q["cdpPort"] = rt.cdp_port
+            q["pid"] = rt.pid
+            # The operator must see why a launch failed, in the row.
+            q["launchError"] = rt.error
+            q["launchErrorCode"] = rt.error_code
+            # Proxy verdict from the pre-launch probe. None = never checked.
+            q["proxyOk"] = rt.proxy_ok
+            q["egressIp"] = rt.egress_ip
+            q["lastProxyCheck"] = rt.last_proxy_check
         else:
             q.setdefault("launchState", None)
             q.setdefault("cdpPort", None)
+            q.setdefault("launchError", None)
+            q.setdefault("launchErrorCode", None)
+            q.setdefault("proxyOk", None)
+            q.setdefault("egressIp", None)
+            q.setdefault("lastProxyCheck", None)
+        row = durable.get(pid) or {}
+        q["lastLaunch"] = row.get("started_at")
+        # Operator-facing state. Parking lives on the profile itself; after
+        # that control.db is the durable truth, and the live registry fills
+        # the gap for a profile the launcher has touched but not yet recorded.
+        q["state"] = (
+            ("parked" if str(q.get("status") or "").lower() == "parked" else None)
+            or _operator_state(q.get("launchState"))
+            or row.get("state")
+            or "stopped"
+        )
         out.append(q)
     return out
 

@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ColumnDef,
   flexRender,
   getCoreRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircle,
   Download,
   Eye,
   MoreHorizontal,
@@ -15,16 +16,24 @@ import {
   Plus,
   RotateCcw,
   Search,
+  ShieldCheck,
   Square,
   Trash2,
   X,
 } from "lucide-react";
-import { get } from "../../lib/api";
+import { toast } from "sonner";
+import { apiMessage, get } from "../../lib/api";
+import { absoluteTime, timeAgo } from "../../lib/format";
 import { downloadJson, sanitizeForExport, useProfileActions, type BlockedLaunch } from "../../lib/mutations";
 import { profilesKeys } from "../../lib/query-keys";
-import type { DeviceSummary, Profile, ProfilesPage as ProfilesPageData } from "../../lib/types";
+import type {
+  DeviceSummary,
+  NetworkHealth,
+  Profile,
+  ProfilesPage as ProfilesPageData,
+} from "../../lib/types";
 import { useUI } from "../../stores/ui";
-import { Badge } from "../ui/badge";
+import { Badge, launchStateTone } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Dialog } from "../ui/dialog";
@@ -53,22 +62,36 @@ function useDebounced<T>(value: T, ms: number): T {
   return v;
 }
 
+/**
+ * The operator-facing state word.
+ *
+ * The API normalises the finer LaunchState machine into `state`, so twelve
+ * launch states collapse to the four the console colours. Fall back to the
+ * raw fields only for an older backend that does not send `state`.
+ */
 function stateOf(p: Profile): string {
-  const s = String(p.launchState ?? p.status ?? "idle").toLowerCase();
-  return s || "idle";
+  const s = String(p.state ?? p.launchState ?? p.status ?? "idle").toLowerCase();
+  if (!s) return "idle";
+  if (s === "running" || s === "verified") return "running";
+  if (s.endsWith("_failed") || s === "window_not_found" || s === "error") return "error";
+  if (s === "launching" || s === "cdp_ready" || s === "window_found" || s === "positioning") {
+    return "starting";
+  }
+  if (s === "created") return "stopped";
+  return s;
 }
 
-function statusTone(state: string): "ok" | "err" | "warn" | "info" | "idle" {
-  if (state === "running") return "ok";
-  if (state === "error") return "err";
-  if (state === "parked") return "warn";
-  if (state === "starting" || state === "stopping") return "info";
-  return "idle";
-}
+// Colour language lives in ui/badge (launchStateTone) so the table, the
+// detail page and the dashboard cannot drift apart. Do not add a local map.
 
 function statusLabel(state: string): string {
   if (state === "idle") return "Stopped";
   return state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+/** Transitional states own the row's primary button until they settle. */
+function isBusy(state: string): boolean {
+  return state === "starting" || state === "stopping";
 }
 
 function fpSummary(p: Profile): string {
@@ -93,6 +116,81 @@ function proxyLabel(p: Profile): string {
   const port = r.proxyPort ? `:${r.proxyPort}` : "";
   const auth = r.proxyUser ?? r.proxy_user ?? r.hasProxyAuth ? "••••@" : "";
   return `${proto}://${auth}${host}${port}`;
+}
+
+function hasProxy(p: Profile): boolean {
+  const r = p as Record<string, unknown>;
+  return Boolean(r.proxyHost ?? r.proxy_host ?? r.proxyId);
+}
+
+/**
+ * Proxy cell: the probe verdict first, the address second.
+ *
+ * "Unchecked" is deliberately not the same as "OK" — a profile whose proxy
+ * has never been probed must not read as healthy. The check button runs the
+ * same pre-launch probe the launcher uses, so what the operator sees here is
+ * what will gate the launch.
+ */
+function ProxyCell({ profile }: { profile: Profile }) {
+  const qc = useQueryClient();
+  const [checking, setChecking] = useState(false);
+
+  if (!hasProxy(profile)) {
+    return (
+      <span className="inline-flex items-center gap-2">
+        <Badge tone="idle">Direct</Badge>
+      </span>
+    );
+  }
+
+  const ok = profile.proxyOk;
+  const tone = ok === true ? "ok" : ok === false ? "err" : "idle";
+  const label = ok === true ? "OK" : ok === false ? "Failed" : "Unchecked";
+
+  const check = async () => {
+    setChecking(true);
+    try {
+      const res = await get<NetworkHealth>(
+        `/api/profiles/${encodeURIComponent(profile.id)}/network-health`,
+      );
+      const ip = res.proxyHealth?.egress_ip;
+      if (res.ok) {
+        toast.success(`Proxy OK — ${profile.name}`, {
+          description: ip ? `Egress ${ip}` : res.message,
+        });
+      } else {
+        toast.error(`Proxy failed — ${profile.name}`, {
+          description: res.proxyHealth?.error ?? res.error ?? "Probe did not succeed",
+        });
+      }
+      qc.invalidateQueries({ queryKey: profilesKeys.lists() });
+    } catch (e) {
+      toast.error(`Proxy check failed — ${profile.name}`, { description: apiMessage(e) });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <Badge tone={tone} dot title={profile.egressIp ? `Egress ${profile.egressIp}` : undefined}>
+        {label}
+      </Badge>
+      <span className="truncate font-mono text-xs text-ink-3" title={proxyLabel(profile)}>
+        {profile.egressIp ?? proxyLabel(profile)}
+      </span>
+      <button
+        type="button"
+        onClick={check}
+        disabled={checking}
+        title="Run the pre-launch proxy probe"
+        aria-label={`Check proxy for ${profile.name}`}
+        className="rounded-md p-1 text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink-1 disabled:opacity-50"
+      >
+        <ShieldCheck size={14} className={checking ? "animate-pulse" : undefined} />
+      </button>
+    </div>
+  );
 }
 
 interface Client { id: string; name?: string; clientId?: string }
@@ -205,11 +303,14 @@ export function ProfilesPage() {
     [items, rowSelection],
   );
 
-  const doLaunch = async (profiles: Profile[]) => {
-    const blockedList = await actions.launch(profiles);
-    setRowSelection({});
-    if (blockedList.length) setBlocked(blockedList);
-  };
+  const doLaunch = useCallback(
+    async (profiles: Profile[]) => {
+      const blockedList = await actions.launch(profiles);
+      setRowSelection({});
+      if (blockedList.length) setBlocked(blockedList);
+    },
+    [actions],
+  );
 
   const doForceLaunch = async () => {
     if (!blocked) return;
@@ -252,7 +353,7 @@ export function ProfilesPage() {
           const s = stateOf(row.original);
           return (
             <span className="inline-flex items-center gap-1.5">
-              <Badge tone={statusTone(s)} dot>
+              <Badge tone={launchStateTone(s)} dot>
                 {statusLabel(s)}
               </Badge>
             </span>
@@ -264,6 +365,10 @@ export function ProfilesPage() {
         header: "Profile",
         cell: ({ row }) => {
           const p = row.original;
+          // A failed launch explains itself in the row. The API message is
+          // shown verbatim — "GitHub Account is not a network gateway" is
+          // the operator's fix, and swallowing it wastes their time.
+          const err = p.launchError;
           return (
             <div className="min-w-0">
               <a
@@ -272,7 +377,17 @@ export function ProfilesPage() {
               >
                 {p.name}
               </a>
-              <span className="font-mono text-xs text-ink-3">{p.id.slice(0, 13)}…</span>
+              {err ? (
+                <span
+                  className="mt-0.5 flex items-start gap-1 text-xs text-err"
+                  title={p.launchErrorCode ? `${p.launchErrorCode}: ${err}` : err}
+                >
+                  <AlertCircle size={12} aria-hidden className="mt-0.5 shrink-0" />
+                  <span className="line-clamp-2">{err}</span>
+                </span>
+              ) : (
+                <span className="font-mono text-xs text-ink-3">{p.id.slice(0, 13)}…</span>
+              )}
             </div>
           );
         },
@@ -296,9 +411,19 @@ export function ProfilesPage() {
       {
         id: "proxy",
         header: "Proxy",
-        cell: ({ row }) => (
-          <span className="font-mono text-xs text-ink-2">{proxyLabel(row.original)}</span>
-        ),
+        cell: ({ row }) => <ProxyCell profile={row.original} />,
+      },
+      {
+        id: "lastLaunch",
+        header: "Last launch",
+        cell: ({ row }) => {
+          const t = row.original.lastLaunch;
+          return (
+            <span className="whitespace-nowrap text-[13px] text-ink-3" title={absoluteTime(t)}>
+              {timeAgo(t)}
+            </span>
+          );
+        },
       },
       {
         id: "fingerprint",
@@ -310,10 +435,10 @@ export function ProfilesPage() {
       {
         id: "actions",
         header: () => <span className="sr-only">Actions</span>,
-        cell: ({ row }) => <RowActions profile={row.original} />,
+        cell: ({ row }) => <RowActions profile={row.original} onLaunch={doLaunch} />,
       },
     ],
-    [clientName, deviceMap],
+    [clientName, deviceMap, doLaunch],
   );
 
   // react-compiler cannot memoize TanStack Table's function-returning API; skipped by design.
@@ -577,16 +702,46 @@ export function ProfilesPage() {
   );
 }
 
-function RowActions({ profile }: { profile: Profile }) {
+function RowActions({
+  profile,
+  onLaunch,
+}: {
+  profile: Profile;
+  onLaunch: (profiles: Profile[]) => Promise<void>;
+}) {
   const actions = useProfileActions();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [pending, setPending] = useState(false);
   const state = stateOf(profile);
   const running = state === "running";
   const parked = state === "parked";
+  const busy = pending || isBusy(state);
+
+  // Launch and Stop belong on the row, not two clicks deep in a menu. An
+  // operator running twenty profiles reaches for these constantly.
+  const primary = async () => {
+    setPending(true);
+    try {
+      if (running) await actions.stop([profile]);
+      else await onLaunch([profile]);
+    } finally {
+      setPending(false);
+    }
+  };
 
   return (
     <>
       <div className="flex items-center justify-end gap-0.5">
+        <Button
+          variant={running ? "secondary" : "primary"}
+          size="sm"
+          onClick={primary}
+          disabled={busy}
+          title={running ? `Stop ${profile.name}` : `Launch ${profile.name}`}
+        >
+          {running ? <Square size={13} aria-hidden /> : <Play size={13} aria-hidden />}
+          {busy ? (state === "stopping" ? "Stopping…" : state === "starting" ? "Starting…" : "…") : running ? "Stop" : "Launch"}
+        </Button>
         <a
           href={`#/profiles/${encodeURIComponent(profile.id)}`}
           className="rounded-md p-1.5 text-ink-3 transition-colors hover:bg-surface-3 hover:text-ink-1"
@@ -606,29 +761,23 @@ function RowActions({ profile }: { profile: Profile }) {
               <MoreHorizontal size={15} />
             </button>
           </DropdownMenuTrigger>
+          {/* Launch and Stop are on the row; this menu holds the rest. */}
           <DropdownMenuContent>
-            {running ? (
-              <>
-                <MenuItem onSelect={() => actions.stop([profile])}>
-                  <Square size={14} aria-hidden /> Stop
-                </MenuItem>
-                <MenuItem onSelect={() => actions.restart(profile)}>
-                  <RotateCcw size={14} aria-hidden /> Restart
-                </MenuItem>
-              </>
-            ) : parked ? (
+            {running && (
+              <MenuItem onSelect={() => actions.restart(profile)}>
+                <RotateCcw size={14} aria-hidden /> Restart
+              </MenuItem>
+            )}
+            {parked ? (
               <MenuItem onSelect={() => actions.park([profile], false)}>
                 <Play size={14} aria-hidden /> Unpark
               </MenuItem>
             ) : (
-              <MenuItem onSelect={() => actions.launch([profile])}>
-                <Play size={14} aria-hidden /> Start
-              </MenuItem>
-            )}
-            {!running && !parked && (
-              <MenuItem onSelect={() => actions.park([profile], true)}>
-                <Pause size={14} aria-hidden /> Park
-              </MenuItem>
+              !running && (
+                <MenuItem onSelect={() => actions.park([profile], true)}>
+                  <Pause size={14} aria-hidden /> Park
+                </MenuItem>
+              )
             )}
             <MenuSeparator />
             <MenuItem danger onSelect={() => setDeleteOpen(true)}>
