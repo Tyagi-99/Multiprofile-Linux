@@ -100,19 +100,107 @@ def split_axis(origin: int, length: int, count: int, gap: int = 0) -> list[tuple
     return out
 
 
-def _score(cols: int, rows: int, n: int, area: WorkArea, cell_w: int, cell_h: int) -> float:
-    """Lower is better. Priorities 4–6 only (1–3 already enforced by rejection)."""
-    empty = cols * rows - n
-    aspect = (area.w / area.h) if area.h else 1.6
-    cell_aspect = (cell_w / cell_h) if cell_h else 1.0
-    # Prefer browser-ish aspect ~1.35
-    preferred = 1.35
-    aspect_pen = abs(math.log((cell_aspect + 1e-6) / preferred))
-    util = (cell_w * cell_h * n) / max(1, area.w * area.h)
-    # Prefer grids whose cols/rows roughly match screen aspect
-    grid_aspect = cols / rows
-    grid_pen = abs(math.log((grid_aspect + 1e-6) / (aspect + 1e-6))) * 0.25
-    return empty * 1.5 + aspect_pen + grid_pen - util
+# Chrome on this machine grows any window narrower than 500px up to 500,
+# which makes neighbors overlap. Never request a full-row cell that narrow
+# when the screen can hold fewer, wider columns instead.
+CHROME_MIN_WINDOW_W = 500
+# Mutter reports the client area ~37px below the top we request, and keeps
+# the requested height, so a window placed on the work-area top spills into
+# the row below. Leave this strip for that title bar.
+TOP_CHROME_INSET = 40
+# Client rectangles from CDP do not include the frame. Flush clients make
+# title bars and borders paint on top of the next window.
+FRAME_GAP_X = 1
+FRAME_GAP_Y = 1
+# Prefer a browser-like cell. Last-row leftovers are stretched, not left blank.
+_TARGET_CELL_ASPECT = 1.45
+
+
+def _choose_cols(n: int, ow: int, oh: int) -> int:
+    """Column count for ``n`` windows on a ``ow``×``oh`` content area.
+
+    A full row uses this many equal windows. A short last row uses fewer
+    windows stretched across the same width. Columns are capped so a full-row
+    cell stays at least ``CHROME_MIN_WINDOW_W`` wide when the screen allows it.
+    """
+    if n <= 1 or ow <= 0 or oh <= 0:
+        return 1
+    max_cols = max(1, min(n, ow // CHROME_MIN_WINDOW_W))
+    best_cols = 1
+    best_score = float("inf")
+    for cols in range(1, max_cols + 1):
+        rows = math.ceil(n / cols)
+        cw = ow / cols
+        ch = oh / rows
+        if cw < CHROME_MIN_WINDOW_W - 1 or ch < 28:
+            continue
+        aspect = cw / ch if ch else 1.0
+        aspect_pen = abs(math.log((aspect + 1e-6) / _TARGET_CELL_ASPECT))
+        last = n - cols * (rows - 1)
+        leftover_pen = 0.0
+        if rows > 1 and last < cols:
+            leftover_pen = (1 - last / cols) * 0.35
+            if last == 1 and n > 3:
+                leftover_pen += 0.8
+        short_pen = 1.5 if ch < 160 else 0.0
+        score = aspect_pen + leftover_pen + short_pen
+        if score < best_score:
+            best_score = score
+            best_cols = cols
+    return best_cols
+
+
+def _row_slots(
+    profile_ids: list[str],
+    work_area: WorkArea,
+    cols: int,
+    gap: int,
+    margin: int,
+) -> tuple[Slot, ...] | None:
+    """Place windows in ``cols``-wide rows. The last row stretches to the edges."""
+    n = len(profile_ids)
+    if n <= 0 or cols <= 0:
+        return None
+    rows = math.ceil(n / cols)
+    ox = work_area.x + margin
+    oy = work_area.y + margin + TOP_CHROME_INSET
+    ow = work_area.w - 2 * margin
+    oh = work_area.h - 2 * margin - TOP_CHROME_INSET
+    row_parts = split_axis(oy, oh, rows, gap=gap + FRAME_GAP_Y)
+    if not row_parts:
+        return None
+    slots: list[Slot] = []
+    cursor = 0
+    for r in range(rows):
+        count = cols if r < rows - 1 else n - cols * (rows - 1)
+        col_parts = split_axis(ox, ow, count, gap=gap + FRAME_GAP_X)
+        if not col_parts or len(col_parts) != count:
+            return None
+        y, ch = row_parts[r]
+        if ch < 28:
+            return None
+        for c in range(count):
+            x, cw = col_parts[c]
+            if cw < 80:
+                return None
+            rect = Rect(x, y, cw, ch)
+            if (
+                rect.x < work_area.x
+                or rect.y < work_area.y
+                or rect.x + rect.w > work_area.x + work_area.w
+                or rect.y + rect.h > work_area.y + work_area.h
+            ):
+                return None
+            slots.append(Slot(profile_ids[cursor], cursor, rect))
+            cursor += 1
+    if cursor != n:
+        return None
+    rects = [s.rect for s in slots]
+    if not validate_no_overlap(rects)["valid"]:
+        return None
+    if not validate_within_work_area(rects, work_area)["valid"]:
+        return None
+    return tuple(slots)
 
 
 def _small_n_slots(profile_ids: list[str], work_area: WorkArea, gap: int, margin: int) -> tuple[int, int, tuple[Slot, ...]] | None:
@@ -130,9 +218,9 @@ def _small_n_slots(profile_ids: list[str], work_area: WorkArea, gap: int, margin
     if n < 1 or n > 3:
         return None
     ox = work_area.x + margin
-    oy = work_area.y + margin
+    oy = work_area.y + margin + TOP_CHROME_INSET
     ow = work_area.w - 2 * margin
-    oh = work_area.h - 2 * margin
+    oh = work_area.h - 2 * margin - TOP_CHROME_INSET
     wide = ow >= oh
     if n == 1:
         cols, rows = 1, 1
@@ -140,8 +228,8 @@ def _small_n_slots(profile_ids: list[str], work_area: WorkArea, gap: int, margin
         cols, rows = (2, 1) if wide else (1, 2)
     else:  # n == 3
         cols, rows = (3, 1) if wide else (1, 3)
-    col_parts = split_axis(ox, ow, cols, gap=gap)
-    row_parts = split_axis(oy, oh, rows, gap=gap)
+    col_parts = split_axis(ox, ow, cols, gap=gap + FRAME_GAP_X)
+    row_parts = split_axis(oy, oh, rows, gap=gap + FRAME_GAP_Y)
     if not col_parts or not row_parts:
         return None
     slots: list[Slot] = []
@@ -174,72 +262,24 @@ class GridCalculator:
         if n <= 0:
             return SlotPlan(work_area, 0, 0, gap, margin, ())
 
-        # n=1..3 use the explicit full-fill layouts (no 2x2-with-blank-cell).
+        ow = work_area.w - 2 * margin
+        # 1–3 stay one row (or one column on a tall screen) when each window
+        # is still wide enough for Chrome. Otherwise fall through so a short
+        # last row can stretch instead of overlapping.
         if n <= 3:
             explicit = _small_n_slots(profile_ids, work_area, gap, margin)
             if explicit is not None:
                 cols, rows, slots = explicit
-                rects = [s.rect for s in slots]
-                assert validate_no_overlap(rects)["valid"]
-                assert validate_within_work_area(rects, work_area)["valid"]
-                return SlotPlan(work_area, cols, rows, gap, margin, slots)
-            # Fall through to the generic path if the explicit layout fails
-            # (e.g. a work area too small for three readable cells).
+                narrow = ow >= CHROME_MIN_WINDOW_W and any(s.rect.w < CHROME_MIN_WINDOW_W for s in slots)
+                if not narrow:
+                    return SlotPlan(work_area, cols, rows, gap, margin, slots)
 
-        best: SlotPlan | None = None
-        best_score = float("inf")
-
-        ox = work_area.x + margin
-        oy = work_area.y + margin
-        ow = work_area.w - 2 * margin
-        oh = work_area.h - 2 * margin
-
-        for cols in range(1, n + 1):
-            rows = math.ceil(n / cols)
-            col_parts = split_axis(ox, ow, cols, gap=gap)
-            row_parts = split_axis(oy, oh, rows, gap=gap)
-            if not col_parts or not row_parts:
-                continue
-            cell_w = min(w for _, w in col_parts)
-            cell_h = min(h for _, h in row_parts)
-            if cell_w < 80 or cell_h < 60:
-                continue
-
-            slots: list[Slot] = []
-            ok = True
-            for i, pid in enumerate(profile_ids):
-                c = i % cols
-                r = i // cols
-                x, cw = col_parts[c]
-                y, ch = row_parts[r]
-                rect = Rect(x, y, cw, ch)
-                # Priority 2: fully inside
-                if (
-                    rect.x < work_area.x
-                    or rect.y < work_area.y
-                    or rect.x + rect.w > work_area.x + work_area.w
-                    or rect.y + rect.h > work_area.y + work_area.h
-                ):
-                    ok = False
-                    break
-                slots.append(Slot(pid, i, rect))
-            if not ok:
-                continue
-            rects = [s.rect for s in slots]
-            # Priority 1: no overlap
-            if not validate_no_overlap(rects)["valid"]:
-                continue
-            # Priority 3: nearly equal sizes (remainder may differ by 1px)
-            if not validate_equal_sizes(rects):
-                continue
-            score = _score(cols, rows, n, work_area, cell_w, cell_h)
-            if score < best_score:
-                best_score = score
-                best = SlotPlan(work_area, cols, rows, gap, margin, tuple(slots))
-
-        if best is None:
+        cols = _choose_cols(n, ow, work_area.h - 2 * margin - TOP_CHROME_INSET)
+        slots = _row_slots(profile_ids, work_area, cols, gap, margin)
+        if slots is None:
             raise ValueError(
-                f"no valid equal-card grid for n={n} in work area "
+                f"no valid grid for n={n} in work area "
                 f"{work_area.w}x{work_area.h} (gap={gap}, margin={margin})"
             )
-        return best
+        rows = math.ceil(n / cols)
+        return SlotPlan(work_area, cols, rows, gap, margin, slots)

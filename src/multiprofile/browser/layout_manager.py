@@ -157,7 +157,10 @@ class WindowLayoutManager:
         if actual_rects:
             ov = validate_no_overlap(actual_rects)
             wi = validate_within_work_area(actual_rects, plan.work_area)
-            eq = validate_equal_sizes(actual_rects)
+            # A short last row is wider on purpose. Only a full grid is
+            # required to have one shared window size.
+            expect_equal = validate_equal_sizes(plan.rects())
+            eq = validate_equal_sizes(actual_rects) if expect_equal else True
             validation = {
                 "valid": ov["valid"] and wi["valid"] and eq,
                 "overlaps": ov["overlaps"],
