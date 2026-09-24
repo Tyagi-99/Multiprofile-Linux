@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .storage.xdg import data_dir
+from .storage.xdg import data_dir, secure_write_json
 
 
 def cookies_dir() -> Path:
@@ -37,9 +37,9 @@ def load_cookies(profile_id: str) -> list[dict[str, Any]]:
 
 def save_cookies(profile_id: str, cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
     path = cookies_path(profile_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
     cleaned = [_normalize_cookie(c) for c in cookies if isinstance(c, dict)]
-    path.write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
+    # A cookie jar is a session-hijacking kit. Owner-only, like the rest.
+    secure_write_json(path, cleaned)
     return cleaned
 
 

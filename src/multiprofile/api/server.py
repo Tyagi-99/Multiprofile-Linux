@@ -275,6 +275,16 @@ def create_app() -> Flask:
     # Order matters: the browser guard runs before the token gate so a
     # rebound or cross-origin request is refused on its shape, whatever
     # credentials it carries.
+    # Files written before secure_write_json existed are still on disk at
+    # their old modes. Tighten them once at startup.
+    try:
+        from ..storage.xdg import harden_data_dir
+        fixed = harden_data_dir()
+        if fixed:
+            log.warning("tightened permissions on operator data: %s", ", ".join(fixed))
+    except Exception as e:  # noqa: BLE001 - never block startup
+        log.debug("permission hardening skipped: %s", e)
+
     register_request_guard(app)
     register_auth(app)
 

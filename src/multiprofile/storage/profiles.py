@@ -9,7 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .xdg import profiles_path, runtime_state_path
+from .xdg import profiles_path, secure_write_json, runtime_state_path
 
 log = logging.getLogger("multiprofile.storage.profiles")
 _lock = threading.RLock()
@@ -118,10 +118,9 @@ def _read_json(path: Path, default):
 
 
 def _write_json(path: Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    # Owner-only: the profile schema carries proxyPass. This used to be a
+    # bare write_text, so the umask decided and the file landed 0664.
+    secure_write_json(path, data)
 
 
 def load_profiles() -> list[dict[str, Any]]:

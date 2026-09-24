@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .profiles import load_profiles, save_profiles
-from .xdg import clients_path
+from .xdg import clients_path, secure_write_json
 
 _lock = threading.RLock()
 
@@ -24,10 +24,7 @@ def _read_json(path: Path, default):
 
 
 def _write_json(path: Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    secure_write_json(path, data)
 
 
 def load_clients() -> list[dict[str, Any]]:
