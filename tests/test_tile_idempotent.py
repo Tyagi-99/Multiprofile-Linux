@@ -1,7 +1,7 @@
 """Same inputs → identical SlotPlan (idempotent tile geometry)."""
 from __future__ import annotations
 
-from multiprofile.browser.grid import GridCalculator
+from multiprofile.browser.grid import TOP_CHROME_INSET, GridCalculator
 from multiprofile.browser.work_area import WorkArea
 
 
@@ -33,7 +33,8 @@ def test_plan_idempotent_zero_gap_edge_to_edge():
     ]
     last = p1.slots[-1].rect
     assert p1.slots[0].rect.x == area.x
-    assert p1.slots[0].rect.y == area.y
+    # The top TOP_CHROME_INSET strip is reserved for the first row's title bar.
+    assert p1.slots[0].rect.y == area.y + TOP_CHROME_INSET
     assert last.x + last.w == area.x + area.w or p1.slots[3].rect.x + p1.slots[3].rect.w == area.x + area.w
     assert last.y + last.h == area.y + area.h
 

@@ -458,17 +458,36 @@ class TestSecurityAudit:
 
 class TestWindowTiling:
     @pytest.mark.parametrize("n", [4, 9, 20])
-    def test_grid_covers_full_work_area(self, n):
+    def test_grid_fills_the_work_area_below_the_title_bar_inset(self, n):
+        """Rows span edge to edge and reach the bottom.
+
+        The top TOP_CHROME_INSET strip is deliberately not covered: CDP
+        reports the client area, so a window placed flush with the top of
+        the work area gets pushed down by its own title bar and spills
+        into the row below. The 1px frame gaps are not covered either.
+        """
         from multiprofile.browser.work_area import WorkArea
-        from multiprofile.browser.grid import GridCalculator
+        from multiprofile.browser.grid import GridCalculator, TOP_CHROME_INSET
+
         wa = WorkArea(x=0, y=0, w=1920, h=1080, source="test")
         calc = GridCalculator()
         ids = [f"p{i}" for i in range(n)]
         plan = calc.plan(ids, wa, gap=0, margin=0)
         rects = plan.rects()
         assert len(rects) == n
-        total = sum(r.w * r.h for r in rects)
-        assert total == wa.w * wa.h, f"{n} profiles: tiles don't cover full work area"
+
+        rows: dict[int, list] = {}
+        for s in plan.slots:
+            rows.setdefault(s.index // plan.cols, []).append(s.rect)
+        for row in rows.values():
+            row.sort(key=lambda r: r.x)
+            assert row[0].x == wa.x, f"{n} profiles: row does not start at the left edge"
+            assert row[-1].x + row[-1].w == wa.x + wa.w, f"{n} profiles: row does not reach the right edge"
+
+        top_row = rows[0]
+        bottom_row = rows[max(rows)]
+        assert top_row[0].y == wa.y + TOP_CHROME_INSET, f"{n} profiles: first row ignores the title-bar inset"
+        assert bottom_row[0].y + bottom_row[0].h == wa.y + wa.h, f"{n} profiles: last row does not reach the bottom"
 
     @pytest.mark.parametrize("n", [4, 9, 20])
     def test_grid_no_overlap(self, n):
