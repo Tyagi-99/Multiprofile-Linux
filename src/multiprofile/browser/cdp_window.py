@@ -173,6 +173,38 @@ class CdpWindowController:
         )
         return chosen
 
+    def list_page_windows(self) -> list[tuple[str, int, str]]:
+        """``(target_id, window_id, url)`` for every real page target.
+
+        Same filter as :meth:`pick_page_target` -- devtools and extension
+        targets are not windows the operator sees. A target whose window
+        cannot be resolved is skipped rather than guessed at.
+        """
+        pairs: list[tuple[str, int, str]] = []
+        for t in self.list_targets():
+            if t.type != "page":
+                continue
+            url = t.url or ""
+            if url.startswith("devtools://") or "chrome-extension://" in url:
+                continue
+            try:
+                window_id, _ = self.get_window_id_for_target(t.target_id)
+            except CdpError as e:
+                log.debug("no window for target %s: %s", t.target_id[:8], e)
+                continue
+            pairs.append((t.target_id, window_id, url))
+        return pairs
+
+    def close_target(self, target_id: str) -> bool:
+        """Close one page target. Closing a window's last tab closes it."""
+        try:
+            result = self._call("Target.closeTarget", {"targetId": target_id})
+        except CdpError as e:
+            log.warning("close target %s failed: %s", target_id[:8], e)
+            return False
+        # Newer Chrome returns {} on success; older returns {"success": bool}.
+        return bool(result.get("success", True))
+
     def get_window_id_for_target(self, target_id: str) -> tuple[int, Rect | None]:
         try:
             result = self._call("Browser.getWindowForTarget", {"targetId": target_id})

@@ -42,6 +42,10 @@ class Settings:
     window_tile_max_retries: int = 3
     window_tile_settle_ms: int = 200
     window_tiling_enabled: bool = True
+    # One window per profile: close session-restore leftovers that belong to
+    # the profile's own user-data-dir before tiling. Set False to leave every
+    # window open and accept that only one of them is positioned.
+    window_reap_extras: bool = True
     # Network isolation settings
     proxy_check_timeout: int = 8           # seconds for pre-launch proxy probe
     proxy_check_enabled: bool = True       # set False to skip in offline/dev environments
@@ -82,6 +86,7 @@ def get_settings() -> Settings:
         window_tile_max_retries=_env_int("MULTIPROFILE_WINDOW_TILE_MAX_RETRIES", 3, minimum=1, maximum=10),
         window_tile_settle_ms=_env_int("MULTIPROFILE_WINDOW_TILE_SETTLE_MS", 200, minimum=0, maximum=5000),
         window_tiling_enabled=_env_bool("MULTIPROFILE_WINDOW_TILING", True),
+        window_reap_extras=_env_bool("MULTIPROFILE_WINDOW_REAP_EXTRAS", True),
         proxy_check_timeout=_env_int("MULTIPROFILE_PROXY_CHECK_TIMEOUT", 8, minimum=2, maximum=60),
         proxy_check_enabled=_env_bool("MULTIPROFILE_PROXY_CHECK_ENABLED", True),
         gpu_mode=(os.environ.get("MULTIPROFILE_GPU_MODE") or "auto").strip().lower(),

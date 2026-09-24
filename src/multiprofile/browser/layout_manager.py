@@ -8,6 +8,7 @@ from ..config import get_settings
 from .cdp_window import CdpError, CdpWindowController
 from .grid import GridCalculator, Rect, SlotPlan, validate_equal_sizes, validate_no_overlap, validate_within_work_area
 from .runtime_state import LaunchState, clear_runtime, get_runtime, list_runtimes, set_launch_state, upsert_runtime
+from .window_reaper import ReapPlan, chrome_owns_profile_dir, group_windows, plan_reap
 from .work_area import WorkArea, WorkAreaError, WorkAreaProvider
 
 log = logging.getLogger("multiprofile.browser.layout_manager")
@@ -46,6 +47,48 @@ class WindowLayoutManager:
         except ValueError as e:
             return None, {"ok": False, "error": "grid_unavailable", "message": str(e)}
 
+    def reap_extra_windows(self, cdp, profile_id: str, pid: int | None, preferred_target_id: str | None) -> dict[str, Any]:
+        """Collapse a profile's Chrome to one window before it is tiled.
+
+        The grid owns one slot per profile and only one target is moved, so
+        session-restore leftovers would overlap the tiled windows forever.
+        Refuses to close anything unless the pid's ``--user-data-dir`` proves
+        this browser belongs to ``profile_id``.
+        """
+        pairs = cdp.list_page_windows()
+        reap: ReapPlan = plan_reap(group_windows(pairs), preferred_target_id=preferred_target_id)
+        report: dict[str, Any] = {
+            "windows": len({w for _, w, _ in pairs}),
+            "closed": 0,
+            "skipped": None,
+            **reap.to_dict(),
+        }
+        if reap.is_noop:
+            return report
+
+        owned, why = chrome_owns_profile_dir(pid, profile_id)
+        if not owned:
+            report["skipped"] = f"ownership unproven: {why}"
+            log.warning("refusing to close windows for %s -- %s", profile_id, why)
+            return report
+
+        closed = 0
+        for target_id in reap.close_target_ids:
+            if cdp.close_target(target_id):
+                closed += 1
+        report["closed"] = closed
+        log.info(
+            "reaped %s: pid=%s closed %d/%d target(s) across window(s) %s, kept window %s (%s)",
+            profile_id,
+            pid,
+            closed,
+            len(reap.close_target_ids),
+            list(reap.close_window_ids),
+            reap.keep_window_id,
+            why,
+        )
+        return report
+
     def apply_plan(self, plan: SlotPlan) -> dict[str, Any]:
         """Apply outer bounds via CDP for each slot. Does not kill browsers on failure."""
         settings = get_settings()
@@ -63,6 +106,7 @@ class WindowLayoutManager:
                 "actual": None,
                 "windowId": None,
                 "targetId": None,
+                "reap": None,
             }
             if rt is None or not rt.cdp_port:
                 entry["error"] = "cdp_unreachable"
@@ -74,13 +118,24 @@ class WindowLayoutManager:
                 with CdpWindowController(rt.cdp_port) as cdp:
                     set_launch_state(pid, LaunchState.CDP_READY, cdp_port=rt.cdp_port)
                     target = cdp.pick_page_target()
-                    entry["targetId"] = target.target_id
-                    window_id, _ = cdp.get_window_id_for_target(target.target_id)
+                    target_id = target.target_id
+                    if settings.window_reap_extras:
+                        try:
+                            report = self.reap_extra_windows(cdp, pid, rt.pid, target_id)
+                            entry["reap"] = report
+                            # The survivor may not be the window we first picked.
+                            target_id = report.get("keepTargetId") or target_id
+                        except CdpError as e:
+                            # Tiling one window beats refusing to tile at all.
+                            entry["reap"] = {"error": e.code, "message": str(e)}
+                            log.warning("window reap failed for %s: %s", pid, e)
+                    entry["targetId"] = target_id
+                    window_id, _ = cdp.get_window_id_for_target(target_id)
                     entry["windowId"] = window_id
                     set_launch_state(
                         pid,
                         LaunchState.WINDOW_FOUND,
-                        target_id=target.target_id,
+                        target_id=target_id,
                         window_id=window_id,
                         slot_index=slot.index,
                         desired_rect=slot.rect.to_dict(),
