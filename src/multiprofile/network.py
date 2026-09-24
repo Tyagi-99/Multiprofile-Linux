@@ -122,6 +122,13 @@ class NetworkConfig:
     ipv6_policy: IPv6Policy = IPv6Policy.ENABLED
     webrtc_policy: WebRTCPolicy = WebRTCPolicy.DEFAULT
     proxy_fallback: ProxyFallback = ProxyFallback.BLOCK  # NEVER change default to ALLOW
+    # Set when a route was REQUIRED but could not be resolved -- today only by
+    # a proxy pool that has no member to give this profile. It exists because
+    # needs_proxy_check() is False when proxy is None: a config carrying a
+    # proxy mode with no proxy would sail through the gate and launch on the
+    # host IP. An unresolved route must block, so it is stated here rather
+    # than encoded as an empty proxy. Never clear this to "try anyway".
+    blocked_reason: str | None = None
 
     def needs_proxy_check(self) -> bool:
         """Return True if a proxy health check must pass before launch."""
@@ -141,6 +148,7 @@ class NetworkConfig:
             "ipv6Policy": self.ipv6_policy.value,
             "webrtcPolicy": self.webrtc_policy.value,
             "proxyFallback": self.proxy_fallback.value,
+            "blockedReason": self.blocked_reason,
         }
 
     @classmethod
@@ -412,6 +420,13 @@ def check_proxy_before_launch(
     - Proxy configured → check; on failure respect ProxyFallback policy.
     - Default policy (BLOCK) → never allow Chrome to launch with a dead proxy.
     """
+    # A route that was required and could not be resolved blocks before any
+    # probe runs. Checked first: DIRECT-looking configs reach here too, and
+    # this must not be mistaken for "no proxy configured, carry on".
+    if network_config.blocked_reason:
+        log.warning("pre-launch blocked: %s", network_config.blocked_reason)
+        return False, network_config.blocked_reason, None
+
     if not network_config.needs_proxy_check():
         return True, None, None
 
@@ -482,13 +497,71 @@ def chrome_network_flags(network_config: NetworkConfig) -> list[str]:
     return flags
 
 
+_POOL_SCHEME_MODES = {
+    "http": NetworkMode.HTTP_PROXY,
+    "https": NetworkMode.HTTPS_PROXY,
+    "socks5": NetworkMode.SOCKS5,
+    "socks5h": NetworkMode.SOCKS5,
+}
+
+
 def network_config_for_profile(profile: dict[str, Any]) -> NetworkConfig:
-    """Read NetworkConfig for a profile, migrating legacy fields if needed."""
+    """Read NetworkConfig for a profile, migrating legacy fields if needed.
+
+    A profile carrying ``poolId`` draws its route from that shared pool and
+    the pool wins over the profile's own proxy fields: the operator put the
+    profile in a pool precisely so the pool decides. If the pool cannot
+    supply a member the result is a BLOCKED config, never DIRECT -- falling
+    back to the host IP is the one outcome a proxy pool must never produce.
+    """
+    pool_id = profile.get("poolId") or profile.get("pool_id")
+    if pool_id:
+        return _network_config_from_pool(str(pool_id), profile)
+
     nc_raw = profile.get("networkConfig")
     if nc_raw and isinstance(nc_raw, dict) and nc_raw.get("mode"):
         return NetworkConfig.from_dict(nc_raw)
     # Legacy migration: build from scattered fields
     return NetworkConfig.from_legacy_profile(profile)
+
+
+def _network_config_from_pool(pool_id: str, profile: dict[str, Any]) -> NetworkConfig:
+    from .storage.pools import choose_member, get_pool, resolve_member
+
+    webrtc = _map_webrtc(profile.get("webrtcMode") or "default")
+
+    def blocked(reason: str) -> NetworkConfig:
+        return NetworkConfig(mode=NetworkMode.DIRECT, webrtc_policy=webrtc, blocked_reason=reason)
+
+    pool = get_pool(pool_id)
+    if pool is None:
+        return blocked(f"Proxy pool '{pool_id}' no longer exists. Pick another pool or clear it.")
+
+    member, reason = choose_member(pool, str(profile.get("id") or ""))
+    if member is None:
+        return blocked(reason)
+
+    endpoint = resolve_member(pool, member)
+    if endpoint is None:
+        return blocked(
+            f"Pool '{pool.get('label')}' member "
+            f"'{member.get('label') or member.get('id')}' has no usable endpoint."
+        )
+
+    scheme = endpoint["scheme"]
+    return NetworkConfig(
+        mode=_POOL_SCHEME_MODES.get(scheme, NetworkMode.SOCKS5),
+        proxy=ProxyConfig(
+            scheme=scheme,
+            host=endpoint["host"],
+            port=int(endpoint["port"]),
+            username=endpoint.get("username"),
+            password=endpoint.get("password"),
+        ),
+        webrtc_policy=webrtc,
+        # Pools inherit the fail-closed default. A dead pool proxy blocks.
+        proxy_fallback=ProxyFallback.BLOCK,
+    )
 
 
 # ---------------------------------------------------------------------------

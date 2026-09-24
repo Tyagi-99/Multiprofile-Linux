@@ -50,6 +50,21 @@ def get_client(client_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _workspace_fields(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Workspace additions on top of the original client shape.
+
+    A workspace is a client that also carries operating defaults: the proxy
+    pool its profiles draw from and the tag vocabulary the team agreed on.
+    Kept additive so every existing clients.json stays readable.
+    """
+    base = existing or {}
+    tags = payload.get("tags", base.get("tags") or [])
+    return {
+        "defaultPoolId": payload.get("defaultPoolId", base.get("defaultPoolId")) or None,
+        "tags": [str(t).strip() for t in tags if str(t).strip()] if isinstance(tags, list) else [],
+    }
+
+
 def create_client(payload: dict[str, Any]) -> dict[str, Any]:
     items = load_clients()
     client = {
@@ -58,6 +73,7 @@ def create_client(payload: dict[str, Any]) -> dict[str, Any]:
         "notes": payload.get("notes") or "",
         "color": payload.get("color") or "#6366f1",
         "createdAt": payload.get("createdAt") or date.today().isoformat(),
+        **_workspace_fields(payload),
     }
     items.append(client)
     save_clients(items)
@@ -68,11 +84,24 @@ def update_client(client_id: str, payload: dict[str, Any]) -> dict[str, Any] | N
     items = load_clients()
     for i, c in enumerate(items):
         if c.get("id") == client_id:
-            merged = {**c, **payload, "id": client_id}
+            merged = {**c, **payload, "id": client_id, **_workspace_fields(payload, c)}
             items[i] = merged
             save_clients(items)
             return items[i]
     return None
+
+
+def load_workspaces() -> list[dict[str, Any]]:
+    """Clients, with the workspace fields filled in for older records."""
+    return [{**_workspace_fields({}, c), **c, **_workspace_fields(c, c)} for c in load_clients()]
+
+
+def workspace_default_pool(client_id: str | None) -> str | None:
+    """The pool a new profile in this workspace should join, if any."""
+    if not client_id:
+        return None
+    client = get_client(client_id)
+    return (client or {}).get("defaultPoolId") or None
 
 
 def delete_client(client_id: str) -> bool:

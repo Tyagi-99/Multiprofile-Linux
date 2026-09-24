@@ -229,6 +229,8 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
         v_str(payload["color"], "color", min_len=1, max_len=16)
     if "clientId" in payload and payload["clientId"] is not None:
         v_str(payload["clientId"], "clientId", min_len=1, max_len=128)
+    if "poolId" in payload and payload["poolId"] is not None:
+        v_str(payload["poolId"], "poolId", min_len=1, max_len=128)
     if "tags" in payload and payload["tags"] is not None:
         v_str_list(payload["tags"], "tags", max_items=50, item_max_len=64)
     if "seed" in payload and payload["seed"] is not None:

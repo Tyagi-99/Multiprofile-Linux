@@ -398,6 +398,15 @@ def create_app() -> Flask:
         validate_profile_payload(payload, partial=False)
         if "userAgentId" not in payload and "uaId" in payload:
             payload["userAgentId"] = payload["uaId"]
+        # A profile created in a workspace joins that workspace's proxy pool
+        # unless it names one itself. This is the point of a workspace: the
+        # operator sets the route once, not once per profile.
+        if not payload.get("poolId"):
+            from ..storage.clients import workspace_default_pool
+
+            inherited = workspace_default_pool(payload.get("clientId"))
+            if inherited:
+                payload["poolId"] = inherited
         profile = create_profile(payload)
         warnings = _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
@@ -635,6 +644,140 @@ def create_app() -> Flask:
     def templates_delete(template_id: str):
         if not delete_template(template_id):
             return jsonify({"error": "not found"}), 404
+        return jsonify({"ok": True})
+
+    # ------------------------------------------------------------------ #
+    #  Workspaces — clients plus operating defaults                        #
+    # ------------------------------------------------------------------ #
+    @app.get("/api/workspaces")
+    def workspaces_list():
+        """Clients with defaultPoolId and tags filled in for older records."""
+        from ..storage.clients import load_workspaces
+
+        return jsonify(load_workspaces())
+
+    # ------------------------------------------------------------------ #
+    #  Shared proxy pools                                                  #
+    # ------------------------------------------------------------------ #
+    @app.get("/api/pools")
+    def pools_list():
+        from ..storage.pools import load_pools, pool_usage, to_safe_dict
+
+        out = []
+        for p in load_pools():
+            safe = to_safe_dict(p)
+            safe["usage"] = pool_usage(p["id"])
+            safe["profileCount"] = len(p.get("assignments") or {})
+            out.append(safe)
+        return jsonify(out)
+
+    @app.post("/api/pools")
+    def pools_create():
+        from ..storage.pools import create_pool, to_safe_dict
+
+        payload = require_json()
+        return jsonify({"ok": True, "pool": to_safe_dict(create_pool(payload))})
+
+    @app.get("/api/pools/<pool_id>")
+    def pools_get(pool_id: str):
+        from ..storage.pools import get_pool, pool_usage, to_safe_dict
+
+        pool = get_pool(pool_id)
+        if not pool:
+            return jsonify({"error": "not found"}), 404
+        safe = to_safe_dict(pool)
+        safe["usage"] = pool_usage(pool_id)
+        return jsonify(safe)
+
+    @app.put("/api/pools/<pool_id>")
+    def pools_update(pool_id: str):
+        from ..storage.pools import to_safe_dict, update_pool
+
+        payload = require_json()
+        updated = update_pool(pool_id, payload)
+        if not updated:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"ok": True, "pool": to_safe_dict(updated)})
+
+    @app.delete("/api/pools/<pool_id>")
+    def pools_delete(pool_id: str):
+        from ..storage.pools import delete_pool
+
+        if not delete_pool(pool_id):
+            return jsonify({"error": "not found"}), 404
+        # Profiles keep their poolId: resolving it now blocks with "no longer
+        # exists", which is the honest state. Silently clearing it would turn
+        # a pooled profile into a direct one without anyone deciding that.
+        audit_log("pool_delete", ok=True, detail={"poolId": pool_id})
+        return jsonify({"ok": True})
+
+    @app.post("/api/pools/<pool_id>/assign")
+    def pools_assign(pool_id: str):
+        """Resolve (and record) which member a profile draws from."""
+        from ..storage.pools import assign
+
+        payload = require_json()
+        profile_id = str(payload.get("profileId") or "").strip()
+        if not profile_id:
+            return jsonify({"error": "profileId is required"}), 400
+        member, reason = assign(pool_id, profile_id)
+        if member is None:
+            return jsonify({"ok": False, "error": "unassignable", "message": reason}), 409
+        audit_log("pool_assign", profile_id=profile_id, ok=True,
+                  detail={"poolId": pool_id, "memberId": member["id"]})
+        return jsonify({
+            "ok": True,
+            "reason": reason,
+            # Never the password.
+            "member": {k: v for k, v in member.items() if k != "password"},
+        })
+
+    @app.post("/api/pools/<pool_id>/release")
+    def pools_release(pool_id: str):
+        from ..storage.pools import release
+
+        payload = require_json()
+        profile_id = str(payload.get("profileId") or "").strip()
+        if not profile_id:
+            return jsonify({"error": "profileId is required"}), 400
+        released = release(pool_id, profile_id)
+        if released:
+            audit_log("pool_release", profile_id=profile_id, ok=True, detail={"poolId": pool_id})
+        return jsonify({"ok": True, "released": released})
+
+    # ------------------------------------------------------------------ #
+    #  Profile notes — a timestamped log beside the pinned summary         #
+    # ------------------------------------------------------------------ #
+    @app.get("/api/profiles/<profile_id>/notes")
+    def profile_notes_list(profile_id: str):
+        from ..storage.notes import list_notes
+
+        profile = get_profile(profile_id)
+        if not profile:
+            return jsonify({"error": "not found"}), 404
+        return jsonify({"summary": profile.get("notes") or "", "entries": list_notes(profile_id)})
+
+    @app.post("/api/profiles/<profile_id>/notes")
+    def profile_notes_add(profile_id: str):
+        from ..storage.notes import add_note
+
+        payload = require_json()
+        try:
+            entry = add_note(profile_id, payload.get("text") or "", kind=payload.get("kind") or "note")
+        except ValueError as e:
+            return jsonify({"error": "invalid", "message": str(e)}), 400
+        if entry is None:
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_note_add", profile_id=profile_id, ok=True)
+        return jsonify({"ok": True, "entry": entry}), 201
+
+    @app.delete("/api/profiles/<profile_id>/notes/<note_id>")
+    def profile_notes_delete(profile_id: str, note_id: str):
+        from ..storage.notes import delete_note
+
+        if not delete_note(profile_id, note_id):
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_note_delete", profile_id=profile_id, ok=True)
         return jsonify({"ok": True})
 
     def _list_all_jobs() -> list:
