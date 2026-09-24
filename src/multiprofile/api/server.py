@@ -76,7 +76,7 @@ from .user_agents import USER_AGENTS
 # v1.7.0 API hardening (Workstream 3): validation, cursor pagination, auth,
 # live events. WS1 (events bus / jobs table) and WS2 (metrics routes) are
 # wired defensively — the app must boot even if those modules are absent.
-from .auth import register_auth
+from .auth import register_auth, register_request_guard
 from .event_bus import emit_job_progress, emit_profile_status, get_bus
 from .pagination import paginate, parse_limit
 from .sse import register_events_routes
@@ -272,6 +272,10 @@ def create_app() -> Flask:
     register_error_handlers(app)
     # v1.7.0: non-localhost requests require a bearer token; localhost is
     # exempt by deliberate tradeoff (see auth.py for the honest assessment).
+    # Order matters: the browser guard runs before the token gate so a
+    # rebound or cross-origin request is refused on its shape, whatever
+    # credentials it carries.
+    register_request_guard(app)
     register_auth(app)
 
     @app.get("/api/health")

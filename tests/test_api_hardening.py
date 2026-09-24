@@ -252,9 +252,25 @@ def test_profile_update_wrong_type_rejected(client):
 
 
 def test_profile_create_non_json_body_rejected(client):
+    """Refused at the security boundary now, not by the body validator.
+
+    A text/plain POST is a CORS simple request: any web page can send one
+    with no preflight, and every write route used to parse it anyway via
+    get_json(force=True). The request guard rejects the Content-Type before
+    the body is ever looked at, so this is a 403 rather than a 400 — the
+    request never reaches validation. Same outcome, refused earlier.
+    """
     resp = client.post(
         "/api/profiles", data="this is not json", content_type="text/plain"
     )
+    assert resp.status_code == 403
+    assert resp.get_json()["error"] == "bad_content_type"
+
+
+def test_malformed_json_still_fails_body_validation(client):
+    """With the right Content-Type, the validator is still the one to answer."""
+    resp = client.post("/api/profiles", data="this is not json",
+                       content_type="application/json")
     assert resp.status_code == 400
     assert resp.get_json()["error"]["field"] == "_body"
 
