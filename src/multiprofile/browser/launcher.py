@@ -263,6 +263,112 @@ def find_chrome() -> str:
 # Extension preparation
 # ---------------------------------------------------------------------------
 
+def _reconcile_with_preset(
+    fingerprint: dict[str, Any], preset_cfg: dict[str, Any]
+) -> dict[str, Any]:
+    """Make the injected script agree with the device preset.
+
+    Two systems spoof the same properties: ``Emulation.*`` from the device
+    preset, and the injected identity script from the fingerprint. They must
+    not disagree -- ``consistency.py`` exists precisely to catch a mobile
+    preset wearing a desktop fingerprint, and once identity injection
+    actually reached the page the disagreement became visible as touch
+    emulation being silently undone.
+
+    Only the overlapping keys are copied. Everything else the seed decided
+    stays as it is, so a profile remains deterministic.
+    """
+    if not preset_cfg:
+        return fingerprint
+    out = dict(fingerprint)
+    if preset_cfg.get("mobile"):
+        out["isMobile"] = True
+    touch = preset_cfg.get("max_touch_points")
+    if touch is not None:
+        out["touch"] = int(touch)
+    cores = preset_cfg.get("hardware_concurrency")
+    if cores:
+        out["cores"] = int(cores)
+    memory = preset_cfg.get("device_memory_gb")
+    if memory:
+        out["memory"] = int(memory)
+    return out
+
+
+def _cdp_cookies(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert stored (extension-shaped) cookies to CDP CookieParam.
+
+    The stored form is what chrome.cookies.set takes: ``expirationDate``
+    seconds and a leading-dot ``domain``. CDP wants ``expires`` and is happy
+    with the dotted domain, but rejects entries with no name or no domain, so
+    those are dropped rather than sent and silently refused.
+    """
+    out: list[dict[str, Any]] = []
+    for c in stored or []:
+        name = c.get("name")
+        domain = c.get("domain") or ""
+        if not name or not domain:
+            continue
+        param: dict[str, Any] = {
+            "name": str(name),
+            "value": str(c.get("value") or ""),
+            "domain": domain,
+            "path": c.get("path") or "/",
+            "secure": bool(c.get("secure")),
+            "httpOnly": bool(c.get("httpOnly")),
+        }
+        if c.get("sameSite"):
+            # CDP capitalises these; chrome.cookies does not always.
+            param["sameSite"] = str(c["sameSite"]).capitalize()
+        if c.get("expirationDate"):
+            param["expires"] = float(c["expirationDate"])
+        out.append(param)
+    return out
+
+
+def _start_identity_injection(
+    profile_id: str,
+    port: int,
+    profile: dict[str, Any],
+    fingerprint: dict[str, Any],
+    net: Any,
+) -> list[str]:
+    """Install fingerprint, proxy auth and cookies over CDP. Returns notes."""
+    from .cdp_inject import ProxyAuth, build_identity_script, start_injection
+
+    notes: list[str] = []
+
+    evasion = extension_src() / "evasion.js"
+    script = ""
+    if evasion.exists():
+        script = build_identity_script(fingerprint, evasion.read_text(encoding="utf-8", errors="ignore"))
+    else:
+        notes.append("identity script MISSING: evasion.js not found")
+
+    auth = None
+    if net is not None and getattr(net, "proxy", None) and net.proxy.username:
+        auth = ProxyAuth(username=net.proxy.username, password=net.proxy.password or "")
+
+    cookies = _cdp_cookies(load_cookies(profile_id))
+
+    status = start_injection(profile_id, port, script=script, proxy_auth=auth, cookies=cookies)
+    upsert_runtime(profile_id, inject_ok=status.ok, inject_detail=status.to_dict())
+
+    if status.error:
+        notes.append(f"identity injection FAILED: {status.error}")
+        return notes
+    notes.append(
+        "Identity injection: script="
+        f"{'installed' if status.script_installed else 'NOT INSTALLED'}, "
+        f"proxy auth={'armed' if status.auth_armed else 'not needed'}, "
+        f"cookies={status.cookies_applied}"
+    )
+    if script and not status.script_installed:
+        # Loud on purpose: this is the profile browsing as the host.
+        notes.append("WARNING: fingerprint script did not install — profile is NOT masked")
+    return notes
+
+
 def _prepare_extension(profile: dict[str, Any], fingerprint: dict[str, Any]) -> Path:
     src = extension_src()
     dest = chrome_profile_dir(profile["id"]) / "extension"
@@ -514,10 +620,21 @@ def launch_profile(
         if device_preset is None:
             notes.append(f"device preset not found: {device_id}")
         else:
-            preset_ua = (device_preset.to_mobile_config_dict() or {}).get("user_agent") or ""
+            preset_cfg = device_preset.to_mobile_config_dict() or {}
+            preset_ua = preset_cfg.get("user_agent") or ""
             if not ua and preset_ua:
                 ua = preset_ua
                 notes.append(f"Device preset UA applied via --user-agent ({device_preset.id})")
+            # Reconcile the fingerprint with the preset on the properties BOTH
+            # control. build_fingerprint only reads profile["isMobile"], so a
+            # Pixel 9 preset used to yield a desktop fingerprint: the injected
+            # script then set maxTouchPoints to 0 and quietly overrode the
+            # preset's own touch emulation. The preset is authoritative here,
+            # as the CDP emulation block below already states.
+            reconciled = _reconcile_with_preset(fingerprint, preset_cfg)
+            if reconciled != fingerprint:
+                fingerprint = reconciled
+                notes.append(f"Fingerprint reconciled with device preset ({device_preset.id})")
 
     # ------------------------------------------------------------------
     # Sandbox
@@ -641,6 +758,18 @@ def launch_profile(
         wait_for_cdp(debug_port, timeout_s=8.0)
         set_launch_state(profile_id, LaunchState.CDP_READY, pid=proc.pid, cdp_port=debug_port)
         notes.append(f"CDP ready on 127.0.0.1:{debug_port}")
+
+        # Identity injection over CDP — fingerprint script, proxy auth and
+        # cookies. This replaces the MV3 extension, which Google Chrome
+        # refuses to load ("--disable-extensions-except is not allowed in
+        # Google Chrome, ignoring"), leaving every one of those three jobs
+        # undone while the console reported the profile healthy. Runs first
+        # so a page is never unfrozen before its identity is installed.
+        try:
+            notes.extend(_start_identity_injection(profile_id, debug_port, profile, fingerprint, net))
+        except Exception as e:  # noqa: BLE001 - never fatal to a launch
+            notes.append(f"identity injection skipped: {e}")
+            log.warning("identity injection failed for %s: %s", profile_id, e)
 
         # Apply UA/client-hints override via CDP for HTTP-layer consistency
         try:
@@ -788,6 +917,14 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     windows. The supervisor may restart only an unexpected exit from RUNNING,
     so a stopped profile stays stopped until the user presses Launch again.
     """
+    # Drop the injection session first: it holds an open CDP socket and a
+    # proxy password in memory, and neither should outlive the browser.
+    try:
+        from .cdp_inject import stop_injection
+        stop_injection(profile_id)
+    except Exception as e:  # noqa: BLE001 - teardown must not block a stop
+        log.debug("injection teardown failed for %s: %s", profile_id, e)
+
     profile = get_profile(profile_id)
     pid = (profile or {}).get("pid")
     if not pid:

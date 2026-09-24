@@ -41,6 +41,11 @@ class ProfileRuntime:
     proxy_ok: bool | None = None
     egress_ip: str | None = None
     last_proxy_check: float | None = None
+    # Identity injection (cdp_inject): did the fingerprint script, proxy
+    # auth and cookies actually reach the browser? False here means the
+    # profile is browsing unmasked and the operator must be told.
+    inject_ok: bool | None = None
+    inject_detail: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
