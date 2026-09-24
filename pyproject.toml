@@ -3,6 +3,8 @@ name = "multiprofile-native"
 version = "1.9.0"
 description = "Native Linux Multiprofile manager (clean-room host for authorized UI/extension assets)"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "flask>=3.0.0",
