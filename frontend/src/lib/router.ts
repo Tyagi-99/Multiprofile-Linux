@@ -20,9 +20,16 @@ export type Route =
   | { name: "settings" };
 
 export function parseHash(hash: string): Route {
-  const clean = hash.replace(/^#\/?/, "").replace(/\/$/, "");
+  // Strip the query BEFORE matching. A top-level route can carry one --
+  // #/network?tab=pools is what the Network tabs write -- and matching the
+  // whole string "network?tab=pools" against "network" missed every case and
+  // fell through to the overview, so every Network tab click bounced the
+  // operator back to the dashboard. Profile tabs escaped it only because
+  // their query sits in the tail (#/profiles/<id>?tab=network).
+  const [rawPath] = hash.replace(/^#\/?/, "").split("?");
+  const clean = rawPath.replace(/\/$/, "");
   const [head, rawTail] = clean.split("/");
-  const tail = rawTail?.split("?")[0] || undefined;
+  const tail = rawTail || undefined;
   switch (head) {
     case "":
     case "overview":

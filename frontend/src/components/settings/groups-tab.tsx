@@ -8,9 +8,11 @@ import { Dialog } from "../ui/dialog";
 import { EmptyState } from "../ui/empty-state";
 import { Field } from "../ui/field";
 import { Input } from "../ui/input";
+import { Select } from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 import { Table, TBody, TD, TH, THead, TR } from "../ui/table";
 import { Mono } from "../profile-detail/kv";
+import type { ProxyPool } from "../../lib/types";
 
 interface GroupItem {
   id: string;
@@ -187,6 +189,18 @@ function GroupDialog({
   const [name, setName] = useState(item?.name ?? "");
   const [description, setDescription] = useState(item?.description ?? "");
   const [saving, setSaving] = useState(false);
+  // Workspace defaults apply to clients only; templates have no route.
+  const isWorkspace = kind === "clients";
+  const [defaultPoolId, setDefaultPoolId] = useState(
+    (item as { defaultPoolId?: string | null } | null)?.defaultPoolId ?? "",
+  );
+  const pools = useQuery({
+    queryKey: ["pools", "list"],
+    queryFn: () => get<ProxyPool[]>("/api/pools"),
+    enabled: isWorkspace,
+    staleTime: 60_000,
+    retry: 1,
+  });
 
   const save = async () => {
     if (!name.trim()) {
@@ -195,7 +209,12 @@ function GroupDialog({
     }
     setSaving(true);
     try {
-      const payload = { name: name.trim(), description: description.trim() };
+      const payload = {
+        name: name.trim(),
+        description: description.trim(),
+        // null clears it; undefined would leave the old pool in place.
+        ...(isWorkspace ? { defaultPoolId: defaultPoolId || null } : {}),
+      };
       if (isNew) await post(`/api/${kind}`, payload);
       else await put(`/api/${kind}/${encodeURIComponent(item.id)}`, payload);
       toast.success("Saved");
@@ -237,6 +256,29 @@ function GroupDialog({
             />
           )}
         </Field>
+        {isWorkspace && (
+          <Field label="Default proxy pool">
+            {({ id }) => (
+              <>
+                <Select
+                  id={id}
+                  value={defaultPoolId}
+                  onChange={(e) => setDefaultPoolId(e.target.value)}
+                >
+                  <option value="">None — profiles keep their own proxy</option>
+                  {(pools.data ?? []).map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </Select>
+                <p className="mt-1 text-xs text-ink-3">
+                  New profiles created in this group join this pool automatically.
+                </p>
+              </>
+            )}
+          </Field>
+        )}
       </div>
     </Dialog>
   );

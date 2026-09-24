@@ -3,9 +3,10 @@ import { getHashQuery } from "../../lib/router";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { DiagnosticsTab } from "./diagnostics-tab";
 import { GatewaysTab } from "./gateways-tab";
+import { PoolsTab } from "./pools-tab";
 import { ProxiesTab } from "./proxies-tab";
 
-const TABS = ["proxies", "gateways", "diagnostics"] as const;
+const TABS = ["proxies", "pools", "gateways", "diagnostics"] as const;
 type TabId = (typeof TABS)[number];
 
 export function NetworkPage({ initialTab }: { initialTab?: TabId }) {
@@ -27,12 +28,14 @@ export function NetworkPage({ initialTab }: { initialTab?: TabId }) {
       <Tabs value={tab} onValueChange={onTabChange}>
         <TabsList aria-label="Network sections">
           <TabsTrigger value="proxies">Proxies</TabsTrigger>
+          <TabsTrigger value="pools">Pools</TabsTrigger>
           <TabsTrigger value="gateways">Gateways</TabsTrigger>
           <TabsTrigger value="diagnostics">Diagnostics</TabsTrigger>
         </TabsList>
       </Tabs>
       <div key={tab}>
         {tab === "proxies" && <ProxiesTab />}
+        {tab === "pools" && <PoolsTab />}
         {tab === "gateways" && <GatewaysTab />}
         {tab === "diagnostics" && <DiagnosticsTab />}
       </div>

@@ -47,6 +47,55 @@ export interface Profile {
   [key: string]: unknown;
 }
 
+export interface PoolMember {
+  id: string;
+  label?: string;
+  enabled?: boolean;
+  /** Set when the member borrows an endpoint from gateways.json. */
+  gatewayId?: string | null;
+  scheme?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  /** The API never returns the password itself. */
+  hasPassword?: boolean;
+}
+
+export interface ProxyPool {
+  id: string;
+  label: string;
+  strategy: "sticky" | "rotate";
+  members: PoolMember[];
+  assignments: Record<string, string>;
+  notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  /** memberId -> how many profiles sit on it. */
+  usage?: Record<string, number>;
+  profileCount?: number;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  color?: string;
+  notes?: string;
+  defaultPoolId?: string | null;
+  tags?: string[];
+}
+
+export interface NoteEntry {
+  id: string;
+  text: string;
+  kind: string;
+  at: string;
+}
+
+export interface NotesResponse {
+  summary: string;
+  entries: NoteEntry[];
+}
+
 export interface NetworkHealth {
   ok: boolean;
   mode: string;

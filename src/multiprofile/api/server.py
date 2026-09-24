@@ -1079,6 +1079,18 @@ def create_app() -> Flask:
         if not profile:
             return jsonify({"error": "not found"}), 404
         net = network_config_for_profile(profile)
+        # A route that was required and could not be resolved reads as DIRECT
+        # on the dataclass, so it must be reported before the DIRECT branch --
+        # otherwise a profile whose pool is empty is told it is "fine, direct"
+        # while its next launch refuses to start.
+        if net.blocked_reason:
+            return jsonify({
+                "ok": False,
+                "mode": net.mode.value,
+                "status": "BLOCKED",
+                "message": net.blocked_reason,
+                "proxyHealth": None,
+            })
         if not net.needs_proxy_check():
             return jsonify({
                 "ok": True,

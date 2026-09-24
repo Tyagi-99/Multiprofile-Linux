@@ -216,3 +216,32 @@ def test_a_note_can_be_deleted(client):
     assert client.delete(f"/api/profiles/{pid}/notes/{entry['id']}").status_code == 200
     assert client.delete(f"/api/profiles/{pid}/notes/{entry['id']}").status_code == 404
     assert client.get(f"/api/profiles/{pid}/notes").get_json()["entries"] == []
+
+
+# ---------------------------------------------------------------------------
+# network-health must not call a blocked profile "direct"
+# ---------------------------------------------------------------------------
+
+
+def test_network_health_reports_a_stranded_pool_profile_as_blocked(client):
+    """A blocked config reads as DIRECT on the dataclass. The route must not
+    repeat that: saying "fine, direct" about a profile whose next launch will
+    refuse to start is the same swallowed-truth bug as a silent launch error."""
+    pool = _make_pool(client, members=[])
+    pid = client.post(
+        "/api/profiles", json={"name": "Stranded", "poolId": pool["id"]}
+    ).get_json()["profile"]["id"]
+
+    body = client.get(f"/api/profiles/{pid}/network-health").get_json()
+
+    assert body["ok"] is False
+    assert body["status"] == "BLOCKED"
+    assert "no enabled member" in body["message"]
+
+
+def test_network_health_still_reports_a_real_direct_profile_as_direct(client):
+    pid = client.post("/api/profiles", json={"name": "Plain"}).get_json()["profile"]["id"]
+    body = client.get(f"/api/profiles/{pid}/network-health").get_json()
+
+    assert body["ok"] is True
+    assert body["status"] == "DIRECT"

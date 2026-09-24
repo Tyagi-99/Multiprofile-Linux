@@ -23,6 +23,7 @@ import { DeviceTab } from "./tabs/device-tab";
 import { FingerprintInspector } from "../fingerprint/fingerprint-inspector";
 import { HealthTab } from "./tabs/health-tab";
 import { NetworkTab } from "./tabs/network-tab";
+import { NotesTab } from "./tabs/notes-tab";
 import { OverviewTab } from "./tabs/overview-tab";
 import { RuntimeTab } from "./tabs/runtime-tab";
 import { StorageTab } from "./tabs/storage-tab";
@@ -37,6 +38,7 @@ const TABS = [
   "runtime",
   "health",
   "automation",
+  "notes",
   "audit",
 ] as const;
 
@@ -167,6 +169,7 @@ export function ProfileDetail({ id }: { id: string }) {
         {tab === "storage" && <StorageTab profile={profile} />}
         {tab === "runtime" && <RuntimeTab profile={profile} />}
         {tab === "health" && <HealthTab profile={profile} />}
+        {tab === "notes" && <NotesTab profile={profile} />}
         {tab === "automation" && <AutomationTab profile={profile} />}
         {tab === "audit" && <AuditTab profile={profile} />}
       </div>
