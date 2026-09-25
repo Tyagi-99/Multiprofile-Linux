@@ -692,7 +692,6 @@ def launch_profile(
     debug_port = allocate_localhost_port()
     cmd.extend([
         "--remote-debugging-address=127.0.0.1",
-        "--remote-allow-origins=*",
         f"--remote-debugging-port={debug_port}",
     ])
     notes.append(f"CDP localhost-only on 127.0.0.1:{debug_port}")

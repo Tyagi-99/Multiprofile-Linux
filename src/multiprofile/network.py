@@ -488,10 +488,28 @@ def chrome_network_flags(network_config: NetworkConfig) -> list[str]:
     if network_config.proxy and network_config.mode != NetworkMode.DIRECT:
         flags.append(f"--proxy-server={network_config.proxy.chrome_proxy_server()}")
 
-    # DNS — when proxy is active, tell Chrome to resolve DNS remotely too
-    if network_config.dns_policy == DNSPolicy.PROXY_RESOLVED and network_config.proxy:
-        # This forces all DNS to go through the proxy
-        flags.append("--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost")
+    # DNS — nothing to add. Chrome already hands the hostname to an HTTP or
+    # SOCKS5 proxy and lets the proxy resolve it, so a proxied profile emits
+    # no DNS of its own.
+    #
+    # This previously appended
+    #     --host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost
+    # which was both unnecessary and actively harmful. Measured on Chrome 151
+    # with strace counting connect/sendto to port 53, and a local proxy
+    # counting requests:
+    #
+    #     no proxy                      DNS 76   proxy hits 0   page loaded no
+    #     proxy, no resolver rule       DNS  0   proxy hits 2   page loaded YES
+    #     proxy + the resolver rule     DNS  0   proxy hits 0   page loaded no
+    #
+    # "MAP *" catches every host including the proxy's own, and "EXCLUDE
+    # localhost" only spares the literal name "localhost", not 127.0.0.1. So
+    # the rule stopped the profile reaching its proxy at all: every proxied
+    # profile was unable to browse, while the DNS it was supposed to contain
+    # was already contained without it.
+    #
+    # DNSPolicy.PROXY_RESOLVED is therefore a description of what Chrome
+    # already does with a proxy, not something that needs a flag.
 
     # IPv6
     if network_config.ipv6_policy in (IPv6Policy.DISABLED, IPv6Policy.PROXY_ONLY):

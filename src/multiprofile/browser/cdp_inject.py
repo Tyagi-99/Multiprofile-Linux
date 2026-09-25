@@ -202,7 +202,10 @@ class IdentityInjector:
             return self.status
         try:
             url = _browser_ws_url(self.port, timeout_s=timeout_s)
-            self._ws = websocket.create_connection(url, timeout=timeout_s)
+            # suppress_origin: without an Origin header Chrome accepts us
+            # under its DEFAULT policy, so the browser no longer needs
+            # --remote-allow-origins=* and a web page stays locked out.
+            self._ws = websocket.create_connection(url, timeout=timeout_s, suppress_origin=True)
             self._ws.settimeout(_RECV_TIMEOUT)
         except Exception as e:  # noqa: BLE001 - a failed attach is reported, not raised
             self.status.error = f"cdp_connect_failed: {e}"

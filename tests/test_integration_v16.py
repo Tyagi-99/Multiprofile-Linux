@@ -242,7 +242,13 @@ def test_launch_device_emulation_persists_after_launch_returns(client):
             if t.get("type") == "page" and (t.get("url") or "").startswith("data:"))
         ws = websocket.WebSocket()
         try:
-            ws.connect(page["webSocketDebuggerUrl"], timeout=10)
+            # suppress_origin: the launcher no longer passes
+            # --remote-allow-origins=*, because that flag let any website
+            # drive the profile's browser over CDP. Chrome's default origin
+            # check is back on, so a client that sends an Origin header --
+            # which websocket-client does unless told otherwise -- is refused
+            # with 403. Our own tooling sends none; so must this test.
+            ws.connect(page["webSocketDebuggerUrl"], timeout=10, suppress_origin=True)
             ws.send(json.dumps({
                 "id": 1, "method": "Runtime.evaluate", "params": {
                     "expression": ("[window.innerWidth, window.innerHeight, "

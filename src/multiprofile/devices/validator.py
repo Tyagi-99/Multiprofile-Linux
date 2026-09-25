@@ -281,7 +281,6 @@ def _get_shared_browser(binary: str) -> Tuple[subprocess.Popen, int]:
     tmpdir = tempfile.mkdtemp(prefix="mpl-device-validate-")
     proc = subprocess.Popen(
         [binary, "--headless", "--no-sandbox", "--disable-dev-shm-usage",
-         "--remote-allow-origins=*",
          f"--remote-debugging-port={port}", f"--user-data-dir={tmpdir}",
          "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -347,7 +346,7 @@ def _cdp_round_trip(binary: str, preset: DevicePreset, timeout: int = 25) -> Tup
 
         from websocket import create_connection  # websocket-client
 
-        ws = create_connection(ws_url, timeout=10)
+        ws = create_connection(ws_url, timeout=10, suppress_origin=True)
 
         def _send(method: str, params: Dict[str, Any], cmd_id: int) -> Dict[str, Any]:
             ws.send(json.dumps({"id": cmd_id, "method": method, "params": params}))

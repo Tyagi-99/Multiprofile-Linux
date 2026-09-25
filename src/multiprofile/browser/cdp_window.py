@@ -73,7 +73,8 @@ class CdpWindowController:
         info = wait_cdp_ready(self.port, timeout_s=timeout_s)
         path = urlparse(info.get("webSocketDebuggerUrl") or "").path
         ws_url = f"ws://127.0.0.1:{self.port}{path}"
-        self._ws = websocket.create_connection(ws_url, timeout=timeout_s)
+        # No Origin header: keeps Chrome's default DevTools origin check on.
+        self._ws = websocket.create_connection(ws_url, timeout=timeout_s, suppress_origin=True)
         self._ws.settimeout(timeout_s)
 
     def close(self) -> None:

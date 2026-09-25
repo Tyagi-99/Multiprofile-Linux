@@ -178,7 +178,9 @@ def open_pinned_cdp_session(port: int) -> PinnedCdpSession | None:
         return None
     try:
         ws = websocket.WebSocket()
-        ws.connect(ws_url, timeout=_CDP_TIMEOUT)
+        # No Origin header, so Chrome's default DevTools origin check can
+        # stay on and --remote-allow-origins=* is no longer needed.
+        ws.connect(ws_url, timeout=_CDP_TIMEOUT, suppress_origin=True)
     except Exception as e:  # noqa: BLE001
         log.debug("CDP pinned session connect failed on port %s: %s", port, e)
         return None
@@ -219,7 +221,9 @@ def _cdp_ws_send(port: int, method: str, params: dict[str, Any]) -> dict[str, An
             return
         try:
             ws = websocket.WebSocket()
-            ws.connect(ws_url, timeout=_CDP_TIMEOUT)
+            # No Origin header, so Chrome's default DevTools origin check can
+            # stay on and --remote-allow-origins=* is no longer needed.
+            ws.connect(ws_url, timeout=_CDP_TIMEOUT, suppress_origin=True)
             msg_id = 1
             payload = json.dumps({"id": msg_id, "method": method, "params": params})
             ws.send(payload)

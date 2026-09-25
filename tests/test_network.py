@@ -296,7 +296,21 @@ class TestChromeNetworkFlags:
         flags = chrome_network_flags(nc)
         assert any("disable_non_proxied_udp" in f for f in flags)
 
-    def test_dns_proxy_resolved_flag(self):
+    def test_dns_proxy_resolved_emits_no_resolver_rule(self):
+        """PROXY_RESOLVED describes Chrome's own behaviour; it needs no flag.
+
+        This used to assert that --host-resolver-rules was emitted. Measured
+        on Chrome 151 (strace counting connect/sendto to port 53, plus a
+        local proxy counting requests):
+
+            no proxy                   DNS 76   proxy hits 0   loaded no
+            proxy, no resolver rule    DNS  0   proxy hits 2   loaded YES
+            proxy + the resolver rule  DNS  0   proxy hits 0   loaded no
+
+        Chrome already hands the hostname to the proxy, so DNS was contained
+        either way -- and "MAP *" caught the proxy's own address, so the rule
+        stopped every proxied profile from browsing at all.
+        """
         from multiprofile.network import DNSPolicy, NetworkConfig, NetworkMode, ProxyConfig, chrome_network_flags
         nc = NetworkConfig(
             mode=NetworkMode.HTTP_PROXY,
@@ -304,7 +318,12 @@ class TestChromeNetworkFlags:
             dns_policy=DNSPolicy.PROXY_RESOLVED,
         )
         flags = chrome_network_flags(nc)
-        assert any("host-resolver-rules" in f for f in flags)
+        assert not any("host-resolver-rules" in f for f in flags), (
+            "the resolver rule is back; it prevents the profile from reaching "
+            "its own proxy"
+        )
+        # The route itself must still be there.
+        assert any(f.startswith("--proxy-server=") for f in flags)
 
     def test_proxy_credentials_not_in_flags(self):
         """Chrome flags must NEVER contain proxy credentials."""
