@@ -122,6 +122,14 @@ Comprehensive architecture and engineering specifications:
 - Python 3.11+
 - System Chromium or Google Chrome installed
 - Optional: `uv` package manager (recommended)
+- Recommended: `python3-keyring`, so the key that encrypts proxy passwords
+  lives in the OS keychain rather than a `0600` file. Without it the app
+  still encrypts, and says plainly which backend it is using — check
+  `secrets.backend` in `/api/health`:
+
+  ```bash
+  sudo apt install python3-keyring     # Debian / Ubuntu
+  ```
 
 ### Installation
 

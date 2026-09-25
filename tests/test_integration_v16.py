@@ -198,6 +198,10 @@ def test_launch_unknown_device_id_records_note_not_traceback(client, monkeypatch
         client.delete(f"/api/profiles/{pid}?purgeStorage=1")
 
 
+# Also `network`: this launches a real Chrome. Several browsers at once on a
+# small machine surface as "Target crashed" -- a resource failure wearing the
+# costume of a product failure -- so CI runs these in their own serial job.
+@pytest.mark.network
 @pytest.mark.skipif(not (HAS_CHROMIUM and HAS_DISPLAY),
                     reason="needs a working Chromium binary AND an X display")
 def test_launch_device_emulation_persists_after_launch_returns(client):
@@ -272,6 +276,10 @@ def test_launch_device_emulation_persists_after_launch_returns(client):
         client.delete(f"/api/profiles/{pid}?purgeStorage=1")
 
 
+# Also `network`: this launches a real Chrome. Several browsers at once on a
+# small machine surface as "Target crashed" -- a resource failure wearing the
+# costume of a product failure -- so CI runs these in their own serial job.
+@pytest.mark.network
 @pytest.mark.skipif(not (HAS_CHROMIUM and HAS_DISPLAY),
                     reason="needs a working Chromium binary AND an X display")
 def test_launch_device_emulation_note_present_with_chrome(client):
