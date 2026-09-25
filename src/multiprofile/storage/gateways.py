@@ -34,7 +34,14 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .xdg import data_dir
+from . import xdg as _xdg
+
+
+def data_dir():
+    # Resolved through the module so a test that patches
+    # xdg.data_dir actually redirects this store too. Binding
+    # the function at import silently kept using the real path.
+    return _xdg.data_dir()
 
 _lock = threading.RLock()
 
@@ -54,7 +61,22 @@ def _read_gateways() -> list[dict[str, Any]]:
         return []
 
 
+def _encrypt_secrets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Never let a cleartext proxy password reach the file."""
+    from ..secrets import encrypt_secret, is_encrypted
+
+    out = []
+    for g in items:
+        g = dict(g)
+        pw = g.get("password")
+        if isinstance(pw, str) and pw and pw != "***" and not is_encrypted(pw):
+            g["password"] = encrypt_secret(pw)
+        out.append(g)
+    return out
+
+
 def _write_gateways(items: list[dict[str, Any]]) -> None:
+    items = _encrypt_secrets(items)
     path = _gateways_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -86,7 +108,16 @@ def load_gateways(safe: bool = True) -> list[dict[str, Any]]:
 def get_gateway(gateway_id: str, safe: bool = True) -> dict[str, Any] | None:
     for g in load_gateways(safe=False):
         if g.get("id") == gateway_id:
-            return _mask_password(g) if safe else g
+            if safe:
+                return _mask_password(g)
+            # The unmasked path is the one about to authenticate against a
+            # real proxy, so it gets the plaintext. Legacy values that were
+            # never encrypted pass through unchanged.
+            from ..secrets import decrypt_secret
+            out = dict(g)
+            if out.get("password"):
+                out["password"] = decrypt_secret(out["password"])
+            return out
     return None
 
 

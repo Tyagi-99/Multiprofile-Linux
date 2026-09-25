@@ -233,7 +233,10 @@ class NetworkConfig:
                 host=str(profile["proxyHost"]),
                 port=int(profile["proxyPort"]),
                 username=profile.get("proxyUser") or None,
-                password=profile.get("proxyPass") or None,
+                # Decrypt at the point the route is built. Legacy plaintext
+                # passes through unchanged so an un-migrated install still
+                # launches.
+                password=_decrypt_proxy_pass(profile.get("proxyPass")),
             )
 
         if proxy is None:
@@ -257,6 +260,15 @@ class NetworkConfig:
             webrtc_policy=_map_webrtc(profile.get("webrtcMode") or "default"),
             proxy_fallback=ProxyFallback.BLOCK,
         )
+
+
+def _decrypt_proxy_pass(value: Any) -> str | None:
+    """Unwrap a stored proxy password, tolerating legacy plaintext."""
+    if not value:
+        return None
+    from .secrets import decrypt_secret
+
+    return decrypt_secret(value) or None
 
 
 def _map_webrtc(mode: str) -> WebRTCPolicy:

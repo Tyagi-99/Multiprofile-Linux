@@ -174,8 +174,28 @@ def test_harden_data_dir_is_idempotent(xdg):
     assert harden_data_dir() == []
 
 
-def test_creating_the_app_hardens_existing_data(xdg, monkeypatch):
-    """The migration must actually run, not merely exist."""
+def test_the_server_entrypoint_hardens_existing_data(xdg, monkeypatch):
+    """The migration must actually run, not merely exist.
+
+    It runs from the server entrypoint rather than create_app(): the factory
+    is called by every test, and a migration there once reached past a leaky
+    fixture and rewrote the operator's real files.
+    """
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
+    from multiprofile.app import prepare_data_dir
+    from multiprofile.storage.profiles import create_profile
+    from multiprofile.storage.xdg import profiles_path
+
+    create_profile({"name": "x"})
+    os.chmod(profiles_path(), 0o664)
+
+    prepare_data_dir()
+
+    assert _is_private(profiles_path())
+
+
+def test_create_app_does_not_change_permissions(xdg, monkeypatch):
+    """The factory stays free of side effects on operator data."""
     monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
     from multiprofile.storage.profiles import create_profile
     from multiprofile.storage.xdg import profiles_path
@@ -186,4 +206,4 @@ def test_creating_the_app_hardens_existing_data(xdg, monkeypatch):
     from multiprofile.api.server import create_app
     create_app()
 
-    assert _is_private(profiles_path())
+    assert _mode(profiles_path()) == 0o664, "create_app touched operator data"

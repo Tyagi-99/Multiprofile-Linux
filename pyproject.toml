@@ -14,7 +14,11 @@ dependencies = [
 [project.optional-dependencies]
 ui = ["pywebview>=5.0"]
 encrypted-backup = ["cryptography>=42.0.0"]
-all = ["pywebview>=5.0", "cryptography>=42.0.0"]
+# OS keychain for the secrets master key (libsecret / DPAPI / Keychain).
+# Optional: without it the key falls back to a 0600 file and the app
+# says so loudly rather than pretending it is protected.
+keychain = ["keyring>=25.0"]
+all = ["pywebview>=5.0", "cryptography>=42.0.0", "keyring>=25.0"]
 
 [project.scripts]
 multiprofile = "multiprofile.__main__:main"

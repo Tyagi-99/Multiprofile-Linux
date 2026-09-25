@@ -121,6 +121,16 @@ def static_dir() -> Path:
     raise FileNotFoundError("static UI not found")
 
 
+def _secrets_status() -> dict:
+    """Secrets-at-rest state for /api/health. Never raises."""
+    try:
+        from ..secrets import status
+
+        return status()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "backend": "unknown", "keychain": False, "message": str(e)}
+
+
 def _critical_warnings(profile: dict) -> list[str]:
     report = fingerprint_report(profile)
     return [w for w in (report.get("warnings") or []) if str(w).startswith("CRITICAL")]
@@ -283,16 +293,6 @@ def create_app() -> Flask:
     # Order matters: the browser guard runs before the token gate so a
     # rebound or cross-origin request is refused on its shape, whatever
     # credentials it carries.
-    # Files written before secure_write_json existed are still on disk at
-    # their old modes. Tighten them once at startup.
-    try:
-        from ..storage.xdg import harden_data_dir
-        fixed = harden_data_dir()
-        if fixed:
-            log.warning("tightened permissions on operator data: %s", ", ".join(fixed))
-    except Exception as e:  # noqa: BLE001 - never block startup
-        log.debug("permission hardening skipped: %s", e)
-
     register_request_guard(app)
     register_auth(app)
 
@@ -385,6 +385,9 @@ def create_app() -> Flask:
                 "windowTilingEnabled": settings.window_tiling_enabled,
                 "sandbox": sandbox_info,
                 "workArea": work_area_info,
+                # Which key backend is protecting the proxy passwords. The
+                # operator must be able to see when it is the weaker one.
+                "secrets": _secrets_status(),
                 "reaped": reaped,
             }
         )

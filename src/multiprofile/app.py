@@ -15,7 +15,44 @@ log = logging.getLogger("multiprofile.app")
 WEBVIEW_STORAGE_PATH = os.path.expanduser("~/.local/share/multiprofile/webview")
 
 
+def prepare_data_dir() -> None:
+    """One-time upkeep of the operator's data, at real startup only.
+
+    This deliberately does NOT live in create_app(). create_app is a factory
+    that every test calls, and putting migrations there meant a test run
+    could reach out and rewrite the operator's live files -- which is
+    exactly what happened: a test whose isolation patched xdg.data_dir but
+    not the name gateways.py had already bound at import ended up encrypting
+    31 real gateway passwords with a key that lived in a pytest temp
+    directory. Side effects belong in the entrypoint, not the factory.
+    """
+    try:
+        from .storage.xdg import harden_data_dir
+
+        fixed = harden_data_dir()
+        if fixed:
+            log.warning("tightened permissions on operator data: %s", ", ".join(fixed))
+    except Exception as e:  # noqa: BLE001 - never block startup
+        log.debug("permission hardening skipped: %s", e)
+
+    try:
+        from .secrets import backend, migrate_plaintext_secrets
+
+        moved = migrate_plaintext_secrets()
+        if any(moved.values()):
+            log.warning("encrypted plaintext secrets at rest: %s", moved)
+        if backend() == "file":
+            log.warning(
+                "secrets key is a 0600 file, not the OS keychain — install the "
+                "'keyring' extra so a stolen disk does not hand over the proxy "
+                "passwords"
+            )
+    except Exception as e:  # noqa: BLE001 - never block startup
+        log.warning("secret migration skipped: %s", e)
+
+
 def run_server(host: str = "127.0.0.1", port: int = 8765):
+    prepare_data_dir()
     app = create_app()
     # werkzeug quiet-ish
     app.run(host=host, port=port, threaded=True, use_reloader=False)

@@ -163,6 +163,20 @@ def load_profiles() -> list[dict[str, Any]]:
         return items
 
 
+def _encrypt_profile_secrets(profile: dict[str, Any]) -> None:
+    """Wrap proxyPass before the profile reaches disk.
+
+    Everything else on a profile -- name, tags, user agent, timezone -- is
+    not a secret and stays readable, so profiles.json remains diffable and
+    the storage move planned for later is not fighting an encrypted blob.
+    """
+    from ..secrets import encrypt_secret, is_encrypted
+
+    pw = profile.get("proxyPass")
+    if isinstance(pw, str) and pw and not is_encrypted(pw):
+        profile["proxyPass"] = encrypt_secret(pw)
+
+
 def save_profiles(items: list[dict[str, Any]]) -> None:
     with _lock:
         clean = []
@@ -172,6 +186,7 @@ def save_profiles(items: list[dict[str, Any]]) -> None:
             q.pop("isRunning", None)
             q["status"] = "idle"
             _normalize_fields(q)
+            _encrypt_profile_secrets(q)
             clean.append(q)
         _write_json(profiles_path(), clean)
 

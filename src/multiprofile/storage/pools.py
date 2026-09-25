@@ -35,7 +35,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .xdg import data_dir
+from . import xdg as _xdg
+
+
+def data_dir():
+    # Resolved through the module so a test that patches
+    # xdg.data_dir actually redirects this store too. Binding
+    # the function at import silently kept using the real path.
+    return _xdg.data_dir()
 
 _lock = threading.RLock()
 
@@ -66,6 +73,14 @@ def _read() -> list[dict[str, Any]]:
 
 
 def _write(items: list[dict[str, Any]]) -> None:
+    # A member password must never reach the file in the clear.
+    from ..secrets import encrypt_secret, is_encrypted
+
+    for pool in items:
+        for member in pool.get("members") or []:
+            pw = member.get("password")
+            if isinstance(pw, str) and pw and not is_encrypted(pw):
+                member["password"] = encrypt_secret(pw)
     path = pools_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -318,12 +333,14 @@ def resolve_member(pool: dict[str, Any], member: dict[str, Any]) -> dict[str, An
         }
     if not member.get("host"):
         return None
+    from ..secrets import decrypt_secret
+
     return {
         "scheme": (member.get("scheme") or "socks5").lower(),
         "host": member["host"],
         "port": int(member.get("port") or 1080),
         "username": member.get("username") or None,
-        "password": member.get("password") or None,
+        "password": decrypt_secret(member.get("password")) or None,
     }
 
 
