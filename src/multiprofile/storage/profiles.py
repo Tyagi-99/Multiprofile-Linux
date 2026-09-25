@@ -127,6 +127,12 @@ def _write_json(path: Path, data) -> None:
 def load_profiles() -> list[dict[str, Any]]:
     with _lock:
         items = _read_json(profiles_path(), None)
+        if items is not None and not isinstance(items, list):
+            # A corrupted store that happens to hold a JSON object used to be
+            # iterated as a dict, handing its KEYS to _normalize_fields.
+            log.warning("profiles.json is not a list (%s); treating as empty",
+                        type(items).__name__)
+            items = []
         if items is None:
             for p in DEFAULT_PROFILES:
                 _normalize_fields(p)
@@ -135,6 +141,12 @@ def load_profiles() -> list[dict[str, Any]]:
             _write_json(profiles_path(), DEFAULT_PROFILES)
             items = list(DEFAULT_PROFILES)
         runtime = _read_json(runtime_state_path(), {})
+        bad = [p for p in items if not isinstance(p, dict)]
+        if bad:
+            log.warning("dropping %d malformed profile record(s)", len(bad))
+            items = [p for p in items if isinstance(p, dict)]
+        if not isinstance(runtime, dict):
+            runtime = {}
         for p in items:
             _normalize_fields(p)
             st = runtime.get(p.get("id"), {})

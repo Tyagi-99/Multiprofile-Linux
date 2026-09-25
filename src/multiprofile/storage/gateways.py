@@ -56,9 +56,13 @@ def _read_gateways() -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        items = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
+    if not isinstance(items, list):
+        return []
+    # Scalars in the list used to reach _mask_password and raise.
+    return [g for g in items if isinstance(g, dict)]
 
 
 def _encrypt_secrets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
