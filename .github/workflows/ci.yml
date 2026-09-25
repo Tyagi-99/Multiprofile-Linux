@@ -61,14 +61,35 @@ jobs:
           PYTHONPATH: src
         run: |
           uvx --with pytest --with pytest-cov --with flask \
-              --with websocket-client --with cryptography \
-              pytest tests/ -q --cov=multiprofile --cov-report=term \
-              --cov-report=xml --cov-fail-under=70
+              --with websocket-client --with cryptography --with keyring \
+              pytest tests/ -q -m "not network" --cov=multiprofile \
+              --cov-report=term --cov-report=xml --cov-fail-under=70
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: coverage
           path: coverage.xml
+
+  live-browser:
+    name: Live browser
+    runs-on: ubuntu-latest
+    # These launch real Chrome. They run in their own job, serially, because
+    # several headless Chromes plus coverage instrumentation on a small
+    # runner produce "Target crashed" -- a resource failure that looks like
+    # a product failure. Kept out of the coverage job for the same reason.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+      - name: Install the project
+        run: uv sync --all-extras --dev
+      - name: Isolation and live launch tests
+        env:
+          PYTHONPATH: src
+        run: uv run pytest tests/ -q -m network -p no:randomly
 
   frontend:
     name: Console
