@@ -1,0 +1,579 @@
+# 02 — Full Audit Report (Phase 1)
+
+**Commit:** `f4b342d` + uncommitted supervisor fix from this session
+**Date:** 27 September 2026
+**Machine:** Arch Linux 7.1.9-arch1-2, Hyprland/Wayland, Chromium 151.0.7922.173
+**Method:** static read + **live execution** — real profiles launched, real browsers
+driven over CDP, real HTTP headers captured off the wire by a local echo server.
+
+Status key: ✅ Done · 🟡 Partial · ❌ Missing · ⚠️ Broken/Risky
+
+> **Scope note.** A previous `AUDIT.md` (commit `a79a5ca`) closed a set of
+> Critical/High findings. I **re-tested those claims rather than inheriting them**;
+> where they hold, they are credited in §7. The findings below are new, current,
+> and reproduced on this machine today.
+
+---
+
+## Executive summary
+
+The previous audit's security fixes are real and they hold. What it could not see
+— because it was read-only, and because the one live check it ran happened to
+exercise the working path — is that **the product's central function is broken on
+its default path**.
+
+A profile created without a device preset browses with **the host's real User-Agent
+and Client Hints** while its JavaScript claims to be Windows. Measured on the wire:
+
+```
+User-Agent:        Mozilla/5.0 (X11; Linux x86_64) … Chrome/151.0.0.0
+sec-ch-ua-platform: "Linux"
+navigator.platform: "Win32"        ← JS says Windows
+```
+
+That is not weak spoofing. It is a **contradiction that no real browser can
+produce**, and it marks the profile as automated more reliably than doing nothing
+at all. The root cause is one function using a CDP helper whose own docstring
+warns it must not be used that way.
+
+Separately, the spoofing that *does* work is **detectable in a single line of
+JavaScript**: `Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)`
+returns the hook's source code, comments included.
+
+**Verdict: the orchestration layer is close to production quality; the
+anti-detection layer is not. Findings F1–F3 are ship-stoppers for the product's
+own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
+
+---
+
+## Findings
+
+| ID | Sev | Area | Summary | Effort |
+|---|---|---|---|---|
+| **F1** | ⚠️ **Critical** | Fingerprint | UA/Client-Hints spoofing silently does nothing on the default (no-preset) path; reports success | 1–2 d |
+| **F2** | ⚠️ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) | 0.5 d |
+| **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
+| **F4** | ⚠️ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** | 2 h |
+| **F5** | 🟡 **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** | 1 d + policy |
+| **F6** | ⚠️ **High** | Performance | Profile store is a full read+parse per request → **3.1 s** for 25 rows at 10k | 1–2 wk |
+| **F7** | 🟡 Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page | 15 min |
+| **F8** | 🟡 Medium | Security | API silently accepts and persists **unknown fields** | 4 h |
+| **F9** | ❌ Medium | UX | No list virtualization; 25/page pagination | 1 wk |
+| **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
+| **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint | 1–2 wk |
+| **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
+| **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
+| **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
+| **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
+
+---
+
+### F1 — ⚠️ CRITICAL: UA/Client-Hints spoofing does nothing on the default path
+
+**Files:** [`cdp_identity.py:190-249`](../src/multiprofile/browser/cdp_identity.py#L190),
+[`cdp_identity.py:333-369`](../src/multiprofile/browser/cdp_identity.py#L333),
+[`launcher.py:774-781`](../src/multiprofile/browser/launcher.py#L774)
+
+`apply_ua_override()` sends `Network.setUserAgentOverride` through `_cdp_ws_send()`.
+That helper's **own docstring** says:
+
+> *"One-shot semantics: connects, sends, reads the response, closes. NOTE: because
+> the session closes immediately, session-scoped overrides
+> (`Network.setUserAgentOverride`, …) do **NOT** persist — use
+> `open_pinned_cdp_session` when the effect must outlive the call."*
+
+And `launcher.py:786`, **ten lines below the call site**, states the same rule again.
+The code documents the constraint twice and violates it.
+
+`apply_ua_override()` returns `True` on ACK, so the launcher appends
+`"CDP UA/client-hints override applied"` and the operator sees success.
+
+**Proven by measurement.** Called the function directly against a live profile,
+then captured the headers it actually sent to a local server:
+
+```
+apply_ua_override() returned: True          ← reports success
+
+User-Agent:         Mozilla/5.0 (X11; Linux x86_64) … Chrome/151.0.0.0
+sec-ch-ua:          "Chromium";v="151", "Not=A?Brand";v="99"
+sec-ch-ua-platform: "Linux"
+
+VERDICT: DISCARDED when the one-shot session closed
+```
+
+At launch it frequently does not even ACK — three of four launches logged
+`CDP UA/client-hints override FAILED (no CDP response)`, because `_pick_page_ws_url`
+finds no content page yet on an `about:blank` launch.
+
+**Why this is worse than no spoofing.** The JS layer *does* apply, so the profile
+presents:
+
+| Surface | Value | Source |
+|---|---|---|
+| `User-Agent` header | Linux, Chrome 151 | real host |
+| `sec-ch-ua-platform` | `"Linux"` | real host |
+| `navigator.platform` | `Win32` | injected |
+| `navigator.userAgentData.platform` | `Windows` | injected |
+| `navigator.userAgentData.brands` | Chrome **131** | injected |
+
+Any server that compares its own request headers with JS-reported values catches
+this **100% of the time**, with no fingerprinting library required. A plain
+Chromium would have looked like an ordinary Linux user.
+
+**The preset path is fine** — and this is what makes the bug easy to miss. With a
+valid `deviceId`, the launcher sets `--user-agent` (a persistent process flag) and
+holds a pinned CDP session open. Verified consistent:
+
+```
+User-Agent:         Mozilla/5.0 (Windows NT 10.0; Win64; x64) … Chrome/131.0.0.0
+sec-ch-ua:          "Chromium";v="131", "Google Chrome";v="131", …
+sec-ch-ua-platform: "Windows"
+JS:  platform=Win32  uaData=Windows  brands=131  screen=1366x768
+```
+
+So the defect is precisely: **no device preset → no persistent UA mechanism at all.**
+The quick-create "New Profile" flow produces exactly such profiles.
+
+**Fix:** set `--user-agent` on every launch (not just the preset path), and move
+`Network.setUserAgentOverride` onto a held `PinnedCdpSession`. Make
+`apply_ua_override` return `False` unless it holds an open session. Add a
+launch-time assertion comparing wire headers against the intended identity — this
+class of bug must fail loudly, never silently report success.
+
+---
+
+### F2 — ⚠️ HIGH: evasion.js is applied twice on Chromium
+
+**Files:** [`launcher.py:654-658`](../src/multiprofile/browser/launcher.py#L654),
+[`launcher.py:371-417`](../src/multiprofile/browser/launcher.py#L371)
+
+The CDP injection rewrite was motivated by Google Chrome refusing `--load-extension`.
+But the launcher **still stages the extension and still passes the flags**, and
+**Chromium honours them**. On this machine both routes run.
+
+Observed in the live target list:
+
+```
+background_page   chrome-extension://nkeimhogjdpnpccoofpliimaahmaaome/background.html
+```
+
+and measured in the page:
+
+```js
+Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)
+  .match(/copy = null/g).length   →   2      // wrapped twice
+```
+
+**Impact:** canvas/WebGL noise applied twice, so the rendered fingerprint is not
+the one the config specifies and is not reproducible across engines; two hook
+layers double the F3 artifact surface; and the behaviour silently differs between
+Google Chrome and Chromium, which is exactly the kind of environment-dependent
+divergence that makes fingerprint bugs unreproducible.
+
+**Fix:** pick one route. Drop `--load-extension`/`--disable-extensions-except` and
+the `_prepare_extension` staging (which also removes F4), or drop CDP injection.
+CDP is the better choice — it works on both browsers and runs before page script.
+Add a test asserting exactly one hook layer.
+
+---
+
+### F3 — ⚠️ HIGH: the spoofing is detectable in one line
+
+**File:** [`evasion.js`](../src/extension/evasion.js) (`makeNative`, line ~16)
+
+`makeNative()` assigns an **own** `toString` to each hooked function. That defeats
+`fn.toString()` but not `Function.prototype.toString.call(fn)`, which is the check
+every serious detector actually uses. Measured live:
+
+| Probe | Result |
+|---|---|
+| `Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)` | `function toDataURL() { let copy = null; try { copy = n…` |
+| `Function.prototype.toString.call(WebGLRenderingContext.prototype.getParameter)` | `function getParameter(param) { // UNMASKED_VENDOR_WEBGL if…` |
+| `Object.prototype.hasOwnProperty.call(toDataURL,'toString')` | `true` — native functions never have this |
+| `Object.getOwnPropertyDescriptor(navigator,'platform')` | `get,set,enumerable,configurable` — native lives on `Navigator.prototype` |
+| `Object.getOwnPropertyDescriptor(navigator,'hardwareConcurrency')` | present as own property |
+
+The WebGL hook **leaks its own source comment** (`// UNMASKED_VENDOR_WEBGL`) to any
+page that asks. This is not a subtle statistical signal; it is the spoofing code
+handing over its implementation.
+
+**Credit where due:** worker-realm coverage is genuinely good. A `Blob` worker
+reported the same `platform` and `hardwareConcurrency` as the main realm — many
+competitors leak here.
+
+**Fix:** short term, install hooks via `Proxy` with a faithful `get` trap, keep
+descriptors on the prototype rather than the instance, and never leave own
+`toString` properties. Long term this is the **architectural ceiling**: JS-level
+spoofing is always inspectable by the page. Closing it properly means patching
+Chromium — a multi-quarter programme and the actual moat competitors have built.
+This should be an explicit, costed strategic decision, not a backlog item.
+
+---
+
+### F4 — ⚠️ HIGH: cookie jar and proxy password written world-readable
+
+**File:** [`launcher.py:403,415`](../src/multiprofile/browser/launcher.py#L403)
+
+```python
+(dest / "cookies.json").write_text(json.dumps(cookies, indent=2), …)   # full cookie jar
+(dest / "proxy.json").write_text(json.dumps(proxy_data, indent=2), …)  # cleartext user+password
+```
+
+Both use bare `write_text`, so the umask decides. Observed on disk (`umask 0022`):
+
+```
+-rw-r--r--  cookies.json     ← 0644, world-readable
+-rw-r--r--  evasion.js       ← 0644, contains the full fingerprint config
+```
+
+Every other writer in the codebase goes through `secure_write_json()` (0600) —
+`profiles.py`, `clients.py`, `templates.py`, `cookies_store.py`, `xdg.py`. **This
+one function bypasses it**, and in doing so also **undoes the keychain
+encryption**: `proxy_data["password"]` is the decrypted secret, written to a
+world-readable file.
+
+This is the same class as the previously-fixed H1, in a writer that sweep missed.
+`proxy.json` was not reproduced live (no proxy credentials in this environment);
+it is the adjacent line to the `cookies.json` write that **was** observed at 0644.
+
+**Fix:** route both through `secure_write_json`. Better: delete the staging path
+entirely as part of F2, which removes this finding at the root.
+
+---
+
+### F5 — 🟡 HIGH: every profile claims Chrome 131; the engine is Chromium 151
+
+**Files:** [`_core.py:185,193`](../src/multiprofile/fingerprint/_core.py#L185),
+[`api/user_agents.py`](../src/multiprofile/api/user_agents.py),
+`devices/presets_android.py:106` (`browser_version_policy="pinned:131"`)
+
+The claimed version is hardcoded in the UA pool and defaults. Nothing compares it
+to the installed binary — `validator.py:602` checks only that
+`browser_version_policy` is *non-empty*.
+
+**~20 stable releases of drift.** Even when the identity is internally consistent
+(preset path), a page can detect the lie by probing engine features that shipped
+after 131, or CSS/JS behaviour that differs between 131 and 151. Version cohort is
+also a strong fingerprinting signal on its own: Chrome 131 had negligible real
+market share by this date.
+
+The brief's §5.1 requires tracking latest stable within **≤2 weeks**. That is
+impossible without either bundling an engine or deriving the claimed version from
+the installed one.
+
+**Fix (tactical):** derive the claimed major from `chromium --version` at launch and
+rewrite the UA/brands to match. **Fix (strategic):** ship a pinned engine.
+
+---
+
+### F6 — ⚠️ HIGH: the profile store cannot reach 10,000 profiles
+
+**File:** [`storage/profiles.py:126`](../src/multiprofile/storage/profiles.py#L126) (`load_profiles`)
+
+Every API call reads, parses and normalises the entire `profiles.json`. Measured,
+first page of **25 rows**:
+
+| Profiles | Store size | `GET /api/profiles?limit=25` |
+|---|---|---|
+| 1,000 | 2.1 MB | 40 ms |
+| 2,500 | 5.4 MB | 207 ms |
+| 5,000 | 10.7 MB | 795 ms |
+| **10,000** | **21.4 MB** | **3,115 ms** |
+
+Growth is **superlinear** — 10× the data costs 78× the time. Pagination gives no
+relief: the first 25 rows cost the same as all 10,000. Writes are equally O(n)
+(whole file rewritten per create), so bulk-creating 10,000 profiles is O(n²).
+
+Against the brief's budgets (<100 ms interaction; 1→10,000 bulk create; 10k list at
+60 fps) this **fails by ~30×**. `control.db` (SQLite, WAL, already present and 94%
+covered) is the obvious destination.
+
+**Do not build billing or entitlements on this data layer** — that code would be
+written twice.
+
+---
+
+### F7 — 🟡 MEDIUM: the evasion script announces itself
+
+**File:** [`evasion.js:13`](../src/extension/evasion.js#L13)
+
+```js
+console.log("[Evasion] evasion.js active on:", location.href);
+```
+
+Fires on every page, in every frame. Low exploitability (a page cannot read past
+console output), but it is a plain-text confession visible in any DevTools session,
+screen-share, demo or support screenshot — and trivially harvested if a page
+installs a `console` proxy before it runs in the extension route. Delete it or put
+it behind a debug flag.
+
+---
+
+### F8 — 🟡 MEDIUM: the API persists unknown fields
+
+**File:** [`api/validation.py:245`](../src/multiprofile/api/validation.py#L245)
+
+Validation rejects unknown *values* (a bad `deviceId` is refused) but not unknown
+*keys*. Verified:
+
+```
+POST /api/profiles {"name":"junk-field-test","totallyBogusKey":"pwned"}
+→ HTTP 200 | stored keys include bogus: True | warnings: []
+```
+
+The junk key is written into `profiles.json` and returned on every subsequent read.
+
+This cost me a test during this audit: I sent `devicePresetId` (which does not
+exist — the field is `deviceId`), the API accepted it without complaint, and the
+preset silently never applied. **A typo in an API field is indistinguishable from a
+working request** — for operators scripting against the local API, that is a real
+support burden and a schema-drift vector.
+
+**Fix:** reject unknown keys, or accept them with a `warnings[]` entry. The
+response already carries a `warnings` array that is currently unused here.
+
+---
+
+### F9 — ❌ MEDIUM: no list virtualization
+
+**File:** `frontend/src/components/profiles/profiles-page.tsx`
+
+Measured in the live console with 603 profiles: `domRows: 25`,
+`hasVirtualSpacer: false`, pagination controls `Page 1` / `Next`.
+
+The DOM stays small, so the UI itself will not jank — the brief's "60 fps at 10,000
+rows" fails in the **API** (F6), not the renderer. But the brief asks for a
+virtualized list, and pagination at 25/page is a materially different UX from the
+competitors' infinite-scroll grids: no jump-to-row, no select-all-across-pages, and
+bulk actions are bounded by the page.
+
+---
+
+### F10 — ✅ MEDIUM: supervisor crash-loop — fixed this session
+
+**File:** [`browser/supervisor.py`](../src/multiprofile/browser/supervisor.py)
+
+`max_restart_attempts` lived in a local loop variable, bounding only consecutive
+*launch failures*. A browser that launched successfully then died on the next tick
+got a fresh budget every time. Your own log shows it:
+`relaunch … succeeded (attempt 1)` repeating every ~11 s.
+
+Fixed before this audit began: the budget is now spent per **crash episode**, a
+restart counts as recovery only after `restart_stability_s` (default 60 s), and a
+crash-looping profile is parked in `error` after 3 restarts. Measured: 10 unbounded
+relaunches before, 3 and parked after. Two regression tests added.
+Uncommitted in the working tree.
+
+---
+
+### F11 — 🟡 MEDIUM: 138 failure-swallowing handlers
+
+`pyproject.toml` deliberately deselects `BLE001` and `S110`, documenting why.
+Current count: **103 blind-except + 35 try-except-pass**.
+
+The rationale (a launch path must never crash a browser) is legitimate. The cost is
+that this product's value *is* surfacing failures, and F1 is precisely a failure
+that was swallowed and reported as success. The exception policy and the
+silent-failure bug are the same problem seen twice.
+
+**Fix:** not a blanket cleanup. Classify: handlers on the identity/security path
+must record a structured failure that reaches `/api/health` and the launch notes;
+cosmetic paths can keep `pass` with a comment.
+
+---
+
+### F12 — 🟡 MEDIUM: distribution is not production-ready
+
+No signing, no auto-update, no crash reporting, Debian-only, and `build-deb.sh`
+**cannot run on the primary dev machine** (exit 127, no `dpkg-deb`). The packaging
+path is exercised only in CI. For a paid desktop app in a category where users are
+security-sensitive, unsigned unverifiable binaries are a hard blocker.
+
+---
+
+### F13 — 🟡 MEDIUM: tiling is X11-bound and fails opaquely
+
+**File:** [`browser/work_area.py`](../src/multiprofile/browser/work_area.py)
+
+All three work-area detectors (`xrandr`, `_NET_WORKAREA`, `xdpyinfo`) can fail
+together; the code correctly **refuses a silent 1920×1080 fallback**, which is good
+engineering. But the result is that tiling — a genuinely good differentiator —
+silently stops working. Your audit log shows `work_area_unavailable` on every
+relaunch during the Sep 25 crash loop, while `/api/health` reported the same today
+under this session's environment.
+
+It is environment-dependent (Wayland/XWayland, missing `XAUTHORITY`), not
+deterministic. Chromium is launched with `--ozone-platform=x11`, so Wayland-native
+window management is not used at all. Cross-platform is new development, not a port.
+
+---
+
+### F14 / F15 — 🟡 LOW
+
+- **F14:** `npm run build` prints *"Next.js now collects completely anonymous
+  telemetry"*. Build-time only and not user data, but a privacy-positioned product
+  should ship `NEXT_TELEMETRY_DISABLED=1` in the repo. 5 minutes.
+- **F15:** `next.config.ts` declares `rewrites`, which `output: export` ignores —
+  warned twice on every build. Dead config; remove it or drop the export mode.
+
+---
+
+## 4.1 Code quality & architecture
+
+| Item | Status | Note |
+|---|---|---|
+| Separation of concerns | ✅ | clean api/browser/storage/fingerprint split |
+| Error handling | ⚠️ | F11 — 138 swallowing handlers; F1 is the consequence |
+| Logging | 🟡 | works; no structure, no rotation, no crash reporting |
+| Crash recovery | ✅ | `db.recover()` at startup; supervisor watchdog (F10 fixed) |
+| Hardcoded secrets | ✅ | scan clean |
+| Dead code | ⚠️ | F2 — the whole extension staging path is vestigial on Chrome |
+| TODOs/FIXMEs | ✅ | **zero** |
+| Type safety | 🟡 | frontend TS strict & clean; Python has annotations but **no type checker in CI** |
+| Tests | ✅ | 558 functions, 1123 passing, 72% coverage |
+| CI | ✅ | lint + 3-version matrix + coverage gate + isolated live-browser job |
+
+## 4.2 Security
+
+| Item | Status | Note |
+|---|---|---|
+| Profile data at rest | 🟡 | proxy passwords AES + OS keychain; **rest plaintext by design**; F4 breaks even that |
+| IPC | ✅ | N/A — no bridge; pywebview has no `js_api`. HTTP API is the whole surface |
+| Local API exposure | ✅ | localhost-bound; Host + Origin + Content-Type guards **verified live** |
+| CSRF / DNS rebinding | ✅ | 4/4 attack shapes blocked (§7) |
+| CDP exposure | ✅ | origin lockdown **verified** — my own connection was refused 403 |
+| Auth model | 🟡 | one shared static token; **no user model, no roles, no sessions** |
+| Auto-updater integrity | ❌ | no updater at all |
+| Input validation | 🟡 | F8 — unknown fields persisted |
+| Supply chain | ✅ | 2 runtime deps; 0 vulns both ecosystems |
+
+## 4.3 Fingerprint consistency (live results)
+
+Tested: real Chromium 151, profile `os=windows`, `tz=America/New_York`, `en-US`.
+
+| Vector | No preset (default) | With `deviceId` | Notes |
+|---|---|---|---|
+| `User-Agent` header | ⚠️ **real host leaked** | ✅ Windows/131 | F1 |
+| `sec-ch-ua*` headers | ⚠️ **real host leaked** | ✅ consistent | F1 |
+| `navigator.platform` | 🟡 Win32 — **contradicts UA** | ✅ Win32 | |
+| `userAgentData` | 🟡 Windows/131 — **contradicts UA** | ✅ consistent | |
+| Screen / DPR | ✅ 1366×768 | ✅ 1366×768 | host is 2560×1440 |
+| `hardwareConcurrency` | ✅ spoofed | ✅ | host has 12 |
+| `deviceMemory` | ✅ spoofed | ✅ | |
+| Timezone | ✅ America/New_York | ✅ | |
+| `languages` | ✅ en-US,en | ✅ | |
+| `navigator.webdriver` | ✅ false | ✅ | |
+| Worker realm | ✅ **consistent** | ✅ | platform+cores match main realm |
+| Canvas / WebGL | ⚠️ **hooked twice** (F2) | ⚠️ | |
+| Engine version truth | ⚠️ claims 131, is 151 | ⚠️ | F5 |
+| **Spoofing artifacts** | ⚠️ **source leaks via `Function.prototype.toString`** | ⚠️ | F3 |
+| Audio | ❌ not injected | ❌ | honestly declared in the manifest |
+| ClientRects · Battery · Geolocation · DNT · speechSynthesis | ❌ | ❌ | confirmed absent |
+
+**Bottom line:** the default path fails the most basic cross-surface check. The
+preset path is internally coherent and then fails the artifact check.
+
+## 4.4 Performance
+
+See `01_PROJECT_SNAPSHOT.md` §10. Cold start (138 ms) and launch (1.22 s) beat
+budget. Profile list at 10k (**3,115 ms** vs <100 ms) misses by ~30×. RAM ~275 MB
+PSS per idle profile caps a 13 GB machine near 20 concurrent profiles — which is
+exactly `max_concurrent_profiles`, so the default is honest.
+
+## 4.5 UX / UI
+
+Captured live at 603 profiles. The console is **genuinely good** — arguably the
+strongest part of the product. Dark theme, coherent spacing, real data, sensible
+IA (Workspace / Operations / System), command palette (`⌘K`), live SSE activity
+feed, resource panel, honest health chip ("Healthy · 603 profiles · Chrome OK").
+It is competitive with AdsPower/GoLogin on visual quality today.
+
+Gaps: no virtualization (F9) · no folders/tree · no saved views or column
+customization · no shift-range selection · English only · light theme exists but
+dark is the shipped default · no empty-state coaching on the Profiles table.
+
+---
+
+## 7. Re-tested previous-audit claims — these hold ✅
+
+Verified live today, not inherited:
+
+```
+CSRF text/plain + hostile Origin    → 403 BLOCKED
+CSRF JSON + hostile Origin          → 403 BLOCKED
+DNS rebinding (foreign Host)        → 403 BLOCKED
+Missing Content-Type                → 403 BLOCKED
+Legitimate local client (no Origin) → 200 ALLOWED
+GET /api/health, foreign Host       → 403 BLOCKED
+CDP hostile origin                  → 403 Forbidden (my own connection refused)
+Secrets backend                     → keyring (OS keychain), /api/health honest
+profiles.json                       → 0600
+web_accessible_resources            → absent from manifest (C1 stays fixed)
+Dependencies                        → pip-audit clean, npm audit 0
+LICENSE                             → MIT present
+```
+
+Also genuinely well built: fail-closed proxy policy · `ProxyConfig.masked_str()`
+keeping credentials out of logs · the consistency engine (512 lines, 90% covered) ·
+the state machine refusing invalid transitions · honest `PARTIAL` reporting in
+`audio.py`/`battery.py` · work-area code refusing a fabricated fallback · **zero
+TODOs**. The culture of documenting one's own weaknesses is real and worth keeping.
+
+---
+
+## 8. Recommended order (for Phase 4 approval — not started)
+
+**Gate 1 — make the product do what it claims (3–5 days).** F1 → F2 → F4 → F7.
+Until F1 lands, every profile without a preset is worse than an unmodified browser,
+and no other work matters.
+
+**Gate 2 — make it honest and hold the line (1–2 weeks).** F5 (derive version from
+the real binary) · F8 · launch-time identity assertion that compares wire headers
+to intent and **fails the launch** on mismatch · F11 on the identity path only.
+
+**Gate 3 — make it scale (3–4 weeks).** F6 (profiles → SQLite) then F9. Billing and
+entitlements must come after, not before.
+
+**Gate 4 — strategic decision required, not an implementation task.** F3 sets the
+detectability ceiling. JS-level spoofing on stock Chromium can be *tidied* but never
+made undetectable. Bundling and patching an engine is the competitors' actual moat
+and is a multi-quarter, specialist-hire programme. **This is a founder/investor
+decision about what the product is**, and the roadmap in `06_ROADMAP.md` cannot be
+costed until it is made.
+
+---
+
+## 9. Three things I would push back on
+
+**1. The brief assumes an Ubuntu dev machine and a `.deb` install. Neither is true
+here.** This is Arch; the app runs from an editable venv install; the `.deb` cannot
+be built locally. Every "never break the existing install" instruction therefore
+protects a *dev* install, not the shipped artifact — and the shipped artifact is
+tested by nobody outside CI.
+
+**2. "Track latest stable within ≤2 weeks" and "stock Chromium" are incompatible.**
+You cannot pin a claimed version to real-world stable while running whatever the
+distro ships. Pick one: bundle an engine (expensive, correct) or derive the claim
+from the installed binary (cheap, honest, caps you at the user's update cadence).
+
+**3. Do not run the Phase 2 feature matrix against this fingerprint layer.** The
+brief asks for WebGPU, JA3/JA4, TLS alignment, media devices, a real-device
+fingerprint database. Adding vectors on top of a layer that leaks its own source
+code in one line, and that doesn't spoof the UA at all on the default path, adds
+surface without adding stealth. Fix F1–F3 first; then the matrix is worth building.
+
+---
+
+## 10. Deliverable status
+
+| # | Document | Status |
+|---|---|---|
+| 01 | `01_PROJECT_SNAPSHOT.md` | ✅ delivered |
+| 02 | `02_AUDIT_REPORT.md` | ✅ this document |
+| 03 | `03_FEATURE_MATRIX.md` | ⏸ not started — needs competitor research (AdsPower/GoLogin/Multilogin claims must be sourced, not recalled) |
+| 04 | `04_FINGERPRINT_TEST_RESULTS.md` | ⏸ partial — §4.3 holds direct wire/JS evidence; public checkers (CreepJS, Pixelscan, IPHey, BrowserScan, Whoer) **not run** |
+| 05–07 | UI spec · roadmap · architecture | ⏸ not started |
+| 08 | Executive summary | ⏸ not started |
+
+**Stopped here as instructed** — no implementation beyond the F10 supervisor fix
+that preceded this audit. Awaiting your confirmation.
