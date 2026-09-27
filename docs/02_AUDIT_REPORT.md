@@ -569,11 +569,11 @@ window management is not used at all. Cross-platform is new development, not a p
 | Item | Status | Note |
 |---|---|---|
 | Separation of concerns | ✅ | clean api/browser/storage/fingerprint split |
-| Error handling | ⚠️ | F11 — 138 swallowing handlers; F1 is the consequence |
+| Error handling | 🟡 | F11 — 138 swallowing handlers. F1 was the consequence; the identity path now asserts instead of swallowing |
 | Logging | 🟡 | works; no structure, no rotation, no crash reporting |
 | Crash recovery | ✅ | `db.recover()` at startup; supervisor watchdog (F10 fixed) |
 | Hardcoded secrets | ✅ | scan clean |
-| Dead code | ⚠️ | F2 — the whole extension staging path is vestigial on Chrome |
+| Dead code | ✅ | F2 fixed — the extension staging path is deleted, not just documented |
 | TODOs/FIXMEs | ✅ | **zero** |
 | Type safety | 🟡 | frontend TS strict & clean; Python has annotations but **no type checker in CI** |
 | Tests | ✅ | 558 functions, 1123 passing, 72% coverage |
@@ -583,7 +583,7 @@ window management is not used at all. Cross-platform is new development, not a p
 
 | Item | Status | Note |
 |---|---|---|
-| Profile data at rest | 🟡 | proxy passwords AES + OS keychain; **rest plaintext by design**; F4 breaks even that |
+| Profile data at rest | 🟡 | proxy passwords AES + OS keychain; **rest plaintext by design**. F4 broke even that and is fixed — the cleartext copy is deleted, not hardened |
 | IPC | ✅ | N/A — no bridge; pywebview has no `js_api`. HTTP API is the whole surface |
 | Local API exposure | ✅ | localhost-bound; Host + Origin + Content-Type guards **verified live** |
 | CSRF / DNS rebinding | ✅ | 4/4 attack shapes blocked (§7) |
@@ -599,10 +599,10 @@ Tested: real Chromium 151, profile `os=windows`, `tz=America/New_York`, `en-US`.
 
 | Vector | No preset (default) | With `deviceId` | Notes |
 |---|---|---|---|
-| `User-Agent` header | ⚠️ **real host leaked** | ✅ Windows/131 | F1 |
-| `sec-ch-ua*` headers | ⚠️ **real host leaked** | ✅ consistent | F1 |
-| `navigator.platform` | 🟡 Win32 — **contradicts UA** | ✅ Win32 | |
-| `userAgentData` | 🟡 Windows/131 — **contradicts UA** | ✅ consistent | |
+| `User-Agent` header | ✅ Windows/131 (was ⚠️ real host) | ✅ Windows/131 | F1 fixed |
+| `sec-ch-ua*` headers | ✅ consistent (was ⚠️ real host) | ✅ consistent | F1 fixed; first request of a NEW tab still leaks the platform — Gate 2 |
+| `navigator.platform` | ✅ Win32 — agrees with UA | ✅ Win32 | |
+| `userAgentData` | ✅ Windows/131 — agrees with UA | ✅ consistent | |
 | Screen / DPR | ✅ 1366×768 | ✅ 1366×768 | host is 2560×1440 |
 | `hardwareConcurrency` | ✅ spoofed | ✅ | host has 12 |
 | `deviceMemory` | ✅ spoofed | ✅ | |
@@ -610,14 +610,17 @@ Tested: real Chromium 151, profile `os=windows`, `tz=America/New_York`, `en-US`.
 | `languages` | ✅ en-US,en | ✅ | |
 | `navigator.webdriver` | ✅ false | ✅ | |
 | Worker realm | ✅ **consistent** | ✅ | platform+cores match main realm |
-| Canvas / WebGL | ⚠️ **hooked twice** (F2) | ⚠️ | |
+| Canvas / WebGL | ✅ hooked once (F2 fixed) | ✅ hooked once | still detectable — F3 |
 | Engine version truth | ⚠️ claims 131, is 151 | ⚠️ | F5 |
 | **Spoofing artifacts** | ⚠️ **source leaks via `Function.prototype.toString`** | ⚠️ | F3 |
 | Audio | ❌ not injected | ❌ | honestly declared in the manifest |
 | ClientRects · Battery · Geolocation · DNT · speechSynthesis | ❌ | ❌ | confirmed absent |
 
-**Bottom line:** the default path fails the most basic cross-surface check. The
-preset path is internally coherent and then fails the artifact check.
+**Bottom line (at audit time):** the default path failed the most basic
+cross-surface check, and the preset path was internally coherent and then failed the
+artifact check. **After Gate 1** both paths pass the cross-surface check and the
+launch refuses to hand over a profile that does not. Both still fail the artifact
+check — that is F3, and it is a strategy decision, not a bug fix.
 
 ## 4.4 Performance
 
@@ -669,13 +672,22 @@ TODOs**. The culture of documenting one's own weaknesses is real and worth keepi
 
 ## 8. Recommended order (for Phase 4 approval — not started)
 
-**Gate 1 — make the product do what it claims (3–5 days).** F1 → F2 → F4 → F7.
-Until F1 lands, every profile without a preset is worse than an unmodified browser,
-and no other work matters.
+**Gate 1 — make the product do what it claims (3–5 days). ✅ DONE.** F1 → F2 → F4 → F7,
+in that order, one commit each. Every profile now carries a User-Agent, the
+UA/Client-Hints override travels on a session held for the browser's lifetime, the
+launch is verified against the real wire and refused on a proven mismatch, there is
+one script-injection route, the cleartext proxy password is gone from disk
+(including copies already written), and `evasion.js` is silent unless asked.
 
 **Gate 2 — make it honest and hold the line (1–2 weeks).** F5 (derive version from
-the real binary) · F8 · launch-time identity assertion that compares wire headers
-to intent and **fails the launch** on mismatch · F11 on the identity path only.
+the real binary) · F8 · F11 on the identity path only · close the residual leak F1
+left behind: a tab's first document request is issued before its per-target UA
+override lands, so `sec-ch-ua-platform` on that one request still reflects the host.
+Closing it means rewriting headers in the browser process (browser-level `Fetch`
+interception).
+
+*(The launch-time identity assertion originally listed here shipped in Gate 1 —
+without it, F1's fix could not be shown to work at all.)*
 
 **Gate 3 — make it scale (3–4 weeks).** F6 (profiles → SQLite) then F9. Billing and
 entitlements must come after, not before.
@@ -707,6 +719,7 @@ brief asks for WebGPU, JA3/JA4, TLS alignment, media devices, a real-device
 fingerprint database. Adding vectors on top of a layer that leaks its own source
 code in one line, and that doesn't spoof the UA at all on the default path, adds
 surface without adding stealth. Fix F1–F3 first; then the matrix is worth building.
+*(F1 and F2 are now fixed. F3 remains, and it is the one that still makes this point.)*
 
 ---
 
@@ -721,5 +734,8 @@ surface without adding stealth. Fix F1–F3 first; then the matrix is worth buil
 | 05–07 | UI spec · roadmap · architecture | ⏸ not started |
 | 08 | Executive summary | ⏸ not started |
 
-**Stopped here as instructed** — no implementation beyond the F10 supervisor fix
-that preceded this audit. Awaiting your confirmation.
+**Phase 1 stopped here as instructed.** Gate 1 (F1 → F2 → F4 → F7) was then
+approved and implemented — one commit per finding, each with its own live
+measurement; see the ✅ blocks above and `CHANGELOG.md`. Documents 03 and 05–08 are
+still not started, and §04 is still partial (public checkers not run). Gate 2 and
+Gate 3 are not started.
