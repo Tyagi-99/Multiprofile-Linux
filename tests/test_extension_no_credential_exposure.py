@@ -109,44 +109,67 @@ def test_manifest_does_not_claim_audio_protection(manifest):
 
 
 # ---------------------------------------------------------------------------
-# the extension as actually prepared for a profile
+# the credential files are not written at all any more
+#
+# The extension is no longer loaded (Google Chrome refuses --load-extension;
+# Chromium honoured it and ran evasion.js twice), so the launcher no longer
+# stages a per-profile copy — and with it go the two files this module was
+# written to contain. `proxy.json` held the proxy password in CLEARTEXT,
+# decrypted out of the OS keychain, and `cookies.json` held the whole cookie
+# jar; both were written with a bare write_text, so the umask decided their
+# mode and both landed 0644 world-readable while every other writer in the
+# codebase goes through secure_write_json (0600).
+#
+# The strongest possible guard for a file that must not leak is that it is
+# never written. These tests hold that line.
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def xdg(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
-    monkeypatch.setenv("MULTIPROFILE_EXTENSION", str(EXTENSION))
-    return tmp_path
+def test_the_launcher_no_longer_stages_a_per_profile_extension():
+    from multiprofile.browser import launcher
+
+    assert not hasattr(launcher, "_prepare_extension"), (
+        "the extension staging step is back; it wrote the proxy password and "
+        "the cookie jar to disk world-readable, and made evasion.js run twice"
+    )
 
 
-def test_a_prepared_profile_extension_exposes_nothing(xdg):
-    """End to end: build a real profile extension with an authenticated proxy
-    and assert the credential file exists but is unreachable from a page."""
-    from multiprofile.browser.launcher import _prepare_extension
-    from multiprofile.fingerprint import build_fingerprint
+@pytest.mark.parametrize("filename", CREDENTIAL_FILES)
+def test_the_launcher_writes_no_credential_files(filename):
+    """Not a permissions question any more: nothing writes these."""
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "multiprofile" / "browser" / "launcher.py"
+    ).read_text(encoding="utf-8")
+    assert f'"{filename}"' not in source, (
+        f"launcher.py writes {filename} again — route it through "
+        f"secure_write_json (0600) or, better, do not write it"
+    )
 
-    profile = {
-        "id": "prof-cred",
-        "name": "Credential test",
-        "seed": 4242,
-        "proxyType": "socks5",
-        "proxyHost": "198.51.100.5",
-        "proxyPort": 1080,
-        "proxyUser": "operator",
-        "proxyPass": "super-secret-value",
-    }
-    dest = _prepare_extension(profile, build_fingerprint(profile))
 
-    written = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
-    assert _accessible_resources(written) == []
+def test_the_launcher_never_writes_a_file_with_the_default_umask():
+    """Every writer in this codebase uses secure_write_json for a reason."""
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "multiprofile" / "browser" / "launcher.py"
+    ).read_text(encoding="utf-8")
+    # ensure_no_client_frame_shadow writes Chrome's own Preferences file, which
+    # Chrome itself owns and rewrites; it holds no profile secrets.
+    allowed = source.count("tmp.write_text(")
+    assert source.count(".write_text(") == allowed, (
+        "a new bare write_text in the launcher: the umask decides the mode, "
+        "which is how the cookie jar and the cleartext proxy password ended "
+        "up 0644"
+    )
 
-    # The credential file is still there for the service worker to read...
-    proxy_json = dest / "proxy.json"
-    assert proxy_json.exists()
-    assert json.loads(proxy_json.read_text())["password"] == "super-secret-value"
-    # ...it is simply no longer reachable from any page.
-    assert "proxy.json" not in _accessible_resources(written)
-    assert not (dest / "loader.js").exists()
+
+def test_the_extension_is_not_loaded_into_the_browser():
+    """Both flags are gone: Chrome ignored them, Chromium double-injected."""
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "multiprofile" / "browser" / "launcher.py"
+    ).read_text(encoding="utf-8")
+    for flag in ("--load-extension", "--disable-extensions-except"):
+        assert f'f"{flag}' not in source and f'"{flag}=' not in source, (
+            f"{flag} is passed to the browser again"
+        )

@@ -51,7 +51,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 | ID | Sev | Area | Summary | Effort |
 |---|---|---|---|---|
 | **F1** | ✅ **Critical** | Fingerprint | UA/Client-Hints spoofing silently does nothing on the default (no-preset) path; reports success — **fixed, see below** | done |
-| **F2** | ⚠️ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) | 0.5 d |
+| **F2** | ✅ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) — **fixed** | done |
 | **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
 | **F4** | ⚠️ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** | 2 h |
 | **F5** | 🟡 **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** | 1 d + policy |
@@ -192,7 +192,53 @@ class of bug must fail loudly, never silently report success.
 
 ---
 
-### F2 — ⚠️ HIGH: evasion.js is applied twice on Chromium
+### F2 — ✅ HIGH: evasion.js is applied twice on Chromium — **FIXED**
+
+> **Resolved in Gate 1**, by the preferred route: `--load-extension`,
+> `--disable-extensions-except` and the whole `_prepare_extension` staging step
+> are gone. CDP injection is the only route; it works on both engines and runs
+> before page script. Exclusivity now means plain `--disable-extensions`, since
+> there is no longer an extension of ours to make an exception for.
+>
+> **Correction to the measurement below.** `toString(toDataURL).match(/copy =
+> null/g).length == 2` is **not** a layer count: that wrapper's source contains
+> `let copy = null;` and `catch(e) { copy = null; }`, so one layer counts 2.
+> `evasion.js` also already carried an `alreadyShielded` guard that stopped the
+> canvas hook stacking. The conclusion still held, and the honest measurement is
+> the script's own executions per document, on a real `http://` page (content
+> scripts do not run on `data:` or `about:`):
+>
+> ```
+> before:  [Evasion] evasion.js active on: http://127.0.0.1:40679/hooks
+>          [Evasion] evasion.js active on: http://127.0.0.1:40679/hooks
+> after:   [Evasion] evasion.js active on: http://127.0.0.1:44223/hooks
+> ```
+>
+> and the extension target list: `chrome-extension://…/background.js` before,
+> empty after.
+>
+> Relying on per-hook `alreadyShielded` guards to survive a second execution of
+> the whole script is not a design — the WebGL, navigator and screen hooks have
+> no such guard. One route is.
+>
+> Two things the staging step did had to be carried over or they would have been
+> lost silently: the `__PROFILE_TIMEZONE__` / `__PROFILE_ALLOCATED_IP__` /
+> `__PROFILE_SEED__` token substitutions, and the explicit `webrtcMode`.
+> `build_identity_script` now takes a `replacements` mapping and the launcher
+> passes all three; `tests/test_evasion_single_hook.py` guards it.
+>
+> Also fixed as a consequence: `health.extension_loaded` tested for the
+> per-profile staging copy, which would have read False on every healthy profile
+> once the copy was gone. It now reports the injector's own `inject_ok` — whether
+> the script actually reached the browser — which is what the field was always
+> meant to mean.
+>
+> Tests: `tests/test_evasion_single_hook.py` (static route guards + two live
+> tests; both live ones fail on the pre-fix tree).
+
+The original finding follows, unchanged.
+
+### F2 (original) — evasion.js is applied twice on Chromium
 
 **Files:** [`launcher.py:654-658`](../src/multiprofile/browser/launcher.py#L654),
 [`launcher.py:371-417`](../src/multiprofile/browser/launcher.py#L371)

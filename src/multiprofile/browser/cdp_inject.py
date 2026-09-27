@@ -70,16 +70,28 @@ _CONNECT_TIMEOUT = 8.0
 _RECV_TIMEOUT = 1.0
 
 
-def build_identity_script(fingerprint: dict[str, Any], evasion_source: str) -> str:
+def build_identity_script(
+    fingerprint: dict[str, Any],
+    evasion_source: str,
+    *,
+    replacements: dict[str, str] | None = None,
+) -> str:
     """Prefix the evasion source with this profile's config.
 
-    Mirrors what ``launcher._prepare_extension`` did for the extension, so
-    one script body serves both paths and there is a single source of truth
-    for what the page sees.
+    This is now the ONLY way ``evasion.js`` reaches a page. The per-profile
+    extension copy that used to do the same job is gone (Chromium honoured
+    ``--load-extension`` while Chrome refused it, so the hooks were installed
+    twice on one engine and once on the other), which makes this function the
+    single source of truth for what the page sees — including the
+    ``__PROFILE_*`` tokens the staging step used to substitute. Tokens left
+    unreplaced default themselves inside the script, so a missing one is
+    survivable, but the caller should pass them.
     """
     cfg = json.dumps(fingerprint, separators=(",", ":"))
     prelude = f"var __MP_INLINE_CFG__ = {cfg};\nwindow.__MP_PROFILE__ = __MP_INLINE_CFG__;\n"
     body = evasion_source
+    for token, value in (replacements or {}).items():
+        body = body.replace(token, value)
     if "__PROFILE_CONFIG_JSON__" in body:
         body = body.replace('"__PROFILE_CONFIG_JSON__"', "null")
         body = body.replace("'__PROFILE_CONFIG_JSON__'", "null")

@@ -34,14 +34,18 @@ Multilogin (patched Mimic/Stealthfox) or AdsPower (patched SunBrowser). Everythi
 spoofed here is spoofed *above* the engine, in a place the page can inspect, and §4
 of the audit shows that this is currently detectable in one line of JavaScript.
 
-Two injection routes exist **simultaneously**, which is a defect (audit F2):
+One injection route, since audit F2 was fixed:
 
 1. **CDP** — `Page.addScriptToEvaluateOnNewDocument` + `Target.setAutoAttach`
-   ([`cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py)). Written to replace route 2
-   after the team found Google Chrome refuses `--load-extension`.
-2. **MV3 extension** — still staged to disk and still passed on the command line at
-   [`launcher.py:654-658`](../src/multiprofile/browser/launcher.py#L654). Google Chrome ignores
-   these flags; **Chromium honours them**, so on this machine both routes run.
+   ([`cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py)). Works on both engines and
+   runs before any page script.
+
+Two routes used to exist simultaneously: the launcher also staged an MV3 extension to disk
+and passed `--load-extension`/`--disable-extensions-except`. Google Chrome ignores those
+flags; **Chromium honours them**, so on Chromium `evasion.js` ran twice per document
+(measured: two `[Evasion] evasion.js active on: <url>` lines for one document, one after the
+fix). The flags and the staging step are gone. `src/extension/` remains as the *source* of
+`evasion.js`, read by the injector — it is not loaded into any browser.
 
 ---
 

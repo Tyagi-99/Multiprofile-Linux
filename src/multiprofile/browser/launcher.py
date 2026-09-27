@@ -228,10 +228,21 @@ def ensure_no_client_frame_shadow(user_data_dir: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Extension and Chrome discovery
+# Identity-script bundle and Chrome discovery
 # ---------------------------------------------------------------------------
 
 def extension_src() -> Path:
+    """Where ``evasion.js`` lives.
+
+    This bundle is no longer LOADED as a browser extension — it is the source
+    the CDP injector reads (see :mod:`multiprofile.browser.cdp_inject`). Google
+    Chrome refuses ``--load-extension`` outright, while Chromium honoured it,
+    so the launcher used to hook every page twice on one browser and once on
+    the other: the canvas noise the config asked for was applied two times and
+    the result was not reproducible across engines. The flags and the
+    per-profile staging copy are gone; the manifest stays because it documents
+    what ``evasion.js`` is and the credential-exposure guards check it.
+    """
     candidates = [
         Path(__file__).resolve().parents[2] / "extension",
         Path("/usr/share/multiprofile/extension"),
@@ -392,7 +403,25 @@ def _start_identity_injection(
     evasion = extension_src() / "evasion.js"
     script = ""
     if evasion.exists():
-        script = build_identity_script(fingerprint, evasion.read_text(encoding="utf-8", errors="ignore"))
+        # The config the page sees. webrtcMode and the __PROFILE_* tokens used
+        # to be substituted by the extension staging step; that step is gone,
+        # so they are supplied here or they are lost.
+        cfg = dict(fingerprint)
+        cfg["webrtcMode"] = (
+            profile.get("webrtcMode") or fingerprint.get("webrtcMode") or "default"
+        )
+        script = build_identity_script(
+            cfg,
+            evasion.read_text(encoding="utf-8", errors="ignore"),
+            replacements={
+                "__PROFILE_TIMEZONE__": str(
+                    profile.get("timezone") or fingerprint.get("timezone")
+                    or "America/New_York"
+                ),
+                "__PROFILE_ALLOCATED_IP__": str(profile.get("allocatedIp") or ""),
+                "__PROFILE_SEED__": str(normalize_seed(profile)),
+            },
+        )
     else:
         notes.append("identity script MISSING: evasion.js not found")
 
@@ -429,55 +458,6 @@ def _start_identity_injection(
         # Loud on purpose: this is the profile browsing as the host.
         notes.append("WARNING: fingerprint script did not install — profile is NOT masked")
     return notes
-
-
-def _prepare_extension(profile: dict[str, Any], fingerprint: dict[str, Any]) -> Path:
-    src = extension_src()
-    dest = chrome_profile_dir(profile["id"]) / "extension"
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(src, dest)
-
-    evasion = dest / "evasion.js"
-    if evasion.exists():
-        text = evasion.read_text(encoding="utf-8", errors="ignore")
-        tz = profile.get("timezone") or fingerprint.get("timezone") or "America/New_York"
-        seed = str(normalize_seed(profile))
-        ip = profile.get("allocatedIp") or ""
-        text = text.replace("__PROFILE_TIMEZONE__", tz)
-        text = text.replace("__PROFILE_ALLOCATED_IP__", ip)
-        text = text.replace("__PROFILE_SEED__", seed)
-
-        cfg = dict(fingerprint)
-        cfg["webrtcMode"] = profile.get("webrtcMode") or fingerprint.get("webrtcMode") or "default"
-        cfg_json = json.dumps(cfg, separators=(",", ":"))
-
-        inline = f"var __MP_INLINE_CFG__ = {cfg_json};\nwindow.__MP_PROFILE__ = __MP_INLINE_CFG__;\n"
-        if "/*__PROFILE_CONFIG_JSON__*/" in text or "__PROFILE_CONFIG_JSON__" in text:
-            text = inline + text
-            text = text.replace('"__PROFILE_CONFIG_JSON__"', "null")
-            text = text.replace("'__PROFILE_CONFIG_JSON__'", "null")
-        else:
-            text = inline + text
-        evasion.write_text(text, encoding="utf-8")
-
-    # cookies.json for background to apply
-    cookies = load_cookies(profile["id"])
-    (dest / "cookies.json").write_text(json.dumps(cookies, indent=2), encoding="utf-8")
-
-    # proxy.json — written from NetworkConfig so extension can handle proxy auth
-    net = network_config_for_profile(profile)
-    if net.proxy and net.mode != NetworkMode.DIRECT:
-        proxy_data = {
-            "host": net.proxy.host,
-            "port": net.proxy.port,
-            "type": net.proxy.scheme,
-            "username": net.proxy.username or "",
-            "password": net.proxy.password or "",
-        }
-        (dest / "proxy.json").write_text(json.dumps(proxy_data, indent=2), encoding="utf-8")
-
-    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -704,15 +684,23 @@ def launch_profile(
             pass
 
     # ------------------------------------------------------------------
-    # Chrome binary + extension
+    # Chrome binary + identity-script bundle
+    #
+    # The bundle is only READ here (the CDP injector needs evasion.js); it is
+    # no longer copied per profile nor loaded as an extension. A missing
+    # bundle still fails the launch rather than producing an unmasked profile.
     # ------------------------------------------------------------------
     try:
         chrome = find_chrome()
-        ext = _prepare_extension(profile, fingerprint)
+        ext = extension_src()
     except FileNotFoundError as e:
         if slot_held:
             browser_manager.release_slot(profile_id)
-        _record_state(profile_id, ProfileState.ERROR, note="dependency_missing: Chrome or extension not found")
+        _record_state(
+            profile_id,
+            ProfileState.ERROR,
+            note="dependency_missing: Chrome or the identity script bundle not found",
+        )
         return {"ok": False, "error": str(e), "errors": ["dependency_missing"]}
 
     user_dir = chrome_profile_dir(profile_id) / "user-data"
@@ -768,15 +756,24 @@ def launch_profile(
     # ------------------------------------------------------------------
     cmd = [chrome, f"--user-data-dir={user_dir}", *sandbox_args]
 
-    # Extension exclusivity
+    # Extension exclusivity.
+    #
+    # Our own identity script no longer arrives as an extension, so there is
+    # nothing to make an exception for: exclusivity is now simply "no
+    # extensions". The flags this replaces were worse than redundant — Google
+    # Chrome refuses --load-extension outright ("--disable-extensions-except is
+    # not allowed in Google Chrome, ignoring") while Chromium honours it, so
+    # evasion.js ran twice on Chromium and once on Chrome. Measured on
+    # Chromium 141: the canvas hook's source contained "copy = null" twice, so
+    # the noise was applied twice and the rendered fingerprint was neither the
+    # one the config asked for nor reproducible across engines.
     if settings.allow_webstore_extensions:
         notes.append("Web Store extensions allowed (exclusivity OFF — opt-in only)")
     else:
-        cmd.append(f"--disable-extensions-except={ext}")
-        notes.append("Anti-detect exclusivity ON (--disable-extensions-except)")
+        cmd.append("--disable-extensions")
+        notes.append("Anti-detect exclusivity ON (--disable-extensions)")
 
     cmd.extend([
-        f"--load-extension={ext}",
         "--no-first-run",
         "--no-default-browser-check",
         # Suppress automation-advertised Blink features
@@ -1044,7 +1041,10 @@ def launch_profile(
         "pid": proc.pid,
         "url": start,
         "userDataDir": str(user_dir),
+        # The identity-script SOURCE, not a loaded extension — nothing is
+        # staged per profile any more.
         "extension": str(ext),
+        "identityScript": str(ext / "evasion.js"),
         "cmd": cmd,
         "notes": notes,
         "errors": [],

@@ -241,7 +241,12 @@ for i, a in enumerate(rects):
 print("tiling ok", area.source)
 
 src = open("src/multiprofile/browser/launcher.py", encoding="utf-8").read()
-assert "--disable-extensions-except" in src
+# Exclusivity used to mean --disable-extensions-except=<our extension>. The
+# identity script now arrives over CDP, so there is nothing to except and
+# exclusivity is plain --disable-extensions. Chrome refused the old flags and
+# Chromium honoured them, which ran evasion.js twice on one engine.
+assert '"--disable-extensions"' in src
+assert "--load-extension" not in src.replace("``--load-extension``", "")
 assert "allow_webstore_extensions" in src
 print("exclusivity default ON")
 print("PHASE2_OK")

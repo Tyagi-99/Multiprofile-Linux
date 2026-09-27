@@ -146,7 +146,7 @@ def test_launch_without_chrome_fails_gracefully_not_hang(client, monkeypatch):
         client.delete(f"/api/profiles/{pid}?purgeStorage=1")
 
 
-def test_launch_unknown_device_id_records_note_not_traceback(client, monkeypatch, tmp_path):
+def test_launch_unknown_device_id_records_note_not_traceback(client, monkeypatch):
     """Unknown deviceId -> 'device preset not found' note; no traceback, no crash.
 
     The browser spawn is faked (no real Chromium needed): the point under
@@ -156,7 +156,6 @@ def test_launch_unknown_device_id_records_note_not_traceback(client, monkeypatch
     import multiprofile.browser.launcher as L
 
     monkeypatch.setattr(L, "find_chrome", lambda: "/nonexistent/chrome")
-    monkeypatch.setattr(L, "_prepare_extension", lambda profile, fp: tmp_path / "ext")
 
     class _FakeStderr:
         def read(self):

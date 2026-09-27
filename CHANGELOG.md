@@ -46,6 +46,37 @@
   (browser-level `Fetch` interception) and is tracked in the audit report, not
   papered over — the assertion measures a navigation and says so.
 
+- **evasion.js now reaches a page exactly once** (audit finding F2,
+  `browser/launcher.py`, `browser/cdp_inject.py`, `browser/health.py`): the
+  launcher still passed `--load-extension` and `--disable-extensions-except`
+  and still staged a per-profile copy of the extension, *while* the CDP
+  injector installed the same script. Google Chrome refuses those flags
+  ("--disable-extensions-except is not allowed in Google Chrome, ignoring") —
+  which is why CDP injection was written — but Chromium honours them, so on
+  Chromium the script ran twice per document and on Chrome once. Measured on
+  Chromium 141 with a real `http://` page: two `[Evasion] evasion.js active
+  on: <url>` lines for one document before, one after. Two runs mean the
+  canvas and WebGL noise is applied twice, so the rendered fingerprint is
+  neither the one the config specifies nor reproducible across engines.
+  - Both flags and the whole `_prepare_extension` staging step are removed.
+    CDP is the only route. `src/extension/` stays as the *source* of
+    `evasion.js` and is no longer loaded into any browser.
+  - Exclusivity (`allow_webstore_extensions=False`, the default) now means
+    plain `--disable-extensions`: there is no extension of ours to except.
+  - Carried over from the staging step so they were not lost silently: the
+    `__PROFILE_TIMEZONE__` / `__PROFILE_ALLOCATED_IP__` / `__PROFILE_SEED__`
+    substitutions (`build_identity_script` takes a `replacements` mapping) and
+    the explicit `webrtcMode`.
+  - `health.extension_loaded` tested for the staging copy, which would have
+    read False on every healthy profile once the copy was gone. It now reports
+    the injector's `inject_ok` — whether the script actually reached the
+    browser, which is what the field was always meant to mean.
+  - The audit's own measurement for this finding was wrong and is corrected in
+    the report: `toString(toDataURL).match(/copy = null/g).length == 2` counts
+    2 for a *single* layer, and `evasion.js` already had an `alreadyShielded`
+    guard that kept the canvas hook from stacking. The script's execution count
+    per document is the honest measure; the finding held.
+
 - **Supervisor restart budget now bounds crash loops** (`browser/supervisor.py`):
   `max_restart_attempts` lived in a local loop variable, so it only bounded
   consecutive *launch failures* within a single death. A browser that launched

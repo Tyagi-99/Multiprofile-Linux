@@ -33,7 +33,9 @@ class ProfileHealth:
     # Storage
     storage_accessible: bool = False
     user_data_dir: str | None = None
-    # Extension
+    # Identity script. Named extension_loaded for the console's sake; there is
+    # no extension any more (see launcher.extension_src) and what matters is
+    # whether the fingerprint script actually reached the browser over CDP.
     extension_loaded: bool | None = None
     # Fingerprint
     fingerprint_loaded: bool = False
@@ -126,11 +128,17 @@ def get_profile_health(profile_id: str) -> ProfileHealth:
     except Exception:
         health.storage_accessible = False
 
-    # Extension loaded: check per-profile extension copy exists
+    # Identity script installed. This used to test for a per-profile copy of
+    # the extension directory, which said nothing about whether the script ran
+    # -- and once the staging step was removed it would have read False on
+    # every healthy profile. Ask the injector instead: it knows whether
+    # Page.addScriptToEvaluateOnNewDocument actually succeeded.
     try:
-        ext_dir = chrome_profile_dir(profile_id) / "extension"
-        health.extension_loaded = (ext_dir / "manifest.json").exists()
-    except Exception:
+        from .runtime_state import get_runtime
+
+        rt = get_runtime(profile_id)
+        health.extension_loaded = None if rt is None else rt.inject_ok
+    except Exception:  # noqa: BLE001 - unknown is honest; False would not be
         health.extension_loaded = None
 
     health.checked_at = time.time()
