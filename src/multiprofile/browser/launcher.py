@@ -325,14 +325,66 @@ def _cdp_cookies(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _resolve_wire_identity(
+    profile: dict[str, Any],
+    fingerprint: dict[str, Any],
+    device_preset: Any,
+) -> tuple[str, dict[str, Any] | None]:
+    """Decide, once, what this profile claims to be on the wire.
+
+    Returns ``(ua_string, cdp_override_params)``. Both the ``--user-agent``
+    launch flag, the CDP override and the launch-time assertion read this
+    one answer, so the flag, the headers and the check cannot disagree.
+
+    User-Agent precedence:
+      1. ``profile["userAgent"]`` — an explicit operator override wins.
+      2. the device preset's UA.
+      3. the fingerprint's UA.
+
+    (3) is the case F1 dropped on the floor: with no preset and no explicit
+    UA the launcher passed no ``--user-agent`` at all and the one-shot CDP
+    override evaporated, so the profile browsed as the host while its
+    JavaScript claimed Windows. There is always a fingerprint UA, so there
+    is now always a UA to claim.
+
+    Client hints come from the device preset when there is one — it is the
+    authority on what the device is — and from the fingerprint otherwise.
+    """
+    from .cdp_identity import build_ua_override_params
+
+    explicit_ua = (profile.get("userAgent") or "").strip()
+    preset_cfg: dict[str, Any] = {}
+    if device_preset is not None:
+        try:
+            preset_cfg = device_preset.to_mobile_config_dict() or {}
+        except Exception:  # noqa: BLE001 - a broken preset must not lose the UA
+            log.debug("preset config unreadable while resolving identity", exc_info=True)
+    preset_ua = (preset_cfg.get("user_agent") or "").strip()
+
+    ua = explicit_ua or preset_ua or (fingerprint.get("userAgent") or "").strip()
+
+    metadata = None
+    if preset_cfg:
+        try:
+            from ..fingerprint.mobile import MobileProfileConfig
+
+            metadata = MobileProfileConfig.from_preset_dict(preset_cfg).user_agent_metadata()
+        except Exception:  # noqa: BLE001 - fall back to fingerprint-derived hints
+            log.debug("preset client hints unreadable; using fingerprint", exc_info=True)
+            metadata = None
+
+    return ua, build_ua_override_params(fingerprint, ua, metadata=metadata)
+
+
 def _start_identity_injection(
     profile_id: str,
     port: int,
     profile: dict[str, Any],
     fingerprint: dict[str, Any],
     net: Any,
+    ua_override: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Install fingerprint, proxy auth and cookies over CDP. Returns notes."""
+    """Install fingerprint, proxy auth, cookies and UA over CDP. Returns notes."""
     from .cdp_inject import ProxyAuth, build_identity_script, start_injection
 
     notes: list[str] = []
@@ -350,7 +402,10 @@ def _start_identity_injection(
 
     cookies = _cdp_cookies(load_cookies(profile_id))
 
-    status = start_injection(profile_id, port, script=script, proxy_auth=auth, cookies=cookies)
+    status = start_injection(
+        profile_id, port, script=script, proxy_auth=auth, cookies=cookies,
+        ua_override=ua_override,
+    )
     upsert_runtime(profile_id, inject_ok=status.ok, inject_detail=status.to_dict())
 
     if status.error:
@@ -360,8 +415,16 @@ def _start_identity_injection(
         "Identity injection: script="
         f"{'installed' if status.script_installed else 'NOT INSTALLED'}, "
         f"proxy auth={'armed' if status.auth_armed else 'not needed'}, "
-        f"cookies={status.cookies_applied}"
+        f"cookies={status.cookies_applied}, "
+        f"UA/client-hints="
+        f"{'applied' if status.ua_override_applied else 'NOT APPLIED'}"
     )
+    if ua_override and not status.ua_override_applied:
+        # Loud on purpose: this is the profile's real headers on the wire.
+        notes.append(
+            "WARNING: UA/client-hints override did not install — the wire "
+            "carries the host identity while the page claims otherwise"
+        )
     if script and not status.script_installed:
         # Loud on purpose: this is the profile browsing as the host.
         notes.append("WARNING: fingerprint script did not install — profile is NOT masked")
@@ -470,6 +533,60 @@ def _retile_running_best_effort(note: str) -> None:
         log.debug("re-tile after %s: %s", note, result.get("ok"))
     except Exception:  # noqa: BLE001 - re-tile must never break launch/stop
         log.debug("re-tile after %s failed (best effort)", note, exc_info=True)
+
+
+def _abort_launch(
+    profile_id: str,
+    pid: int,
+    *,
+    slot_held: bool,
+    error_code: str,
+    error: str,
+    notes: list[str],
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Tear down a browser we have decided must not be handed to the operator.
+
+    Used when a check after spawn says the profile is not what it claims —
+    today only the wire-identity assertion. The browser is killed rather than
+    left running, because a half-masked profile that the operator can still
+    click on is the situation the assertion exists to prevent.
+
+    Every step is best-effort: the return value must reach the caller even if
+    the process is already gone or bookkeeping fails.
+    """
+    try:
+        from .cdp_inject import stop_injection
+        stop_injection(profile_id)
+    except Exception:  # noqa: BLE001 - teardown must not mask the real error
+        log.debug("injection teardown failed during abort for %s", profile_id, exc_info=True)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    _wait_pid_gone(pid, timeout_s=5.0)
+    set_runtime(profile_id, "idle", None)
+    clear_runtime(profile_id)
+    set_launch_state(
+        profile_id, LaunchState.VERIFY_FAILED, error=error, error_code=error_code
+    )
+    if slot_held:
+        browser_manager.release_slot(profile_id)
+    _record_state(profile_id, ProfileState.ERROR, note=f"{error_code}: {error}")
+    audit_log(
+        "launch_blocked_identity_mismatch",
+        profile_id=profile_id,
+        ok=False,
+        detail={"pid": pid, "error": error, "assertion": detail},
+    )
+    log.error("launch aborted for %s (%s): %s", profile_id, error_code, error)
+    return {
+        "ok": False,
+        "error": error,
+        "errors": [error_code],
+        "notes": notes,
+        "identityAssertion": detail,
+    }
 
 
 def _wait_pid_gone(pid: int, timeout_s: float = 10.0) -> bool:
@@ -602,7 +719,6 @@ def launch_profile(
     user_dir.mkdir(parents=True, exist_ok=True)
     ensure_no_client_frame_shadow(user_dir)
     start = url or profile.get("startUrl") or "https://example.com"
-    ua = profile.get("userAgent") or ""
 
     # ------------------------------------------------------------------
     # Device preset — resolve early so the preset UA can ride the
@@ -621,10 +737,6 @@ def launch_profile(
             notes.append(f"device preset not found: {device_id}")
         else:
             preset_cfg = device_preset.to_mobile_config_dict() or {}
-            preset_ua = preset_cfg.get("user_agent") or ""
-            if not ua and preset_ua:
-                ua = preset_ua
-                notes.append(f"Device preset UA applied via --user-agent ({device_preset.id})")
             # Reconcile the fingerprint with the preset on the properties BOTH
             # control. build_fingerprint only reads profile["isMobile"], so a
             # Pixel 9 preset used to yield a desktop fingerprint: the injected
@@ -635,6 +747,15 @@ def launch_profile(
             if reconciled != fingerprint:
                 fingerprint = reconciled
                 notes.append(f"Fingerprint reconciled with device preset ({device_preset.id})")
+
+    # ------------------------------------------------------------------
+    # Wire identity — ONE answer for the flag, the CDP override and the
+    # launch-time assertion. Resolved after preset reconciliation so the
+    # client hints it carries are the ones the preset asked for.
+    # ------------------------------------------------------------------
+    ua, ua_override = _resolve_wire_identity(profile, fingerprint, device_preset)
+    if ua_override is None:
+        notes.append("WARNING: no User-Agent to claim — profile will browse as the host")
 
     # ------------------------------------------------------------------
     # Sandbox
@@ -684,9 +805,14 @@ def launch_profile(
         notes.append(f"Network flags: {' '.join(net_flags)}")
     notes.append(f"Network mode: {net.mode.value}")
 
-    # User-agent (flag-level; CDP override applied after CDP is ready)
+    # User-agent at the flag level — set on EVERY launch, not only when the
+    # profile carries an explicit UA or a device preset. The flag is the only
+    # part of the identity that survives with no CDP at all, so it is the
+    # floor under the override: without it a no-preset profile shipped the
+    # host's UA to every site it visited (F1).
     if ua:
         cmd.append(f"--user-agent={ua}")
+        notes.append(f"User-Agent flag: {ua}")
 
     # CDP — always localhost-only
     debug_port = allocate_localhost_port()
@@ -765,61 +891,109 @@ def launch_profile(
         # undone while the console reported the profile healthy. Runs first
         # so a page is never unfrozen before its identity is installed.
         try:
-            notes.extend(_start_identity_injection(profile_id, debug_port, profile, fingerprint, net))
+            notes.extend(_start_identity_injection(
+                profile_id, debug_port, profile, fingerprint, net,
+                ua_override=ua_override,
+            ))
         except Exception as e:  # noqa: BLE001 - never fatal to a launch
             notes.append(f"identity injection skipped: {e}")
             log.warning("identity injection failed for %s: %s", profile_id, e)
 
-        # Apply UA/client-hints override via CDP for HTTP-layer consistency
+        # Emulation on ONE pinned CDP session, HELD OPEN for the browser's
+        # lifetime. Chromium drops Network.setUserAgentOverride and
+        # Emulation.setTouchEmulationEnabled when the session that set them
+        # disconnects — only Emulation.setDeviceMetricsOverride survives — so
+        # a one-shot "send and close" can never make them persist. That is
+        # exactly how the UA override came to report success while the wire
+        # carried the host identity (F1).
+        #
+        # The device-preset plan runs first and the resolved wire identity
+        # goes last, so the same values the assertion below checks are the
+        # last thing written. Never fatal: failures land in notes and, for
+        # the UA override, in the assertion.
         try:
-            from .cdp_identity import apply_ua_override
-            if apply_ua_override(debug_port, fingerprint, ua or fingerprint.get("userAgent") or ""):
-                notes.append("CDP UA/client-hints override applied")
-            else:
-                notes.append("CDP UA/client-hints override FAILED (no CDP response)")
-        except Exception as e:
-            notes.append(f"CDP UA override skipped: {e}")
+            from .cdp_identity import apply_ua_override, open_pinned_cdp_session
 
-        # Device-preset emulation via CDP (viewport/touch/UA+CH as one plan).
-        # Applied after the generic UA override so the preset is authoritative.
-        # The plan runs on ONE pinned CDP session which is then HELD OPEN for
-        # the browser's lifetime: Chromium drops Network.setUserAgentOverride
-        # and Emulation.setTouchEmulationEnabled when the setting session
-        # disconnects, so one-shot "send and close" can never make them
-        # persist. Only Emulation.setDeviceMetricsOverride survives a
-        # disconnect. Never fatal: a failed step is recorded in notes, launch
-        # continues.
-        try:
-            if device_preset is not None:
-                from ..fingerprint.mobile import MobileProfileConfig, apply_cdp_plan
-                from .cdp_identity import open_pinned_cdp_session
-                _cfg = MobileProfileConfig.from_preset_dict(device_preset.to_mobile_config_dict())
-                _sess = open_pinned_cdp_session(debug_port)
-                if _sess is None:
-                    notes.append(
-                        f"CDP device emulation FAILED ({device_preset.id}: no CDP session)"
+            _sess = open_pinned_cdp_session(debug_port)
+            if _sess is None:
+                notes.append(
+                    "CDP identity session FAILED (no page target) — UA/client-hints "
+                    "override rests on the injection session alone"
+                )
+            else:
+                if device_preset is not None:
+                    from ..fingerprint.mobile import MobileProfileConfig, apply_cdp_plan
+                    _cfg = MobileProfileConfig.from_preset_dict(
+                        device_preset.to_mobile_config_dict()
                     )
-                else:
                     _results = apply_cdp_plan(_sess.send, _cfg.to_cdp_plan())
                     _ok = sum(1 for r in _results if r.get("ok"))
                     if _ok == len(_results) and _ok > 0:
-                        _hold_device_session(profile_id, proc.pid, _sess)
                         notes.append(
                             f"CDP device emulation applied ({device_preset.id}: "
-                            f"{_ok}/{len(_results)} steps; session held open — "
-                            f"UA/touch overrides are session-scoped)"
+                            f"{_ok}/{len(_results)} steps)"
                         )
                     else:
-                        _sess.close()
                         notes.append(
                             f"CDP device emulation FAILED ({device_preset.id}: "
                             f"{_ok}/{len(_results)} steps)"
                         )
                     for _r in _results:
                         if not _r.get("ok"):
-                            notes.append(f"CDP emulation step failed: {_r.get('method')}: {_r.get('error')}")
-        except Exception as e:
-            notes.append(f"CDP device emulation skipped: {e}")
+                            notes.append(
+                                f"CDP emulation step failed: {_r.get('method')}: {_r.get('error')}"
+                            )
+                if apply_ua_override(_sess, fingerprint, ua, metadata=(ua_override or {}).get("userAgentMetadata")):
+                    notes.append(
+                        "CDP UA/client-hints override applied on a held session "
+                        "(closed only when the browser exits)"
+                    )
+                else:
+                    notes.append("CDP UA/client-hints override FAILED")
+                # Held for the browser's lifetime, not for the length of this
+                # function: the overrides above die with this session.
+                _hold_device_session(profile_id, proc.pid, _sess)
+        except Exception as e:  # noqa: BLE001 - never fatal to a launch
+            notes.append(f"CDP identity session skipped: {e}")
+
+        # ------------------------------------------------------------------
+        # Prove it. Compare the headers the browser actually sends against
+        # the identity we intended, and REFUSE the launch when they
+        # disagree: a profile whose headers contradict its JavaScript is
+        # more identifiable than an unmodified browser, and reporting one as
+        # healthy is the defect this whole block exists to end.
+        # An inconclusive probe is recorded, not fatal — see identity_assert.
+        # ------------------------------------------------------------------
+        if settings.identity_assert_enabled:
+            try:
+                from .identity_assert import verify_wire_identity
+
+                assertion = verify_wire_identity(debug_port, ua_override)
+            except Exception as e:  # noqa: BLE001 - a broken probe is inconclusive
+                from .identity_assert import IdentityAssertion
+
+                assertion = IdentityAssertion(reason=f"probe error: {e}")
+                log.warning("identity probe failed for %s: %s", profile_id, e)
+            notes.append(assertion.summary())
+            upsert_runtime(
+                profile_id,
+                identity_ok=(assertion.ok if assertion.conclusive else None),
+                identity_detail=assertion.to_dict(),
+            )
+            if assertion.failed:
+                return _abort_launch(
+                    profile_id,
+                    proc.pid,
+                    slot_held=slot_held,
+                    error_code="identity_mismatch",
+                    error=(
+                        "Refusing to run this profile: its HTTP headers do not match "
+                        "the identity it claims in JavaScript. "
+                        + "; ".join(assertion.mismatches)
+                    ),
+                    notes=notes,
+                    detail=assertion.to_dict(),
+                )
 
         # Store egress IP in runtime if proxy health gave us one
         if proxy_health and proxy_health.egress_ip:
@@ -901,6 +1075,9 @@ def launch_profile(
     rt = get_runtime(profile_id)
     if rt:
         out["launchState"] = rt.launch_state.value
+        # The wire evidence travels with the launch result, so a caller never
+        # has to take "override applied" on trust again.
+        out["identityAssertion"] = rt.identity_detail
     return out
 
 

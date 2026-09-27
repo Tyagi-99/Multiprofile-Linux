@@ -22,6 +22,12 @@ CDP can do all three on stock Chrome, with no extension and no flags:
     Fetch.enable{handleAuthRequests:true}   proxy auth, password off argv
     Network.setCookies                      cookie seeding
 
+It also carries the fourth job the extension never had: the HTTP-layer
+identity. ``Network.setUserAgentOverride`` is applied here, per attached
+target, because this is the only session that lives as long as the browser
+AND sees every tab. Anywhere else it is discarded (see F1 in
+``docs/02_AUDIT_REPORT.md``) or covers only the first tab.
+
 THE SESSION MUST STAY OPEN
 --------------------------
 ``cdp_identity.PinnedCdpSession`` documents the rule this module obeys:
@@ -50,6 +56,8 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+
+from .cdp_identity import UA_OVERRIDE_METHOD
 
 log = logging.getLogger("multiprofile.browser.cdp_inject")
 
@@ -97,6 +105,7 @@ class InjectionStatus:
     script_installed: bool = False
     auth_armed: bool = False
     cookies_applied: int = 0
+    ua_override_applied: bool = False
     targets_seen: int = 0
     error: str | None = None
     detail: list[str] = field(default_factory=list)
@@ -107,6 +116,7 @@ class InjectionStatus:
             "scriptInstalled": self.script_installed,
             "authArmed": self.auth_armed,
             "cookiesApplied": self.cookies_applied,
+            "uaOverrideApplied": self.ua_override_applied,
             "targetsSeen": self.targets_seen,
             "error": self.error,
             "detail": list(self.detail),
@@ -142,12 +152,14 @@ class IdentityInjector:
         script: str | None = None,
         proxy_auth: ProxyAuth | None = None,
         cookies: list[dict[str, Any]] | None = None,
+        ua_override: dict[str, Any] | None = None,
         profile_id: str = "",
     ):
         self.port = int(port)
         self.script = script or ""
         self.proxy_auth = proxy_auth
         self.cookies = cookies or []
+        self.ua_override = ua_override or None
         self.profile_id = profile_id
         self.status = InjectionStatus()
 
@@ -290,6 +302,10 @@ class IdentityInjector:
             if label.startswith("Page.addScriptToEvaluateOnNewDocument"):
                 self.status.script_installed = False
                 self.status.ok = False
+            if label == UA_OVERRIDE_METHOD:
+                # An unmasked wire identity is not a detail to swallow.
+                self.status.ua_override_applied = False
+                self.status.ok = False
             log.warning("CDP injection command failed for %s — %s", self.profile_id, detail)
             return
         if "id" in msg:
@@ -331,6 +347,17 @@ class IdentityInjector:
 
         log.info("injection attached to %s target url=%s waiting=%s",
                  self.profile_id, str(target.get("url"))[:80], params.get("waitingForDebugger"))
+
+        if self.ua_override is not None:
+            # UA and Client Hints belong here, on the session that outlives
+            # the launch, for the same reason the script does. Chromium drops
+            # Network.setUserAgentOverride when the session that set it
+            # disconnects, so a launch-time one-shot left the wire carrying
+            # the host identity (F1). Setting it per attached target also
+            # covers tabs the operator opens later, which a single pinned
+            # page session cannot.
+            self._send(UA_OVERRIDE_METHOD, self.ua_override, session_id=session_id)
+            self.status.ua_override_applied = True
 
         if self.script:
             # Page must be enabled on this session before the page machinery
@@ -397,11 +424,17 @@ def start_injection(
     script: str | None = None,
     proxy_auth: ProxyAuth | None = None,
     cookies: list[dict[str, Any]] | None = None,
+    ua_override: dict[str, Any] | None = None,
 ) -> InjectionStatus:
     """Start (and register) injection for a profile, replacing any previous one."""
     stop_injection(profile_id)
     injector = IdentityInjector(
-        port, script=script, proxy_auth=proxy_auth, cookies=cookies, profile_id=profile_id
+        port,
+        script=script,
+        proxy_auth=proxy_auth,
+        cookies=cookies,
+        ua_override=ua_override,
+        profile_id=profile_id,
     )
     status = injector.start()
     with _active_lock:

@@ -46,6 +46,12 @@ class ProfileRuntime:
     # profile is browsing unmasked and the operator must be told.
     inject_ok: bool | None = None
     inject_detail: dict[str, Any] | None = None
+    # Launch-time wire-identity assertion (identity_assert): did the headers
+    # the browser actually sent match the identity it was given? True =
+    # verified, False = proven mismatch (the launch was refused), None = the
+    # probe could not run, which is NOT a pass.
+    identity_ok: bool | None = None
+    identity_detail: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

@@ -50,7 +50,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 
 | ID | Sev | Area | Summary | Effort |
 |---|---|---|---|---|
-| **F1** | ⚠️ **Critical** | Fingerprint | UA/Client-Hints spoofing silently does nothing on the default (no-preset) path; reports success | 1–2 d |
+| **F1** | ✅ **Critical** | Fingerprint | UA/Client-Hints spoofing silently does nothing on the default (no-preset) path; reports success — **fixed, see below** | done |
 | **F2** | ⚠️ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) | 0.5 d |
 | **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
 | **F4** | ⚠️ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** | 2 h |
@@ -68,7 +68,57 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 
 ---
 
-### F1 — ⚠️ CRITICAL: UA/Client-Hints spoofing does nothing on the default path
+### F1 — ✅ CRITICAL: UA/Client-Hints spoofing does nothing on the default path — **FIXED**
+
+> **Resolved in Gate 1.** Three causes, not one, and the third was the reason
+> it survived so long:
+>
+> 1. **There was no User-Agent to set.** `build_fingerprint` echoed
+>    `profile["userAgent"]`, which is empty on the quick-create path, so the
+>    "just set `--user-agent` on every launch" fix had nothing to set. Every
+>    pool in `fingerprint/_core.py` now names a default UA whose Chrome major
+>    matches the client-hint brands the same pool builds.
+> 2. **The override was discarded as it was applied.** `apply_ua_override` now
+>    takes a **held** `PinnedCdpSession` and returns `False` without one; the
+>    one-shot `_cdp_ws_send` helper is deleted, not merely documented. The
+>    injector applies the same override per attached target (new tabs too) and
+>    the launcher holds one session open for the browser's lifetime.
+> 3. **Nothing compared the claim to the wire.** New
+>    `browser/identity_assert.py` makes the browser navigate to a loopback
+>    server at launch and compares the headers that arrive with the intended
+>    identity. A proven mismatch **fails the launch**; an inconclusive probe is
+>    recorded as unverified and never reads as a pass.
+>
+> Measured after the fix, no preset, no explicit UA (Chromium 141):
+>
+> ```
+> User-Agent:         Mozilla/5.0 (Windows NT 10.0; Win64; x64) … Chrome/131.0.0.0
+> sec-ch-ua:          "Google Chrome";v="131", "Chromium";v="131", "Not-A.Brand";v="99"
+> sec-ch-ua-platform: "Windows"
+> accept-language:    en-US,en;q=0.9
+> JS:  platform=Win32  uaData=Windows  brands=131   ← agrees with the wire
+> ```
+>
+> Found by the new assertion once the override started applying: `acceptLanguage`
+> was passed as a finished header, so Chromium emitted
+> `en-US,en;q=0.9;q=0.9` — a malformed header no real browser sends, and a tell
+> in its own right. Fixed in the same change.
+>
+> **Residual, deliberately not fixed here:** a tab's *first* document request is
+> issued by the browser process before the per-target override lands, so
+> `sec-ch-ua-platform` on that one request still reflects the host. The UA string
+> is correct (it comes from the process flag); only the hints leak, and only on
+> the first request of a newly opened tab. Closing it means rewriting headers in
+> the browser process via browser-level `Fetch` interception — a change with its
+> own performance and correctness surface, and Gate 2 work, not F1. The assertion
+> measures a navigation for exactly this reason and documents it.
+>
+> Tests: `tests/test_wire_identity.py` (43 unit/contract tests) and
+> `tests/test_wire_identity_live.py` (real launch, real headers; fails on the
+> pre-fix tree with `host User-Agent leaked on the wire`).
+
+The original finding follows, unchanged.
+
 
 **Files:** [`cdp_identity.py:190-249`](../src/multiprofile/browser/cdp_identity.py#L190),
 [`cdp_identity.py:333-369`](../src/multiprofile/browser/cdp_identity.py#L333),

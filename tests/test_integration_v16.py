@@ -175,7 +175,10 @@ def test_launch_unknown_device_id_records_note_not_traceback(client, monkeypatch
 
     monkeypatch.setattr(L.subprocess, "Popen", _FakeProc)
     monkeypatch.setattr(L, "wait_for_cdp", lambda port, timeout_s=8.0: True)
-    monkeypatch.setattr(C, "apply_ua_override", lambda port, fp, ua: None)
+    # apply_ua_override now takes a HELD session, not a port — it refuses to
+    # run without one, because a session-scoped override that outlives nothing
+    # is not an override (F1).
+    monkeypatch.setattr(C, "apply_ua_override", lambda session, fp, ua="", **kw: False)
 
     cr = client.post("/api/profiles", json={
         "name": "w5-unknown-dev", "proxyType": "none",

@@ -1,5 +1,51 @@
 ## Unreleased
 
+- **Profiles no longer browse as the host machine** (audit finding F1,
+  `fingerprint/_core.py`, `browser/cdp_identity.py`, `browser/cdp_inject.py`,
+  `browser/launcher.py`, new `browser/identity_assert.py`): a profile created
+  without a device preset — the one the quick-create button makes — sent the
+  host's own `User-Agent` and `sec-ch-ua-*` headers while its JavaScript
+  claimed to be Windows. Measured on the wire before the fix:
+  `Mozilla/5.0 (X11; Linux x86_64) … Chrome/141` with
+  `sec-ch-ua-platform: "Linux"` beside `navigator.platform: "Win32"`. That
+  contradiction is something no real browser can produce, so the profile was
+  *more* identifiable than an unmodified browser. Three causes, all fixed:
+  - **No User-Agent existed to set.** `build_fingerprint` echoed
+    `profile["userAgent"]`, which is empty on the quick-create path, so the
+    launcher passed no `--user-agent` at all. Every fingerprint pool now names
+    a default UA whose Chrome major matches the client-hint brands the same
+    pool builds, and `--user-agent` is set on **every** launch.
+  - **The override was discarded as it was applied.** `apply_ua_override()`
+    sent `Network.setUserAgentOverride` down a one-shot WebSocket; Chromium
+    scopes that override to the DevTools session that set it, so it vanished
+    when the socket closed — while the ACK made the function return `True` and
+    the launcher log "override applied". It now takes a **held** session and
+    returns `False` whenever it does not have one; the one-shot helper that
+    made the mistake possible is deleted rather than documented. The identity
+    injector applies the same override per attached target, so tabs opened
+    later are covered too, and the launcher holds one CDP session open for the
+    browser's lifetime.
+  - **Nothing ever checked.** New `identity_assert` module: after the identity
+    is installed the launcher stands up a loopback server, makes the browser
+    navigate to it, and compares the headers that arrive against the identity
+    it intended. A **proven mismatch now fails the launch** (state `error`,
+    `identity_mismatch`) instead of being reported as healthy; a probe that
+    cannot run is recorded as unverified and is never treated as a pass.
+    Settings: `identity_assert_enabled` / `MULTIPROFILE_IDENTITY_ASSERT`.
+    The evidence travels with the launch result (`identityAssertion`) and in
+    the runtime registry (`identity_ok`, `identity_detail`).
+
+  Also fixed, found by the new assertion once the override started applying:
+  `acceptLanguage` was passed as a finished header, so Chromium emitted
+  `en-US,en;q=0.9;q=0.9` — malformed, and a tell in itself. It is now passed
+  as the language list Chromium expects.
+
+  Known residual: a tab's very first document request is issued before its
+  per-target override lands, so `sec-ch-ua-platform` on that one request still
+  reflects the host. Closing it means rewriting headers in the browser process
+  (browser-level `Fetch` interception) and is tracked in the audit report, not
+  papered over — the assertion measures a navigation and says so.
+
 - **Supervisor restart budget now bounds crash loops** (`browser/supervisor.py`):
   `max_restart_attempts` lived in a local loop variable, so it only bounded
   consecutive *launch failures* within a single death. A browser that launched

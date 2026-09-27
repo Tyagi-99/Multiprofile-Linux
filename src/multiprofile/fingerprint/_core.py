@@ -53,10 +53,24 @@ def _hex_id(rng_val: float) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-# Platform pools — UA must agree with platform/touch/screen
+# Platform pools — UA must agree with platform/touch/screen.
+#
+# Each pool carries a default "userAgent". A profile created without one used
+# to get an EMPTY UA: the launcher then passed no --user-agent, the CDP
+# override had nothing to claim, and the browser went on sending the host's
+# own User-Agent and sec-ch-ua-platform while the injected script told the
+# page it was Windows. That contradiction is the root of F1 — the pool knew
+# it was pretending to be Win32/Windows/Chrome-131 and simply never said so
+# in a UA string. The defaults below are the same strings the UA picker in
+# api/user_agents.py offers, and their Chrome major matches the ch_brands the
+# same pool builds, so the wire and the page agree by construction.
 _DESKTOP_WIN = {
     "pool_name": "win",
     "platform": "Win32",
+    "userAgent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "touch": 0,
     "screens": [(1920, 1080, 1040, 1), (2560, 1440, 1400, 1), (1366, 768, 728, 1), (1536, 864, 824, 1.25)],
     "cores": [4, 6, 8, 12, 16],
@@ -78,6 +92,10 @@ _DESKTOP_WIN = {
 _DESKTOP_MAC = {
     "pool_name": "mac",
     "platform": "MacIntel",
+    "userAgent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "touch": 0,
     "screens": [(1440, 900, 877, 2), (1680, 1050, 1027, 2), (1728, 1117, 1080, 2), (2560, 1600, 1570, 2)],
     "cores": [8, 10, 12],
@@ -97,6 +115,10 @@ _DESKTOP_MAC = {
 _DESKTOP_LINUX = {
     "pool_name": "linux",
     "platform": "Linux x86_64",
+    "userAgent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "touch": 0,
     "screens": [(1920, 1080, 1040, 1), (2560, 1440, 1400, 1), (1366, 768, 728, 1)],
     "cores": [4, 8, 12, 16],
@@ -116,6 +138,10 @@ _DESKTOP_LINUX = {
 _MOBILE_ANDROID = {
     "pool_name": "android",
     "platform": "Linux armv8l",
+    "userAgent": (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    ),
     "touch": 5,
     "screens": [(412, 915, 915, 2.625), (360, 800, 800, 3), (393, 851, 851, 2.75), (412, 892, 892, 2.625)],
     "cores": [8],
@@ -135,6 +161,14 @@ _MOBILE_ANDROID = {
 _MOBILE_IPHONE = {
     "pool_name": "iphone",
     "platform": "iPhone",
+    # CriOS, not Safari: the same pool claims Chrome brands in its client
+    # hints, and a Safari UA beside Chrome hints is the contradiction this
+    # whole area exists to avoid.
+    "userAgent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/131.0.0.0 "
+        "Mobile/15E148 Safari/604.1"
+    ),
     "touch": 5,
     "screens": [(393, 852, 852, 3), (390, 844, 844, 3), (428, 926, 926, 3)],
     "cores": [6],
@@ -256,7 +290,8 @@ def resolve_context(
     elif isinstance(device_preset, dict):
         preset_dict = dict(device_preset)
 
-    ua = preset_dict.get("user_agent") or profile.get("userAgent") or ""
+    explicit_ua = preset_dict.get("user_agent") or profile.get("userAgent") or ""
+    ua = explicit_ua
     is_mobile = bool(preset_dict.get("mobile", profile.get("isMobile")))
 
     pool = _detect_pool(ua, is_mobile)
@@ -273,6 +308,12 @@ def resolve_context(
                                       "bitness", "platformVersion", "model")):
         pool = _apply_preset(pool, preset_dict)
         source = f"device_preset:overlay({pool_name})"
+
+    # No explicit UA anywhere: claim the pool's own. Every other surface is
+    # already built from this pool, so this is the string that agrees with
+    # them — and an empty UA agrees with nothing (F1).
+    if not ua:
+        ua = pool.get("userAgent") or ""
 
     lang = profile.get("language") or "en-US"
     tz = profile.get("timezone") or "America/New_York"
@@ -344,6 +385,11 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     ua = profile.get("userAgent") or ""
     is_mobile = bool(profile.get("isMobile"))
     pool = _detect_pool(ua, is_mobile)
+    # The pool decides what this profile pretends to be; without an explicit
+    # UA it must still SAY so, or the launcher has nothing to put on the wire
+    # and the profile browses as the host (F1).
+    if not ua:
+        ua = pool.get("userAgent") or ""
 
     screen = _pick(seed, 1, pool["screens"])
     w, h, avail_h, dpr = screen

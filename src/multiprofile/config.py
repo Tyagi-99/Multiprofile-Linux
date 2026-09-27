@@ -51,6 +51,14 @@ class Settings:
     proxy_check_enabled: bool = True       # set False to skip in offline/dev environments
     # GPU settings: "auto" = probe at launch, "angle" = force angle, "software" = force swiftshader
     gpu_mode: str = "auto"
+    # Launch-time wire-identity assertion. The launcher makes the browser
+    # fetch a loopback probe and compares the headers it really sent against
+    # the identity it was given; a PROVEN mismatch fails the launch. Default
+    # ON: shipping a profile whose headers contradict its JavaScript is worse
+    # than shipping no profile, and this bug (F1) was silent for months
+    # precisely because nothing checked. Set False only to diagnose the
+    # assertion itself.
+    identity_assert_enabled: bool = True
     # Supervisor: watches running browsers, bounded-restarts dead ones
     supervisor_enabled: bool = True
     supervisor_interval_s: int = 10
@@ -94,6 +102,7 @@ def get_settings() -> Settings:
         proxy_check_timeout=_env_int("MULTIPROFILE_PROXY_CHECK_TIMEOUT", 8, minimum=2, maximum=60),
         proxy_check_enabled=_env_bool("MULTIPROFILE_PROXY_CHECK_ENABLED", True),
         gpu_mode=(os.environ.get("MULTIPROFILE_GPU_MODE") or "auto").strip().lower(),
+        identity_assert_enabled=_env_bool("MULTIPROFILE_IDENTITY_ASSERT", True),
         # [supervisor]
         supervisor_enabled=_env_bool("MULTIPROFILE_SUPERVISOR_ENABLED", True),
         supervisor_interval_s=_env_int("MULTIPROFILE_SUPERVISOR_INTERVAL_S", 10, minimum=2, maximum=3600),
