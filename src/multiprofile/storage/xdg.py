@@ -122,3 +122,56 @@ def harden_data_dir() -> list[str]:
         if harden_existing(path):
             changed.append(path.name)
     return changed
+
+
+# Files the old per-profile extension staging step wrote. Named here so the
+# purge below is explicit about what it is deleting and why.
+LEGACY_STAGED_SECRETS = ("proxy.json", "cookies.json")
+
+
+def purge_legacy_extension_staging(profile_id: str | None = None) -> list[str]:
+    """Delete the per-profile extension copies earlier versions staged.
+
+    Those directories hold two files that should never have been on disk:
+
+      ``proxy.json``   the proxy username and password in CLEARTEXT, decrypted
+                       straight out of the OS keychain
+      ``cookies.json`` the profile's entire cookie jar
+
+    Both were written with a bare ``write_text``, so the process umask decided
+    the mode: 0644 on a real install, world-readable — undoing the encryption
+    the keychain had just provided. Every other writer in this codebase goes
+    through :func:`secure_write_json`.
+
+    The launcher no longer writes or loads any of it (the identity script goes
+    over CDP), but removing the writer does nothing for the copies already
+    sitting in a user's data directory. Tightening the mode would still leave a
+    plaintext password on disk that nothing reads, so the directory is
+    **removed**. Returns the profile ids cleaned, for the log.
+
+    Pass ``profile_id`` to clean one profile; omit it to sweep them all.
+    """
+    import shutil
+
+    root = data_dir() / "chrome-profiles"
+    if profile_id:
+        candidates = [root / profile_id]
+    elif root.is_dir():
+        candidates = sorted(p for p in root.iterdir() if p.is_dir())
+    else:
+        return []
+
+    cleaned: list[str] = []
+    for profile_dir in candidates:
+        staged = profile_dir / "extension"
+        if not staged.is_dir():
+            continue
+        try:
+            shutil.rmtree(staged)
+            cleaned.append(profile_dir.name)
+        except OSError:
+            # Leave it rather than crash a launch or a startup; the next
+            # sweep tries again. Tighten what we could not remove.
+            for name in LEGACY_STAGED_SECRETS:
+                harden_existing(staged / name)
+    return cleaned

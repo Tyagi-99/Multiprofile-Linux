@@ -46,6 +46,29 @@
   (browser-level `Fetch` interception) and is tracked in the audit report, not
   papered over — the assertion measures a navigation and says so.
 
+- **The cleartext proxy password is no longer on disk — including the copies
+  already there** (audit finding F4, `storage/xdg.py`, `app.py`,
+  `browser/launcher.py`): the extension staging step wrote
+  `<profile>/extension/proxy.json` (the proxy username and password in
+  cleartext, decrypted straight out of the OS keychain) and
+  `<profile>/extension/cookies.json` (the whole cookie jar) with a bare
+  `write_text`, so the umask decided the mode — **0644, world-readable**,
+  undoing the keychain encryption the launcher had just used. Every other
+  writer in the codebase goes through `secure_write_json` (0600).
+  - Removing the writer (see F2 above) stops new ones, but does nothing for
+    the copies sitting in a user's data directory right now. New
+    `purge_legacy_extension_staging()` **deletes** those directories — at
+    startup for every profile, and at launch for the profile being launched,
+    so a process that started before the sweep still cleans as it goes.
+    Deleted rather than hardened: nothing reads them any more, and both files
+    are copies (the canonical cookie jar is `cookies/<id>.json`, the canonical
+    password is in the keychain), so a 0600 plaintext secret would be a
+    plaintext secret kept for no reason. A directory that cannot be removed
+    has its two secret files tightened instead, and the next sweep retries.
+  - `test_file_permissions.py` gains a guard that the launcher contains
+    exactly one `write_text` — the temp file it renames over Chrome's own
+    `Preferences` — so a third umask-decided write cannot appear unnoticed.
+
 - **evasion.js now reaches a page exactly once** (audit finding F2,
   `browser/launcher.py`, `browser/cdp_inject.py`, `browser/health.py`): the
   launcher still passed `--load-extension` and `--disable-extensions-except`

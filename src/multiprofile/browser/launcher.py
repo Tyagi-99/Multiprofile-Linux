@@ -38,7 +38,7 @@ from ..network import (
 from ..storage import db as _db
 from ..storage.profiles import get_profile, set_runtime, update_profile
 from ..storage.state import InvalidStateTransition, ProfileState
-from ..storage.xdg import chrome_profile_dir
+from ..storage.xdg import chrome_profile_dir, purge_legacy_extension_staging
 from . import manager as browser_manager
 from .cdp_window import allocate_localhost_port, wait_for_cdp
 from .grid import Rect
@@ -702,6 +702,12 @@ def launch_profile(
             note="dependency_missing: Chrome or the identity script bundle not found",
         )
         return {"ok": False, "error": str(e), "errors": ["dependency_missing"]}
+
+    # An earlier version staged a copy of the extension here, holding the
+    # cleartext proxy password and the cookie jar at 0644. Nothing writes or
+    # reads it now; a launch is the natural moment to be sure this profile's
+    # copy is gone, for a process that started before the startup sweep ran.
+    purge_legacy_extension_staging(profile_id)
 
     user_dir = chrome_profile_dir(profile_id) / "user-data"
     user_dir.mkdir(parents=True, exist_ok=True)

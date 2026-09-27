@@ -207,3 +207,110 @@ def test_create_app_does_not_change_permissions(xdg, monkeypatch):
     create_app()
 
     assert _mode(profiles_path()) == 0o664, "create_app touched operator data"
+
+
+# ---------------------------------------------------------------------------
+# the launcher's own writes, and the secrets it used to leave behind (F4)
+# ---------------------------------------------------------------------------
+
+
+def _stage_legacy_extension(profile_id: str) -> "os.PathLike":
+    """Recreate exactly what the old staging step left on disk."""
+    import json
+
+    from multiprofile.storage.xdg import chrome_profile_dir
+
+    staged = chrome_profile_dir(profile_id) / "extension"
+    staged.mkdir(parents=True, exist_ok=True)
+    (staged / "manifest.json").write_text("{}", encoding="utf-8")
+    (staged / "evasion.js").write_text("// config\n", encoding="utf-8")
+    (staged / "cookies.json").write_text(
+        json.dumps([{"name": "sid", "value": "abc", "domain": ".x.test"}]),
+        encoding="utf-8",
+    )
+    (staged / "proxy.json").write_text(
+        json.dumps({"host": "h", "port": 1, "username": "op",
+                    "password": "super-secret-value"}),
+        encoding="utf-8",
+    )
+    for name in ("cookies.json", "proxy.json", "evasion.js"):
+        os.chmod(staged / name, 0o644)  # what the umask actually produced
+    return staged
+
+
+def test_the_legacy_staged_secrets_are_deleted_not_merely_tightened(xdg):
+    """proxy.json held the proxy password in cleartext, at 0644.
+
+    Nothing reads it any more, so leaving a hardened copy on disk would keep
+    a plaintext secret for no reason. It goes.
+    """
+    from multiprofile.storage.xdg import purge_legacy_extension_staging
+
+    staged = _stage_legacy_extension("prof-legacy")
+    assert (staged / "proxy.json").exists()
+
+    cleaned = purge_legacy_extension_staging("prof-legacy")
+
+    assert cleaned == ["prof-legacy"]
+    assert not staged.exists()
+
+
+def test_the_purge_sweeps_every_profile(xdg):
+    from multiprofile.storage.xdg import purge_legacy_extension_staging
+
+    for pid in ("p1", "p2", "p3"):
+        _stage_legacy_extension(pid)
+
+    assert sorted(purge_legacy_extension_staging()) == ["p1", "p2", "p3"]
+    assert purge_legacy_extension_staging() == []
+
+
+def test_the_purge_is_quiet_when_there_is_nothing_to_do(xdg):
+    from multiprofile.storage.xdg import purge_legacy_extension_staging
+
+    assert purge_legacy_extension_staging() == []
+    assert purge_legacy_extension_staging("no-such-profile") == []
+
+
+def test_the_server_entrypoint_removes_the_legacy_staged_secrets(xdg, monkeypatch):
+    """The cleanup must actually run, not merely exist."""
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
+    from multiprofile.app import prepare_data_dir
+
+    staged = _stage_legacy_extension("prof-entry")
+    prepare_data_dir()
+
+    assert not staged.exists()
+
+
+def test_a_launch_removes_this_profiles_legacy_staged_secrets(xdg, monkeypatch):
+    """A process that started before the sweep still cleans as it launches."""
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
+    import multiprofile.browser.launcher as L
+    from multiprofile.storage.profiles import create_profile
+
+    pid = create_profile({"name": "legacy-launch", "proxyType": "none"})["id"]
+    staged = _stage_legacy_extension(pid)
+
+    monkeypatch.setattr(L, "find_chrome", lambda: "/definitely/not/a/browser")
+    # The launch fails (no browser); the purge must already have happened.
+    L.launch_profile(pid, url="about:blank", direct=True)
+
+    assert not staged.exists()
+
+
+def test_no_launcher_write_bypasses_secure_write_json():
+    """Every bare write_text in the launcher is a permission decision made by
+    the umask. The two that mattered wrote the cookie jar and the cleartext
+    proxy password at 0644; this keeps a third from appearing."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "multiprofile" / "browser" / "launcher.py"
+    ).read_text(encoding="utf-8")
+    # Only ensure_no_client_frame_shadow writes, to a temp file it then
+    # renames over Chrome's own Preferences — a file Chrome owns and rewrites,
+    # holding no profile secrets.
+    assert source.count(".write_text(") == 1
+    assert source.count("tmp.write_text(") == 1

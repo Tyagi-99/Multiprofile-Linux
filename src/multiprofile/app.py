@@ -36,6 +36,23 @@ def prepare_data_dir() -> None:
         log.debug("permission hardening skipped: %s", e)
 
     try:
+        from .storage.xdg import purge_legacy_extension_staging
+
+        # Earlier versions staged a copy of the extension per profile, holding
+        # the cleartext proxy password and the cookie jar at 0644. Nothing
+        # writes or reads them now; the copies already on disk are removed.
+        purged = purge_legacy_extension_staging()
+        if purged:
+            log.warning(
+                "removed legacy staged extension directories (cleartext proxy "
+                "password, cookie jar) for %d profile(s): %s",
+                len(purged),
+                ", ".join(purged[:10]) + (" …" if len(purged) > 10 else ""),
+            )
+    except Exception as e:  # noqa: BLE001 - never block startup
+        log.debug("legacy extension purge skipped: %s", e)
+
+    try:
         from .secrets import backend, migrate_plaintext_secrets
 
         moved = migrate_plaintext_secrets()

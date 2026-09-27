@@ -53,7 +53,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 | **F1** | ✅ **Critical** | Fingerprint | UA/Client-Hints spoofing silently does nothing on the default (no-preset) path; reports success — **fixed, see below** | done |
 | **F2** | ✅ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) — **fixed** | done |
 | **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
-| **F4** | ⚠️ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** | 2 h |
+| **F4** | ✅ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** — **fixed** | done |
 | **F5** | 🟡 **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** | 1 d + policy |
 | **F6** | ⚠️ **High** | Performance | Profile store is a full read+parse per request → **3.1 s** for 25 rows at 10k | 1–2 wk |
 | **F7** | 🟡 Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page | 15 min |
@@ -306,7 +306,31 @@ This should be an explicit, costed strategic decision, not a backlog item.
 
 ---
 
-### F4 — ⚠️ HIGH: cookie jar and proxy password written world-readable
+### F4 — ✅ HIGH: cookie jar and proxy password written world-readable — **FIXED**
+
+> **Resolved in Gate 1**, at the root as this finding recommends: removing the
+> staging step (F2) removes both writes. But that only stops NEW ones. The
+> copies already in a user's data directory — including on the machine this
+> audit ran on — were still there, still 0644, still holding a password the
+> keychain exists to protect.
+>
+> New `storage/xdg.purge_legacy_extension_staging()` **deletes** those
+> directories: at startup for every profile, and at launch for the profile
+> being launched, so a long-running process still cleans as it goes. Deleted
+> rather than hardened, deliberately: nothing reads them any more, and both
+> files are copies — the canonical cookie jar is `cookies/<id>.json` and the
+> canonical password is in the keychain — so a 0600 plaintext secret would be a
+> plaintext secret kept for no reason. A directory that cannot be removed has
+> its two secret files tightened instead and the next sweep retries.
+>
+> `tests/test_file_permissions.py` also gains a guard that `launcher.py`
+> contains exactly one `write_text` (the temp file it renames over Chrome's own
+> `Preferences`), so a third umask-decided write cannot appear unnoticed —
+> which is how this one arrived after the sweep that fixed H1.
+
+The original finding follows, unchanged.
+
+### F4 (original) — cookie jar and proxy password written world-readable
 
 **File:** [`launcher.py:403,415`](../src/multiprofile/browser/launcher.py#L403)
 
