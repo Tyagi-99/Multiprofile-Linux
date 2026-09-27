@@ -14,15 +14,26 @@ state ``running`` and checks the recorded PID:
   (CDP is the only tiling authority; gap=0, margin=0 come from config).
 
 Restart retries are bounded (``max_restart_attempts``, exponential backoff).
-When retries are exhausted the profile stays in ``error`` with the last error
-recorded — ``error`` requires an explicit restart/recover action to leave, so
-the supervisor never spins forever and never silently forgets a dead browser.
+The budget is spent per *crash episode*, not per death: a relaunched browser
+only counts as recovered once it has stayed alive for
+``restart_stability_s``. A browser that dies again inside that window
+continues the same episode and spends the same budget, so a browser that
+crashes seconds after every relaunch runs the budget out instead of being
+relaunched forever. Surviving the window resets the budget, so unrelated
+crashes hours apart each get the full allowance.
+
+When the budget is exhausted the profile stays in ``error`` with the last
+error recorded — ``error`` requires an explicit restart/recover action to
+leave, so the supervisor never spins forever and never silently forgets a
+dead browser.
 """
 from __future__ import annotations
 
 import logging
 import os
 import threading
+import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..api import events
@@ -32,6 +43,18 @@ from ..storage import db as _db
 from ..storage.state import ProfileState
 
 log = logging.getLogger("multiprofile.browser.supervisor")
+
+
+@dataclass
+class _Episode:
+    """One ongoing crash episode for a profile.
+
+    ``spent`` is how much of ``max_restart_attempts`` this episode has used;
+    ``at`` is the monotonic time of the most recent restart attempt.
+    """
+
+    spent: int
+    at: float
 
 
 def pid_alive(pid: int | None) -> bool:
@@ -77,9 +100,11 @@ class Supervisor:
         interval_s: float | None = None,
         max_restart_attempts: int | None = None,
         backoff_base_s: float = 2.0,
+        restart_stability_s: float | None = None,
         launch_fn: Callable[[str], dict[str, Any]] | None = None,
         tile_fn: Callable[[], dict[str, Any] | None] | None = None,
         pid_alive_fn: Callable[[int | None], bool] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         settings = get_settings()
         self.enabled = settings.supervisor_enabled if enabled is None else enabled
@@ -92,12 +117,33 @@ class Supervisor:
             else max_restart_attempts
         )
         self.backoff_base_s = backoff_base_s
+        self.restart_stability_s = float(
+            settings.supervisor_restart_stability_s
+            if restart_stability_s is None
+            else restart_stability_s
+        )
         self._launch_fn = launch_fn or _default_launch
         self._tile_fn = tile_fn or _default_tile
         self._pid_alive = pid_alive_fn or pid_alive
+        self._clock = clock or time.monotonic
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Crash episodes keyed by profile id, guarded by its own lock: the
+        # watchdog thread writes them and supervise_once() may be called
+        # directly from an API thread.
+        self._episodes: dict[str, _Episode] = {}
+        self._episode_lock = threading.Lock()
+        if self.max_restart_attempts and self.restart_stability_s < self.interval_s:
+            # Deaths are only noticed on a tick, so a window shorter than the
+            # tick marks every relaunch stable and the budget never binds.
+            log.warning(
+                "supervisor: restart_stability_s=%.0fs is below the %.1fs check "
+                "interval — a crash-looping browser will be relaunched without "
+                "an effective bound",
+                self.restart_stability_s,
+                self.interval_s,
+            )
 
     # ------------------------------------------------------------------ API
 
@@ -115,9 +161,11 @@ class Supervisor:
             )
             self._thread.start()
         log.info(
-            "supervisor started (interval=%.1fs, max_restart_attempts=%d)",
+            "supervisor started (interval=%.1fs, max_restart_attempts=%d, "
+            "restart_stability=%.0fs)",
             self.interval_s,
             self.max_restart_attempts,
+            self.restart_stability_s,
         )
         return self
 
@@ -156,6 +204,7 @@ class Supervisor:
             checked += 1
             if self._pid_alive(rt.get("pid")):
                 alive += 1
+                self._reset_if_stable(profile_id)
                 try:
                     _db.record_heartbeat(profile_id)
                 except Exception:  # noqa: BLE001 - heartbeat is best effort
@@ -194,6 +243,7 @@ class Supervisor:
                 profile_id,
                 current_state,
             )
+            self._clear_episode(profile_id)
             return False
         pid = rt.get("pid")
         cdp_port = rt.get("cdp_port")
@@ -208,7 +258,34 @@ class Supervisor:
 
         last_error: str | None = None
         attempts = max(0, int(self.max_restart_attempts))
-        for attempt in range(1, attempts + 1):
+        # Attempts already spent in this crash episode. A relaunch that looked
+        # successful but died inside the stability window did NOT recover the
+        # browser, so it must not hand out a fresh budget.
+        spent = self._episode_spent(profile_id)
+        if spent >= attempts:
+            log.error(
+                "supervisor: %s is crash-looping — %d restart(s) failed to keep "
+                "the browser alive for %.0fs; parking in error (explicit restart "
+                "required)",
+                profile_id,
+                spent,
+                self.restart_stability_s,
+            )
+            self._give_up(
+                profile_id,
+                attempts=attempts,
+                last_error=(
+                    f"browser died again within {self.restart_stability_s:.0f}s of "
+                    f"restart {spent}"
+                ),
+                note=(
+                    f"restart retries exhausted: {attempts} restart(s) did not keep "
+                    f"the browser alive for {self.restart_stability_s:.0f}s"
+                ),
+            )
+            return False
+
+        for attempt in range(spent + 1, attempts + 1):
             if attempt > 1:
                 backoff = self.backoff_base_s * (2 ** (attempt - 2))
                 log.info(
@@ -220,6 +297,9 @@ class Supervisor:
                 )
                 if self._stop_event.wait(backoff):
                     break  # shutting down: stop retrying
+            # Recorded before the launch: a launcher that hangs or crashes the
+            # process must not leave the episode looking cheaper than it was.
+            self._record_attempt(profile_id, attempt)
             try:
                 self._set_state(profile_id, ProfileState.STARTING)
                 result = self._launch_fn(profile_id)
@@ -228,7 +308,14 @@ class Supervisor:
                 log.warning("supervisor: relaunch of %s raised: %s", profile_id, e)
                 continue
             if isinstance(result, dict) and result.get("ok"):
-                log.info("supervisor: relaunch of %s succeeded (attempt %d)", profile_id, attempt)
+                log.info(
+                    "supervisor: relaunch of %s succeeded (attempt %d/%d; counts as "
+                    "recovered once it survives %.0fs)",
+                    profile_id,
+                    attempt,
+                    attempts,
+                    self.restart_stability_s,
+                )
                 self._retile_grid(profile_id)
                 return True
             last_error = (
@@ -242,15 +329,75 @@ class Supervisor:
                 last_error,
             )
 
-        # Retries exhausted — park the profile in error; explicit action needed.
-        self._set_state(profile_id, ProfileState.ERROR, note=f"restart retries exhausted: {last_error}")
+        # Budget exhausted — park the profile in error; explicit action needed.
+        self._give_up(
+            profile_id,
+            attempts=attempts,
+            last_error=last_error,
+            note=f"restart retries exhausted: {last_error}",
+        )
+        return False
+
+    def _give_up(
+        self,
+        profile_id: str,
+        *,
+        attempts: int,
+        last_error: str | None,
+        note: str,
+    ) -> None:
+        """Park a profile in ``error`` and close its crash episode.
+
+        The episode record is dropped because ``error`` is only left by an
+        explicit operator restart, and that restart deserves a full budget.
+        """
+        self._clear_episode(profile_id)
+        self._set_state(profile_id, ProfileState.ERROR, note=note)
         audit_log(
             "supervisor_restart_exhausted",
             profile_id=profile_id,
             ok=False,
             detail={"attempts": attempts, "last_error": last_error},
         )
-        return False
+
+    # ——————————————————————————————- episodes
+
+    def _episode_spent(self, profile_id: str) -> int:
+        """Restart attempts already spent in this profile's crash episode."""
+        self._reset_if_stable(profile_id)
+        with self._episode_lock:
+            episode = self._episodes.get(profile_id)
+        return 0 if episode is None else episode.spent
+
+    def _record_attempt(self, profile_id: str, spent: int) -> None:
+        """Charge ``spent`` attempts to the episode and restart its clock."""
+        with self._episode_lock:
+            self._episodes[profile_id] = _Episode(spent=spent, at=self._clock())
+
+    def _reset_if_stable(self, profile_id: str) -> None:
+        """End the episode once the browser has proved the restart worked.
+
+        Called on every tick a profile is found alive, and again before a
+        restart is costed, so a browser that has been up for
+        ``restart_stability_s`` starts any future crash with a full budget.
+        """
+        with self._episode_lock:
+            episode = self._episodes.get(profile_id)
+            if episode is None:
+                return
+            age = self._clock() - episode.at
+            if age < self.restart_stability_s:
+                return
+            del self._episodes[profile_id]
+        log.info(
+            "supervisor: %s alive %.0fs since its last restart — restart budget reset",
+            profile_id,
+            age,
+        )
+
+    def _clear_episode(self, profile_id: str) -> None:
+        with self._episode_lock:
+            self._episodes.pop(profile_id, None)
 
     def _retile_grid(self, profile_id: str) -> None:
         """Re-tile the entire grid via CDP after a successful restart."""

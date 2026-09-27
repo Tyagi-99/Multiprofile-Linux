@@ -55,6 +55,10 @@ class Settings:
     supervisor_enabled: bool = True
     supervisor_interval_s: int = 10
     supervisor_max_restart_attempts: int = 3
+    # A relaunched browser must stay alive this long before its restart counts
+    # as a recovery. Deaths inside the window continue the same crash episode
+    # and keep spending the same restart budget.
+    supervisor_restart_stability_s: int = 60
     # Durable job queue
     jobs_max_workers: int = 4
     jobs_max_concurrent_launches: int = 2
@@ -95,6 +99,9 @@ def get_settings() -> Settings:
         supervisor_interval_s=_env_int("MULTIPROFILE_SUPERVISOR_INTERVAL_S", 10, minimum=2, maximum=3600),
         supervisor_max_restart_attempts=_env_int(
             "MULTIPROFILE_SUPERVISOR_MAX_RESTARTS", 3, minimum=0, maximum=10
+        ),
+        supervisor_restart_stability_s=_env_int(
+            "MULTIPROFILE_SUPERVISOR_STABILITY_S", 60, minimum=0, maximum=3600
         ),
         # [jobs]
         jobs_max_workers=_env_int("MULTIPROFILE_JOBS_MAX_WORKERS", 4, minimum=1, maximum=32),

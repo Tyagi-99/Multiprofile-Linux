@@ -438,3 +438,87 @@ def test_park_handler_rejects_non_bool(ctl):
             handle_park(record, HandlerContext())
     finally:
         sys.modules.pop("multiprofile.parking", None)
+
+
+def test_supervisor_crash_loop_is_bounded(ctl):
+    """A browser that dies seconds after every relaunch must not be restarted forever.
+
+    Regression: the restart budget lived in a local loop variable, so it only
+    bounded consecutive *launch failures*. A launch that reported ok and then
+    died on the next tick started a fresh budget every time — the supervisor
+    relaunched a crash-looping browser without limit (observed in the field as
+    "relaunch ... succeeded (attempt 1)" repeating every ~11s).
+    """
+    now = [1000.0]
+    launches = []
+
+    def fake_launch(profile_id):
+        # Reports success, exactly like the real launcher did in the field.
+        db.set_profile_state(profile_id, "running", force=True)
+        db.upsert_profile_runtime(profile_id, pid=4242, cdp_port=19997)
+        launches.append(profile_id)
+        return {"ok": True, "pid": 4242, "cdpPort": 19997}
+
+    sup = Supervisor(
+        interval_s=60,
+        max_restart_attempts=3,
+        backoff_base_s=0.01,
+        restart_stability_s=60.0,
+        launch_fn=fake_launch,
+        tile_fn=lambda: {"ok": True, "results": []},
+        pid_alive_fn=lambda pid: False,  # every relaunched browser is already dead
+        clock=lambda: now[0],
+    )
+
+    mark_running("p_loop", 4242)
+    # Ten watchdog ticks, each 11s apart — inside the 60s stability window.
+    for _ in range(10):
+        sup.supervise_once()
+        now[0] += 11.0
+
+    assert len(launches) == 3, (
+        f"expected at most max_restart_attempts=3 relaunches across the episode, "
+        f"got {len(launches)}"
+    )
+    rt = db.get_profile_runtime("p_loop")
+    assert rt["state"] == "error"
+    assert "did not keep the browser alive" in (rt["note"] or "")
+    exhausted = [e for e in read_audit(limit=100) if e["action"] == "supervisor_restart_exhausted"]
+    assert exhausted, "crash loop must be audited as restart-exhausted"
+
+
+def test_supervisor_stability_window_resets_budget(ctl):
+    """Crashes separated by a stable run each get the full restart budget."""
+    now = [1000.0]
+    launches = []
+    alive = [False]
+
+    def fake_launch(profile_id):
+        db.set_profile_state(profile_id, "running", force=True)
+        db.upsert_profile_runtime(profile_id, pid=4243, cdp_port=19996)
+        launches.append(now[0])
+        alive[0] = True
+        return {"ok": True, "pid": 4243, "cdpPort": 19996}
+
+    sup = Supervisor(
+        interval_s=60,
+        max_restart_attempts=3,
+        backoff_base_s=0.01,
+        restart_stability_s=60.0,
+        launch_fn=fake_launch,
+        tile_fn=lambda: {"ok": True, "results": []},
+        pid_alive_fn=lambda pid: alive[0],
+        clock=lambda: now[0],
+    )
+
+    mark_running("p_stable", 4243)
+    # Four crashes, each after a long healthy run: one restart every time.
+    for _ in range(4):
+        alive[0] = False
+        sup.supervise_once()          # sees the death, relaunches
+        now[0] += 3600.0              # an hour of uptime proves stability
+        sup.supervise_once()          # alive tick: budget resets
+
+    assert len(launches) == 4, "a stable run must restore the full restart budget"
+    rt = db.get_profile_runtime("p_stable")
+    assert rt["state"] == "running"

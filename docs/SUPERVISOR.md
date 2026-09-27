@@ -33,7 +33,8 @@ profile state. It never assumes a browser is alive — every pass re-checks.
    the launch through the real launcher (`launch_profile`), at most
    `max_restart_attempts` times (default 3, config
    `supervisor_max_restart_attempts` /
-   `MULTIPROFILE_SUPERVISOR_MAX_RESTARTS`). Between attempts it backs off
+   `MULTIPROFILE_SUPERVISOR_MAX_RESTARTS`). The budget is spent per **crash
+   episode**, not per death — see "Crash episodes" below. Between attempts it backs off
    exponentially (`backoff_base_s * 2^(attempt-2)`; attempt 2 waits ~2s,
    attempt 3 waits ~4s). Each attempt sets state `starting` first; a
    launcher exception is caught, logged, and counted as a failed attempt —
@@ -51,15 +52,54 @@ profile state. It never assumes a browser is alive — every pass re-checks.
 5. **Exhaustion path.** If all attempts fail, the profile is set to `error`
    with the note `restart retries exhausted: <last_error>` and an audit
    entry (`supervisor_restart_exhausted`, with attempt count and last
-   error). It stays there until an operator explicitly restarts or
-   recovers the profile. **The supervisor never spins forever**: the retry
-   budget is fixed per incident, and a profile already in `error` is not
-   re-scanned as `running`.
+   error). The same happens when the episode budget is already spent, with
+   the note naming the stability window instead of a launcher error. It
+   stays there until an operator explicitly restarts or recovers the
+   profile. **The supervisor never spins forever**: the retry budget is
+   fixed per episode, and a profile already in `error` is not re-scanned as
+   `running`.
+
+## Crash episodes
+
+A launch reporting `ok` does not prove the browser recovered — it may die
+again seconds later. So a restart only counts as a **recovery** once the
+relaunched browser has stayed alive for `restart_stability_s` (default 60s,
+`MULTIPROFILE_SUPERVISOR_STABILITY_S`). Until then the profile is in the
+same crash *episode*, and each further death spends the same
+`max_restart_attempts` budget:
+
+```
+death -> restart 1 -> dies after 11s -> restart 2 -> dies after 11s
+      -> restart 3 -> dies after 11s -> budget spent: park in `error`
+```
+
+Surviving the window ends the episode and restores the full budget, so
+unrelated crashes hours apart each get their own three attempts. The reset
+is noticed on the first tick where the profile is found alive past the
+window, and an explicit Stop/Park also ends the episode.
+
+Because the budget now spans deaths, the exponential backoff spans them
+too: the second restart of an episode waits ~2s, the third ~4s.
+
+Set `restart_stability_s` below `interval_s` and the supervisor logs a
+warning at startup — deaths are only noticed on a tick, so a window
+shorter than the tick marks every relaunch stable and the budget can never
+bind.
+
+> Fixed after 1.9.0 (unreleased). Before that the budget lived in a local
+> loop variable and
+> only bounded consecutive *launch failures*; a browser that started
+> successfully and then died on the next tick got a fresh budget every time
+> and was relaunched forever, logging `relaunch ... succeeded (attempt 1)`
+> on a loop.
 
 ## Guarantees and non-goals
 
 - **Bounded work per pass**: at most N profiles × 3 launch attempts, with
   backoff. No unbounded loops anywhere in the module.
+- **Bounded restarts over time**: the budget spans a crash episode, so a
+  browser that keeps dying shortly after each relaunch is parked in `error`
+  instead of being relaunched on every tick.
 - **Loop survival**: every per-profile operation is wrapped; an exception
   in detection, restart, re-tile, state write, heartbeat, or audit is
   caught and logged. One bad profile cannot wedge the watchdog for the
@@ -83,6 +123,9 @@ profile state. It never assumes a browser is alive — every pass re-checks.
 | `supervisor_enabled` | `MULTIPROFILE_SUPERVISOR_ENABLED` | `true` |
 | `supervisor_interval_s` | `MULTIPROFILE_SUPERVISOR_INTERVAL_S` | `10` (clamped 2–3600) |
 | `supervisor_max_restart_attempts` | `MULTIPROFILE_SUPERVISOR_MAX_RESTARTS` | `3` (clamped 0–10) |
+| `supervisor_restart_stability_s` | `MULTIPROFILE_SUPERVISOR_STABILITY_S` | `60` (clamped 0–3600) |
 
 Set `max_restart_attempts=0` to get detection + audit + `error` marking
-with no automatic relaunch.
+with no automatic relaunch. Set `restart_stability_s=0` to score every
+successful launch as a recovery — that restores the old unbounded relaunch
+behaviour and is not recommended.

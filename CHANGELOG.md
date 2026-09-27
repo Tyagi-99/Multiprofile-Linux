@@ -1,3 +1,22 @@
+## Unreleased
+
+- **Supervisor restart budget now bounds crash loops** (`browser/supervisor.py`):
+  `max_restart_attempts` lived in a local loop variable, so it only bounded
+  consecutive *launch failures* within a single death. A browser that launched
+  successfully and then died on the next watchdog tick got a brand-new budget
+  every time and was relaunched forever (field symptom: `relaunch ... succeeded
+  (attempt 1)` repeating every ~11s). The budget is now spent per **crash
+  episode**: a restart counts as a recovery only once the relaunched browser
+  survives `restart_stability_s` (new setting, default 60s,
+  `MULTIPROFILE_SUPERVISOR_STABILITY_S`). Deaths inside that window continue
+  the episode and spend the same budget, so a crash-looping profile is parked
+  in `error` after 3 restarts and waits for an explicit operator restart;
+  surviving the window resets the budget so unrelated crashes each get a full
+  allowance. Exponential backoff now spans deaths too, and the supervisor warns
+  at startup if the stability window is shorter than the check interval (where
+  the budget could never bind). Two regression tests cover the loop and the
+  reset.
+
 ## 1.9.0 (2026-09-24)
 
 - **Premium console redesign**: the old single-file console (`src/static/app.js`) is replaced by a Next.js 15 / React 19 / TypeScript / Tailwind v4 static export, served from the same `src/static` directory and packaged into the deb exactly as before — no Node.js runtime needed on the machine. Hash routing keeps every deep link working; all Flask API contracts, the browser launcher, supervisor, 33 device presets (with honest support badges), fingerprints, proxies/gateways, jobs, audit, backups, and proxy fail-closed behaviour are preserved.
