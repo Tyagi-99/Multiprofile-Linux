@@ -85,7 +85,7 @@ Injected at `run_at: document_start` in the MAIN world. Configured via `__MP_INL
 - **Window.Chrome Supplementation**: Ensures `window.chrome.app`, `window.chrome.csi`, `window.chrome.loadTimes`, and `window.chrome.runtime` exist and present native function signatures (`toString()` yields `function () { [native code] }`).
 - **Connection Information**: Populates `navigator.connection` with realistic downlink, effectiveType, and RTT properties.
 - **Stable Media Device IDs**: Traps `navigator.mediaDevices.enumerateDevices` to return consistent, seeded 64-character hexadecimal IDs for audio/video inputs across page navigations.
-- **Silent Operation**: Extension operates strictly silently. No `console.log` statements are emitted in the browser console.
+- **Silent Operation**: the script emits no console output. This was not true until audit finding F7: `evasion.js` opened with `console.log("[Evasion] evasion.js active on:", location.href)`, which ran on every page and in every frame — a plain-text confession in any DevTools session, screen share, demo or support screenshot, twelve lines above the comment claiming there was no such logging. The line now runs only when `MULTIPROFILE_EVASION_DEBUG=1` puts `debug: true` in the injected config, because counting how many times it appears for one document is the only honest way to measure how many times the script ran (which is how F2's double injection was caught). Default off; the launch notes say so loudly when it is on.
 
 ---
 

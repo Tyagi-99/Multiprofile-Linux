@@ -56,7 +56,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 | **F4** | ✅ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** — **fixed** | done |
 | **F5** | 🟡 **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** | 1 d + policy |
 | **F6** | ⚠️ **High** | Performance | Profile store is a full read+parse per request → **3.1 s** for 25 rows at 10k | 1–2 wk |
-| **F7** | 🟡 Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page | 15 min |
+| **F7** | ✅ Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page — **fixed** | done |
 | **F8** | 🟡 Medium | Security | API silently accepts and persists **unknown fields** | 4 h |
 | **F9** | ❌ Medium | UX | No list virtualization; 25/page pagination | 1 wk |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
@@ -413,7 +413,33 @@ written twice.
 
 ---
 
-### F7 — 🟡 MEDIUM: the evasion script announces itself
+### F7 — ✅ MEDIUM: the evasion script announces itself — **FIXED**
+
+> **Resolved in Gate 1**, by the flag rather than the delete key. The line now
+> runs only when `MULTIPROFILE_EVASION_DEBUG=1` puts `debug: true` in the
+> injected config, and it sits *after* the config is parsed so it can be turned
+> on at all. Default off; when it is on the launch notes say so loudly.
+>
+> Kept rather than deleted for one reason: the number of times that line appears
+> for a single document is the only honest way to count how many times the
+> script ran, and that is the measurement that caught F2. Deleting it would have
+> removed the instrument along with the leak. Verified live — 0 console messages
+> with the flag off, 1 per document with it on:
+>
+> ```
+> MULTIPROFILE_EVASION_DEBUG=0   console/log messages seen: 0
+> MULTIPROFILE_EVASION_DEBUG=1   [Evasion] evasion.js active on: http://127.0.0.1:37721/quiet
+> ```
+>
+> Note the file already carried the comment *"No console.log — logging extension
+> activity is a detection signal"* twelve lines below the console.log. A comment
+> is not a guard; `tests/test_evasion_is_quiet.py` is — it counts the console
+> calls in the script with comments stripped, and asserts the one that remains
+> is inside the flag.
+
+The original finding follows, unchanged.
+
+### F7 (original) — the evasion script announces itself
 
 **File:** [`evasion.js:13`](../src/extension/evasion.js#L13)
 

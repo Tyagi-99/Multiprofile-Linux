@@ -46,6 +46,23 @@
   (browser-level `Fetch` interception) and is tracked in the audit report, not
   papered over — the assertion measures a navigation and says so.
 
+- **evasion.js no longer announces itself** (audit finding F7,
+  `src/extension/evasion.js`, `config.py`, `browser/launcher.py`): the script
+  opened with `console.log("[Evasion] evasion.js active on:", location.href)`,
+  which ran on every page and in every frame — twelve lines above its own
+  comment saying "No console.log — logging extension activity is a detection
+  signal". A page cannot read past console output, so it was never directly
+  exploitable, but it was a plain-text confession in any DevTools session,
+  screen share, demo or support screenshot. The line now runs only when
+  `MULTIPROFILE_EVASION_DEBUG=1` (setting `evasion_debug`, default off) puts
+  `debug: true` in the injected config, and it was moved *after* the config is
+  parsed so it can be switched on at all. With the flag off the page config
+  gains no key and the browser produces no console output at all (verified
+  live: 0 messages off, 1 per document on). It is kept rather than deleted
+  because the count of those lines for one document is the only honest way to
+  measure how many times the script ran — the measurement that caught F2 — and
+  the launch notes say loudly when it is on.
+
 - **The cleartext proxy password is no longer on disk — including the copies
   already there** (audit finding F4, `storage/xdg.py`, `app.py`,
   `browser/launcher.py`): the extension staging step wrote

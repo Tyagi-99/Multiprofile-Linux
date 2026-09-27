@@ -410,6 +410,14 @@ def _start_identity_injection(
         cfg["webrtcMode"] = (
             profile.get("webrtcMode") or fingerprint.get("webrtcMode") or "default"
         )
+        # Only present when asked for: the default page config gains no extra
+        # key, and the script stays silent on every page.
+        if get_settings().evasion_debug:
+            cfg["debug"] = True
+            notes.append(
+                "evasion.js DEBUG logging is ON — the script announces itself "
+                "on every page (MULTIPROFILE_EVASION_DEBUG)"
+            )
         script = build_identity_script(
             cfg,
             evasion.read_text(encoding="utf-8", errors="ignore"),

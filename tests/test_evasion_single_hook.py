@@ -187,6 +187,9 @@ def xdg(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
     monkeypatch.setenv("MULTIPROFILE_PROXY_CHECK_ENABLED", "0")
+    # The script's own log line is the only honest way to count its executions
+    # in one document. It is off by default (F7) and turned on here on purpose.
+    monkeypatch.setenv("MULTIPROFILE_EVASION_DEBUG", "1")
 
 
 @live

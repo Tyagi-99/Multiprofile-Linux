@@ -10,7 +10,6 @@
  */
 (function() {
   'use strict';
-  console.log("[Evasion] evasion.js active on:", location.href);
 
   // Helper to make hooked functions appear 100% native
   function makeNative(fn, name) {
@@ -128,7 +127,23 @@
     } catch (e) {}
   }
 
-  // NOTE: No console.log — logging extension activity is a detection signal.
+  // NOTE: no console output unless the launcher explicitly asks for it.
+  //
+  // This script used to announce itself on EVERY page and in every frame:
+  //
+  //     console.log("[Evasion] evasion.js active on:", location.href);
+  //
+  // A page cannot read past console output, so it was not directly
+  // exploitable — but it was a plain-text confession visible in any DevTools
+  // session, screen share, demo or support screenshot, and harvestable by a
+  // page that installs a console proxy before this runs. The line survives
+  // behind a flag rather than being deleted, because the number of times it
+  // appears for one document is the only honest way to count how many times
+  // this script ran, which is how the double-injection bug was measured. It is
+  // OFF unless MULTIPROFILE_EVASION_DEBUG put debug:true in the config.
+  if (MP_CFG && MP_CFG.debug === true) {
+    try { console.log("[Evasion] evasion.js active on:", location.href); } catch (e) {}
+  }
 
 
   // Deterministic noise generator
