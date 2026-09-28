@@ -82,7 +82,8 @@ honest-reporting defects rather than deferring them.
 | **F18** | ✅ **Critical** | Security | **Every profile in a proxy pool egressed through the same member** — pools never recorded a decision | done |
 | **F19** | ✅ **High** | Security | The **WebRTC control was inert**: the API's vocabulary matched nothing downstream | done |
 | **F20** | 🟡 Medium | Reliability | The **durable job queue has no producer** — now at least visible; moving the writer is filed | 1 wk |
-| **F21** | 🟡 Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case | 2 d |
+| **F21** | ✅ Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case — **fixed** | done |
+| **F22** | ✅ **High** | Fingerprint | Timezone was **JavaScript-only**; every unhooked surface reported the host zone — **fixed** | done |
 
 ---
 
@@ -162,9 +163,38 @@ honest-reporting defects rather than deferring them.
 > sec-ch-ua-platform "Windows"
 > ```
 >
+> **Two things this fix got wrong before it was right, both worth recording.**
+>
+> First, it nearly disarmed the Gate 1 assertion. The launch-time identity probe
+> is a document request to loopback, so the rewrite caught it too — and the
+> assertion then measured headers the injector had just written. It would have
+> reported *identity verified* with the UA override completely dead. F1 was a
+> reporting bug before it was a spoofing bug, and this is precisely how it comes
+> back. The probe path is now shared as `IDENTITY_PROBE_PATH` and exempted, so
+> it observes what the browser would really send.
+>
+> Second, it costs **~0.5s per launch**, and the cost is not the interception.
+> Measured, with the pattern deliberately matching nothing:
+>
+> ```
+> Fetch armed, Document pattern   2.46s
+> Fetch armed, matches nothing    2.45s
+> Fetch never armed               1.98s
+> ```
+>
+> Arming Fetch at browser scope drops a Chromium navigation fast-path whether or
+> not anything is paused. That puts profile launch at **~2.45s against the
+> brief's < 2s budget** (§4.4) — a real miss, called out rather than buried.
+> `MULTIPROFILE_FIRST_REQUEST_HINTS=0` recovers 1.98s at the price of the leak.
+> On by default, because an identity that contradicts itself once per tab is the
+> defect this product exists to prevent, but that is a trade a founder should
+> make knowingly rather than discover.
+>
 > Verified: `tests/test_first_request_hints_live.py` (5 live tests, including one
 > that the tab still loads at all, and one that the Gate 1 launch assertion still
-> passes); `-m network` → 24 passed.
+> passes) and `tests/test_first_request_hints.py` (9 unit guards, including that
+> the probe is released untouched and that a throwing rewrite still releases the
+> request); `-m network` → 24 passed.
 >
 > Tests: `tests/test_wire_identity.py` (43 unit/contract tests) and
 > `tests/test_wire_identity_live.py` (real launch, real headers; fails on the
@@ -734,6 +764,72 @@ restart counts as recovery only after `restart_stability_s` (default 60 s), and 
 crash-looping profile is parked in `error` after 3 restarts. Measured: 10 unbounded
 relaunches before, 3 and parked after. Two regression tests added.
 Uncommitted in the working tree.
+
+---
+
+### F22 — ✅ HIGH: the timezone was a set of patched methods, not the engine's — **FIXED**
+
+**Files:** [`browser/cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py), [`browser/launcher.py`](../src/multiprofile/browser/launcher.py)
+
+A profile's timezone existed only as JavaScript. `evasion.js` hooks
+`Intl.DateTimeFormat`, `resolvedOptions`, `Date.prototype.getTimezoneOffset`,
+`toString` and `toTimeString` — and nothing else. Every surface it did not think
+of reported the host's zone. There was no `Emulation.setTimezoneOverride` and no
+`TZ` in the browser's environment; `launcher.py` set only `OZONE_PLATFORM`.
+
+Measured on this machine (host `Asia/Kolkata`, profile `America/New_York`),
+inside a single document:
+
+```
+Date.prototype.toString        04:58:55 GMT-0400 (Eastern Daylight Time)
+Date.prototype.toLocaleString  9/28/2026, 2:28:55 PM
+```
+
+Nine and a half hours apart — exactly Kolkata (+5:30) against New York (−4:00).
+A page needed **one** unhooked method to catch the profile contradicting itself,
+and `toLocaleString` is not an obscure one. `toLocaleTimeString` and
+`toLocaleDateString` were equally open.
+
+This is the F1 shape again in a different vector: not weak spoofing, but an
+*internal contradiction* that marks the profile more clearly than doing nothing.
+And it is the vector where a contradiction matters most, because IP↔timezone
+agreement is the first thing a fraud system checks.
+
+> **Resolved.** The timezone is set on the engine, not on methods:
+> `Emulation.setTimezoneOverride` per attached target, plus `TZ` in the browser
+> process's environment so the process itself — not only its renderers — agrees.
+> Every surface then matches by construction, including the ones nobody has
+> thought of yet. The JS hooks stay as a fallback for when the override cannot
+> be applied, and they compute from the same zone, so the two cannot disagree.
+>
+> Patching one method at a time cannot win this game: the set of surfaces that
+> expose local time is open-ended, and each new one is a silent regression. That
+> is the argument for the engine-level anchor wherever an engine-level anchor
+> exists — the same reasoning behind F5's version alignment.
+>
+> After the fix, same document:
+>
+> ```
+> toString       05:00:34 GMT-0400 (Eastern Daylight Time)
+> toLocaleString 9/28/2026, 5:00:34 AM
+> worker         America/New_York, offset 240
+> ```
+>
+> `InjectionStatus` gained `timezoneApplied`, so the console can say whether the
+> engine took it rather than assuming.
+>
+> Verified: 7 live tests in `tests/test_timezone_live.py`. They assert that the
+> surfaces **agree with each other** rather than asserting exact strings, because
+> the defect was never what any one of them said.
+
+**Still open (5.4 item 14): the timezone does not follow the proxy.** The egress
+country and zone are measured (`network.py`, `_ECHO_GEO_URL`) and
+`consistency.py` warns when they disagree with the profile — but nothing ever
+writes `profile["timezone"]`, so the operator is told about a mismatch they have
+to fix by hand. `DevicePreset.timezone_policy = "auto"` reaches
+`MobileProfileConfig.timezone` as the literal string `"auto"` and is never
+emitted. Auto-alignment is a feature, and it needs a decision about whether it
+overwrites an operator's explicit choice.
 
 ---
 

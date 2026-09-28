@@ -544,6 +544,9 @@ def _start_identity_injection(
     status = start_injection(
         profile_id, port, script=script, proxy_auth=auth, cookies=cookies,
         ua_override=ua_override,
+        timezone_id=str(
+            profile.get("timezone") or fingerprint.get("timezone") or ""
+        ).strip() or None,
     )
     upsert_runtime(profile_id, inject_ok=status.ok, inject_detail=status.to_dict())
 
@@ -984,6 +987,17 @@ def launch_profile(
     # ------------------------------------------------------------------
     env = os.environ.copy()
     env["OZONE_PLATFORM"] = "x11"
+    # The process's own idea of local time. Chromium reads TZ at startup, so
+    # this anchors the browser process itself -- not just the renderers the
+    # CDP override reaches -- and it costs nothing. Without it the profile's
+    # timezone existed only as a JavaScript patch, and any surface that patch
+    # did not cover reported the host's zone: measured on this machine,
+    # Date.prototype.toLocaleString returned Asia/Kolkata time while
+    # Intl.DateTimeFormat().resolvedOptions().timeZone said America/New_York
+    # -- a contradiction inside one page.
+    _tz = str(profile.get("timezone") or fingerprint.get("timezone") or "").strip()
+    if _tz:
+        env["TZ"] = _tz
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except OSError as e:
