@@ -347,6 +347,64 @@ def build_ua_override_params(
     }
 
 
+def _brand_list_header(brands: Any) -> str:
+    """Format a client-hints brand list the way Chrome puts it on the wire."""
+    parts = []
+    for entry in brands or []:
+        if not isinstance(entry, dict):
+            continue
+        brand = str(entry.get("brand") or "").strip()
+        version = str(entry.get("version") or "").strip()
+        if brand and version:
+            parts.append(f'"{brand}";v="{version}"')
+    return ", ".join(parts)
+
+
+def low_entropy_client_hints(ua_params: dict[str, Any] | None) -> dict[str, str]:
+    """The headers Chrome sends unasked, built from the intended identity.
+
+    These are the three low-entropy hints every request carries --
+    ``sec-ch-ua``, ``sec-ch-ua-mobile``, ``sec-ch-ua-platform`` -- plus the
+    User-Agent. They exist as a *header* builder because
+    ``Network.setUserAgentOverride`` is scoped to a renderer target, and a new
+    tab's first document request is issued by the **browser process** before
+    that override lands. Measured on Chromium 151, a new tab's first request::
+
+        intended : sec-ch-ua "Google Chrome";v="151", "Chromium";v="151", …
+                   sec-ch-ua-platform "Windows"
+        actual   : sec-ch-ua "Chromium";v="151", "Not=A?Brand";v="99"
+                   sec-ch-ua-platform "Linux"
+
+    The User-Agent was right (it comes from the process flag) while the brand
+    list was the host's own -- no "Google Chrome", and Chromium's GREASE
+    spelling -- next to a Windows UA. That pairing is a contradiction no real
+    browser produces, which is the F1 class of defect all over again.
+
+    Derived from the same ``ua_params`` the override uses, so the header the
+    request carries and the identity the page reports cannot drift apart.
+    """
+    if not ua_params:
+        return {}
+    meta = ua_params.get("userAgentMetadata") or {}
+    headers: dict[str, str] = {}
+
+    ua = str(ua_params.get("userAgent") or "").strip()
+    if ua:
+        headers["User-Agent"] = ua
+
+    brands = _brand_list_header(meta.get("brands"))
+    if brands:
+        headers["sec-ch-ua"] = brands
+
+    headers["sec-ch-ua-mobile"] = "?1" if meta.get("mobile") else "?0"
+
+    platform = str(meta.get("platform") or "").strip()
+    if platform:
+        headers["sec-ch-ua-platform"] = f'"{platform}"'
+
+    return headers
+
+
 def apply_ua_override(
     session: PinnedCdpSession | None,
     fingerprint: dict[str, Any],

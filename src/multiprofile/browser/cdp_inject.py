@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import identity_faults
-from .cdp_identity import UA_OVERRIDE_METHOD
+from .cdp_identity import UA_OVERRIDE_METHOD, low_entropy_client_hints
 
 log = logging.getLogger("multiprofile.browser.cdp_inject")
 
@@ -174,6 +174,10 @@ class IdentityInjector:
         self.cookies = cookies or []
         self.ua_override = ua_override or None
         self.profile_id = profile_id
+        # Derived from the override rather than passed in, so the headers a
+        # paused request is given and the identity the page reports come from
+        # one source and cannot drift apart.
+        self.hint_headers = low_entropy_client_hints(self.ua_override)
         self.status = InjectionStatus()
 
         self._ws: Any = None
@@ -261,6 +265,37 @@ class IdentityInjector:
             "waitForDebuggerOnStart": True,
             "flatten": True,
         })
+
+        if self.hint_headers:
+            # Fetch on the BROWSER session, not per target, and this is the
+            # whole point of it. Network.setUserAgentOverride is scoped to a
+            # renderer, but a new tab's first document request is formed by
+            # the browser process before that renderer exists -- so no
+            # per-target interception can ever see it, however early it is
+            # armed. Measured on Chromium 151, a tab opened by the operator:
+            #
+            #   intended : sec-ch-ua "Google Chrome";v="151", "Chromium";v="151", …
+            #              sec-ch-ua-platform "Windows"
+            #   actual   : sec-ch-ua "Chromium";v="151", "Not=A?Brand";v="99"
+            #              sec-ch-ua-platform "Linux"
+            #
+            # The User-Agent was already right (it comes from the process
+            # flag); the brand list was the host's own, GREASE spelling and
+            # all, beside a Windows UA. That is the F1 contradiction surviving
+            # on one request per tab, and it is the residual F1 left open.
+            #
+            # Document requests only: one pause per navigation, not one per
+            # subresource, so the cost stays off the page's critical path.
+            # Auth keeps its own unrestricted per-target Fetch in
+            # _on_attached -- a 407 can arrive on any request, and that path
+            # is proven, so it is left exactly as it was.
+            self._send("Fetch.enable", {
+                "patterns": [{
+                    "urlPattern": "*",
+                    "requestStage": "Request",
+                    "resourceType": "Document",
+                }],
+            })
         self._thread = threading.Thread(
             target=self._loop, name=f"mp-inject-{self.profile_id or self.port}", daemon=True
         )
@@ -348,11 +383,53 @@ class IdentityInjector:
         elif method == "Fetch.authRequired":
             self._on_auth_required(msg.get("params") or {}, msg.get("sessionId"))
         elif method == "Fetch.requestPaused":
-            # Fetch is enabled only for auth; every paused request must be
-            # released or the page hangs forever.
-            params = msg.get("params") or {}
-            self._send("Fetch.continueRequest", {"requestId": params.get("requestId")},
-                       session_id=msg.get("sessionId"))
+            self._on_request_paused(msg.get("params") or {}, msg.get("sessionId"))
+
+    def _on_request_paused(self, params: dict[str, Any], session_id: str | None) -> None:
+        """Release a paused request, correcting its client hints on the way.
+
+        Every paused request MUST be released or the page hangs forever, so
+        this is written so that the release happens whatever else goes wrong:
+        the rewrite is computed first, inside a guard, and a failure there
+        falls back to continuing the request untouched. A hung tab would be a
+        far worse bug than the leak this fixes.
+
+        Only the headers the browser process got wrong are replaced. Chromium
+        applies ``Network.setUserAgentOverride`` per renderer target, but a new
+        tab's first document request is formed by the browser process before
+        that lands, so it carries the host's own ``sec-ch-ua`` and
+        ``sec-ch-ua-platform`` next to the spoofed User-Agent from the process
+        flag -- the contradiction F1 was about, surviving on one request.
+        """
+        request_id = params.get("requestId")
+        if not request_id:
+            return
+
+        override: dict[str, Any] = {"requestId": request_id}
+        try:
+            if self.hint_headers:
+                request = params.get("request") or {}
+                headers = dict(request.get("headers") or {})
+                # Case-insensitively drop what we are about to set, so a
+                # header the browser spelled differently cannot survive
+                # alongside ours and be sent twice.
+                lowered = {k.lower() for k in self.hint_headers}
+                merged = {k: v for k, v in headers.items() if k.lower() not in lowered}
+                merged.update(self.hint_headers)
+                override["headers"] = [
+                    {"name": k, "value": str(v)} for k, v in merged.items()
+                ]
+        except Exception as e:  # noqa: BLE001 - never hang a request over this
+            identity_faults.record(
+                "hint_rewrite_failed",
+                f"could not correct client hints on a paused request ({e}); it was "
+                "released unmodified and may carry the host's own hints",
+                where="browser.cdp_inject.CdpInjector._on_request_paused",
+                profile_id=self.profile_id,
+            )
+            override = {"requestId": request_id}
+
+        self._send("Fetch.continueRequest", override, session_id=session_id)
 
     def _on_attached(self, params: dict[str, Any]) -> None:
         session_id = params.get("sessionId")
@@ -400,6 +477,8 @@ class IdentityInjector:
             self.status.script_installed = True
 
         if self.proxy_auth is not None:
+            # Unrestricted: a 407 can arrive on any request, not just the
+            # document, so auth cannot be narrowed to a resource type.
             self._send("Fetch.enable", {"handleAuthRequests": True}, session_id=session_id)
             self.status.auth_armed = True
 

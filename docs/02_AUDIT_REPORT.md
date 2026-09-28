@@ -122,14 +122,49 @@ honest-reporting defects rather than deferring them.
 > `en-US,en;q=0.9;q=0.9` — a malformed header no real browser sends, and a tell
 > in its own right. Fixed in the same change.
 >
-> **Residual, deliberately not fixed here:** a tab's *first* document request is
-> issued by the browser process before the per-target override lands, so
-> `sec-ch-ua-platform` on that one request still reflects the host. The UA string
-> is correct (it comes from the process flag); only the hints leak, and only on
-> the first request of a newly opened tab. Closing it means rewriting headers in
-> the browser process via browser-level `Fetch` interception — a change with its
-> own performance and correctness surface, and Gate 2 work, not F1. The assertion
-> measures a navigation for exactly this reason and documents it.
+> **Residual (deferred at the time) — ✅ now closed in Gate 2.** A tab's *first*
+> document request is issued by the browser process before the per-target
+> override lands, so the hints on that one request reflected the host. Measured
+> on Chromium 151, a tab opened the way an operator opens one:
+>
+> ```
+> intended : sec-ch-ua          "Google Chrome";v="151", "Chromium";v="151", "Not-A.Brand";v="99"
+>            sec-ch-ua-platform "Windows"
+> actual   : sec-ch-ua          "Chromium";v="151", "Not=A?Brand";v="99"
+>            sec-ch-ua-platform "Linux"
+> ```
+>
+> **Two headers leaked, not the one recorded here.** The User-Agent was already
+> right — it comes from the process flag — so what went out was a Windows UA
+> beside the host's own Linux brand list, in Chromium's GREASE spelling
+> (`Not=A?Brand`). That pairing is the same contradiction F1 is about, surviving
+> on one request per tab.
+>
+> The fix arms `Fetch` on the **browser session** rather than per target. That
+> distinction is the whole thing: no per-target interception can ever see this
+> request, however early it is armed, because at that moment the target does not
+> exist yet. Narrowed to `resourceType: Document`, so it is one pause per
+> navigation rather than one per subresource. The replacement headers come from
+> `low_entropy_client_hints()`, derived from the same `ua_params` the override
+> uses, so the request and the page cannot drift apart. Proxy auth keeps its own
+> unrestricted per-target `Fetch` — a 407 can arrive on any request, and that
+> path was already proven, so it was left untouched.
+>
+> Release is unconditional: the rewrite is computed inside a guard and any
+> failure falls back to continuing the request unmodified, because a hung tab
+> would be a far worse bug than the leak. A failure there records an identity
+> fault (F11) rather than vanishing.
+>
+> After the fix, the same measurement:
+>
+> ```
+> sec-ch-ua          "Google Chrome";v="151", "Chromium";v="151", "Not-A.Brand";v="99"
+> sec-ch-ua-platform "Windows"
+> ```
+>
+> Verified: `tests/test_first_request_hints_live.py` (5 live tests, including one
+> that the tab still loads at all, and one that the Gate 1 launch assertion still
+> passes); `-m network` → 24 passed.
 >
 > Tests: `tests/test_wire_identity.py` (43 unit/contract tests) and
 > `tests/test_wire_identity_live.py` (real launch, real headers; fails on the
@@ -1194,10 +1229,10 @@ version from the real binary — done: `engine.py`, see the ✅ block above) · 
 surfaced **F17**, a Critical host-IP leak — both routing fixes are done, and
 `fingerprintStrategy` is the one piece of F16 left, awaiting a product
 decision) ·
-F11 on the identity path only (done: `identity_faults.py`, see the block above) · close the residual leak F1 left behind: a tab's first document request is issued before its per-target UA
-override lands, so `sec-ch-ua-platform` on that one request still reflects the host.
-Closing it means rewriting headers in the browser process (browser-level `Fetch`
-interception).
+F11 on the identity path only (done: `identity_faults.py`) · the residual leak F1
+left behind — **done**: `Fetch` is now armed on the browser session, not per
+target, because the request that leaked is formed before any target exists. It
+turned out to leak the brand list as well as the platform; see the F1 block.
 
 *(The launch-time identity assertion originally listed here shipped in Gate 1 —
 without it, F1's fix could not be shown to work at all.)*
