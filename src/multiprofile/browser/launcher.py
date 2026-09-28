@@ -157,7 +157,36 @@ def _probe_gpu_available() -> bool:
     return False
 
 
-def _webgpu_args() -> list[str]:
+def chrome_enabled_features() -> list[str]:
+    """The single ``--enable-features`` value for a launch.
+
+    Chrome takes the **last** ``--enable-features`` on the command line rather
+    than the union of them, so every feature this product needs has to be
+    composed into one flag. Adding a second one elsewhere silently drops this
+    list, which is exactly the kind of failure that looks like it works.
+
+    ``WebBluetooth`` is here because this host's Chromium build ships it
+    disabled while upstream Chrome on Windows and macOS does not. Measured on
+    stock Chromium 151:
+
+        default                          navigator.bluetooth undefined,
+                                         Bluetooth undefined,
+                                         BluetoothDevice undefined
+        --enable-features=WebBluetooth   all three present
+
+    A profile whose User-Agent says Windows and whose navigator has no
+    Bluetooth at all is describing a browser that does not exist. The flag
+    turns the genuine interface family back on, which is better than
+    synthesising one: a fake navigator.bluetooth without the matching
+    Bluetooth and BluetoothDevice constructors would trade one contradiction
+    for a more detailed one.
+    """
+    features = ["WebBluetooth"]
+    features.extend(_webgpu_features())
+    return features
+
+
+def _webgpu_features() -> list[str]:
     """Keep WebGPU working under the x11 ozone platform we force.
 
     Window placement needs ``--ozone-platform=x11`` (on Wayland,
@@ -178,12 +207,11 @@ def _webgpu_args() -> list[str]:
     control, so both surfaces can describe the same card.
 
     ``MULTIPROFILE_WEBGPU=0`` turns it off for a host whose Vulkan stack
-    misbehaves; the profile then launches without a WebGPU adapter, and the
-    launch records an identity fault saying so.
+    misbehaves; the profile then launches without a WebGPU adapter.
     """
     if os.environ.get("MULTIPROFILE_WEBGPU", "1").strip().lower() in {"0", "false", "no"}:
         return []
-    return ["--enable-features=Vulkan"]
+    return ["Vulkan"]
 
 
 def chrome_gpu_args(gpu_mode: str) -> list[str]:
@@ -208,14 +236,12 @@ def chrome_gpu_args(gpu_mode: str) -> list[str]:
         return [
             "--use-gl=angle",
             "--use-angle=gl",
-            *_webgpu_args(),
         ]
     # auto
     if _probe_gpu_available():
         return [
             "--use-gl=angle",
             "--use-angle=gl",
-            *_webgpu_args(),
         ]
     # No GPU available — use software renderer but be honest about it
     log.info("GPU not detected, using SwiftShader software renderer")
@@ -979,6 +1005,16 @@ def launch_profile(
     gpu_flags = chrome_gpu_args(settings.gpu_mode)
     cmd.extend(gpu_flags)
     notes.append(f"GPU flags: {' '.join(gpu_flags)}")
+
+    # One --enable-features for the whole launch: Chrome honours the last such
+    # flag rather than merging them, so a second one anywhere would silently
+    # drop this list.
+    software_gpu = "--disable-gpu" in gpu_flags
+    features = [f for f in chrome_enabled_features()
+                if not (software_gpu and f == "Vulkan")]
+    if features:
+        cmd.append("--enable-features=" + ",".join(features))
+        notes.append(f"Features: {','.join(features)}")
 
     # Window tiling geometry hint
     if window_rect is not None and settings.window_tiling_enabled:
