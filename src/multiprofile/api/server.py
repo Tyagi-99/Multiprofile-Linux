@@ -821,17 +821,76 @@ def create_app() -> Flask:
         audit_log("profile_note_delete", profile_id=profile_id, ok=True)
         return jsonify({"ok": True})
 
+    def _durable_job_epoch(value) -> float:
+        """``created_at`` is ISO text in the jobs table, epoch float in legacy."""
+        if not value:
+            return 0.0
+        try:
+            from datetime import datetime
+
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except Exception:  # noqa: BLE001 - an unsortable date must not hide a job
+            return 0.0
+
+    def _normalize_durable_job(row: dict) -> dict:
+        """Present a durable row in the shape the console already reads.
+
+        The two queues were never given a common shape: legacy uses ``type``
+        and an epoch ``createdAt`` with a string id, the jobs table uses
+        ``job_type``, ISO ``created_at`` and an integer id. The id is prefixed
+        so the two can never collide in one list.
+        """
+        return {
+            "id": f"durable:{row.get('id')}",
+            "type": row.get("job_type"),
+            "status": row.get("status"),
+            "createdAt": _durable_job_epoch(row.get("created_at")),
+            "updatedAt": _durable_job_epoch(row.get("updated_at")),
+            "profileIds": [row.get("profile_id")] if row.get("profile_id") else [],
+            "attempts": row.get("attempts"),
+            "maxAttempts": row.get("max_attempts"),
+            "error": row.get("error"),
+            "result": row.get("result"),
+            "source": "durable",
+        }
+
     def _list_all_jobs() -> list:
-        """Best-effort full job list; None when the job system is missing."""
+        """Every job from both queues; None when neither can be read.
+
+        Two generations coexist (see ``multiprofile.jobs``): the legacy
+        in-process queue that ``POST /api/jobs`` still writes to, and the
+        durable SQLite queue whose workers start at boot. Nothing enqueues
+        into the durable one from the API yet (F20), but ``parking`` can, and
+        a crash recovery re-queues into it -- so a durable job that did exist
+        was invisible to every client. Listing both is the smaller half of
+        F20; moving the writer is its own task.
+        """
+        legacy_jobs: list = []
+        legacy_failed = False
         try:
             try:
-                return list_jobs(limit=100_000)
+                legacy_jobs = list_jobs(limit=100_000)
             except TypeError:
                 # Forward-compat: WS1's jobs table may not accept limit=.
-                return list_jobs()
-        except Exception as e:
-            log.warning("job system unavailable: %s", e)
+                legacy_jobs = list_jobs()
+            legacy_jobs = [{**j, "source": j.get("source") or "legacy"} for j in legacy_jobs]
+        except Exception as e:  # noqa: BLE001 - one queue must not hide the other
+            log.warning("legacy job queue unavailable: %s", e)
+            legacy_failed = True
+
+        durable_jobs: list = []
+        durable_failed = False
+        try:
+            from ..jobs import list_durable_jobs
+
+            durable_jobs = [_normalize_durable_job(r) for r in list_durable_jobs(limit=100_000)]
+        except Exception as e:  # noqa: BLE001 - the control DB may be absent
+            log.warning("durable job queue unavailable: %s", e)
+            durable_failed = True
+
+        if legacy_failed and durable_failed:
             return None
+        return legacy_jobs + durable_jobs
 
     @app.get("/api/jobs")
     def jobs_list():
