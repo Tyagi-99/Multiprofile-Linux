@@ -242,7 +242,10 @@ def _stock_extension_ids() -> set[str]:
     if not binary:
         pytest.skip("no browser binary to measure a stock launch against")
     port = _free_port()
-    with tempfile.TemporaryDirectory() as profile_dir:
+    # ignore_cleanup_errors: crashpad and other helper processes outlive the
+    # terminate below and keep writing into the profile directory, so a strict
+    # rmtree loses a race with them and fails the test for nothing.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as profile_dir:
         proc = subprocess.Popen(
             [
                 binary,
