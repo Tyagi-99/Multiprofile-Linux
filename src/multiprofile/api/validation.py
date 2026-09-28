@@ -104,12 +104,17 @@ PROFILE_FIELDS_SERVER_OWNED = frozenset({
 #    is what let this gap survive. This tier is a defect list and should end
 #    up empty: either the feature lands and the key moves to tier 1, or the
 #    key leaves the wizard.
-PROFILE_FIELDS_UNIMPLEMENTED = {
-    "fingerprintStrategy": (
-        "no backend code reads it; the fingerprint is derived from the profile "
-        "seed and its device preset"
-    ),
-}
+# Empty, and that is the goal state: this tier is a defect list, not a design.
+# It held three keys when F8 landed. `networkMode` and `gatewayId` left it when
+# F16 wired the route up for real, and `fingerprintStrategy` left it when the
+# wizard step that sent it was removed -- the fingerprint is derived from the
+# profile seed and its device preset, so "stable" was the only one of its three
+# options that ever meant anything, and a selector offering three was a promise
+# the product could not keep.
+#
+# Keep it empty. A key added here is an admission that the console is sending
+# something nothing honours; the fix is to implement it or stop sending it.
+PROFILE_FIELDS_UNIMPLEMENTED: dict[str, str] = {}
 
 # What a "did you mean" suggestion may point at: only keys that do something.
 _PROFILE_SETTABLE = PROFILE_FIELDS | frozenset(PROFILE_FIELDS_UNIMPLEMENTED)

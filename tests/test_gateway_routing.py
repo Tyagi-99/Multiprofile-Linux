@@ -254,11 +254,29 @@ def test_the_stored_profile_routes_through_the_gateway(client, gateway):
     assert net.proxy is not None and net.proxy.host == "10.0.0.9"
 
 
-def test_fingerprint_strategy_is_still_open(client):
-    """The other half of F16 is a product decision and is not fixed here."""
-    assert "fingerprintStrategy" in V.PROFILE_FIELDS_UNIMPLEMENTED
+def test_fingerprint_strategy_is_gone_rather_than_tolerated(client):
+    """F16's other half, resolved the other way: the step was removed.
+
+    The fingerprint is derived from the profile seed and its device preset, so
+    "stable" was the only one of the selector's three options that ever meant
+    anything. Rather than leave a control that promised three, the wizard step
+    was deleted -- so the key is now simply unknown, and F8's rule applies to
+    it like any other. A client still sending it gets told, instead of getting
+    a 200 and a setting that never happened.
+    """
+    assert "fingerprintStrategy" not in V.PROFILE_FIELDS_UNIMPLEMENTED
     r = client.post(
         "/api/profiles", json={"name": "fp", "fingerprintStrategy": "stable"}, headers=HEADERS
     )
-    assert r.status_code == 200
-    assert any("fingerprintStrategy" in w for w in r.get_json()["warnings"])
+    assert r.status_code == 400
+    assert r.get_json()["error"]["field"] == "fingerprintStrategy"
+
+
+def test_the_unimplemented_tier_is_empty(client):
+    """The goal state. It held three keys when F8 landed.
+
+    A key here is an admission that the console sends something nothing
+    honours; the fix is to implement it or stop sending it, and both have now
+    happened. If this ever fails, read the new entry as a defect report.
+    """
+    assert V.PROFILE_FIELDS_UNIMPLEMENTED == {}, V.PROFILE_FIELDS_UNIMPLEMENTED

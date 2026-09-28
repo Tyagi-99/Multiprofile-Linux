@@ -144,14 +144,18 @@ def test_a_client_cannot_dictate_a_server_owned_field(client):
 # --------------------------------------------------------------------------
 
 def test_a_dead_key_is_reported_not_refused(client):
-    """Our own wizard sends keys nothing reads.
+    """A key the console sends and nothing reads is named, not silently kept.
 
-    Refusing them would 400 every creation the wizard makes, so they are
-    accepted and named in ``warnings[]``. Driven off the registry rather than a
-    list of names, because this tier is a defect list that shrinks: it held
-    three keys when F8 landed, and `networkMode` and `gatewayId` left it when
-    F16 wired the route up for real.
+    Driven off the registry rather than a list of names, because this tier is
+    a defect list that shrinks: it held three keys when F8 landed,
+    `networkMode` and `gatewayId` left when F16 wired the route up for real,
+    and `fingerprintStrategy` left when its wizard step was removed. The tier
+    is empty now, so there is nothing to assert -- which is the point, and
+    ``test_the_unimplemented_tier_is_empty`` is the test that says so.
     """
+    if not V.PROFILE_FIELDS_UNIMPLEMENTED:
+        pytest.skip("the unimplemented tier is empty, which is the goal state")
+
     payload = {"name": "wizard", "deviceId": "iphone-16"}
     payload.update({key: "x" for key in V.PROFILE_FIELDS_UNIMPLEMENTED})
     r = _create(client, **payload)
@@ -172,9 +176,13 @@ def test_a_setting_that_cannot_take_effect_is_not_persisted(client):
     """Persisting it is what let the gap survive: it reads back as applied."""
     from multiprofile.storage.profiles import get_profile
 
-    pid = _create(client, name="dead", fingerprintStrategy="stable").get_json()["profile"]["id"]
+    if not V.PROFILE_FIELDS_UNIMPLEMENTED:
+        pytest.skip("the unimplemented tier is empty, which is the goal state")
+
+    key = next(iter(V.PROFILE_FIELDS_UNIMPLEMENTED))
+    pid = _create(client, name="dead", **{key: "x"}).get_json()["profile"]["id"]
     stored = get_profile(pid) or {}
-    assert "fingerprintStrategy" not in stored
+    assert key not in stored
 
 
 @pytest.mark.parametrize("key", sorted(V.PROFILE_FIELDS_UNIMPLEMENTED))

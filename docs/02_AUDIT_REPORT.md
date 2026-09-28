@@ -77,11 +77,11 @@ honest-reporting defects rather than deferring them.
 | **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
 | **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
 | **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
-| **F16** | 🟡 **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reach nothing** — found by F8; routing **fixed**, fingerprint step still open | policy |
+| **F16** | ✅ **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reached nothing** — found by F8; routing fixed, strategy step removed | done |
 | **F17** | ✅ **Critical** | Security | An **unresolvable route launched on the host IP** and reported success — found by F16 | done |
 | **F18** | ✅ **Critical** | Security | **Every profile in a proxy pool egressed through the same member** — pools never recorded a decision | done |
 | **F19** | ✅ **High** | Security | The **WebRTC control was inert**: the API's vocabulary matched nothing downstream | done |
-| **F20** | ⚠️ Medium | Reliability | The **durable job queue has no producer** — `parking.py` and 3 handlers are unreachable | 1 wk |
+| **F20** | 🟡 Medium | Reliability | The **durable job queue has no producer** — now at least visible; moving the writer is filed | 1 wk |
 | **F21** | 🟡 Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case | 2 d |
 
 ---
@@ -737,6 +737,46 @@ Uncommitted in the working tree.
 
 ---
 
+### F20 — 🟡 MEDIUM: the durable job queue has no producer — **VISIBLE, WRITER FILED**
+
+**Files:** [`api/server.py`](../src/multiprofile/api/server.py), [`jobs/`](../src/multiprofile/jobs/)
+
+Two job generations coexist, and the migration between them was never finished.
+`POST /api/jobs` validates against the **legacy** enum
+(`launch_profile | stop_profile | bulk_launch | bulk_stop`) and writes to the
+in-process queue. The durable SQLite queue starts its workers at boot and
+`recover()` re-queues anything a crash left running — but the only `enqueue()`
+call site in `src/` is inside `parking.py`, whose own callers
+(`schedule_health_checks`, `park_profile`) have no caller in the application.
+
+So roughly 1,500 lines — `parking.py`, and the `park` / `restart` /
+`consistency_check` handlers — are code and config that nothing reaches, while
+workers spin against an empty table. The console's "Park" button does
+`stop` + `PUT status=parked` instead.
+
+> **Half resolved.** `GET /api/jobs` now lists **both** queues. Durable rows are
+> normalised into the shape the console already reads — the two were never given
+> a common one (legacy: `type`, epoch `createdAt`, string id; the jobs table:
+> `job_type`, ISO `created_at`, integer id) — and durable ids are prefixed
+> `durable:` so the two can never collide. Either queue failing is logged and
+> skipped rather than blanking the page.
+>
+> This matters even before the writer moves: parking *can* create a durable job
+> and crash recovery *does* re-queue into that table, and until now no client
+> could see either.
+>
+> **Filed, not done: moving the writer.** `POST /api/jobs` still targets legacy,
+> deliberately. A bulk API type maps to N durable jobs, cancel semantics differ
+> between the two, and the console's jobs page changes shape — that is a feature
+> with a migration, not an audit fix, and it should land with the decision about
+> whether idle-parking is on by default. Until it does, the second queue stays a
+> recovery mechanism with no ordinary producer.
+>
+> Verified: 7 tests in `tests/test_jobs_listing.py`, including that one queue
+> failing does not hide the other, and that `POST` still targets legacy.
+
+---
+
 ### F11 — 🟡 MEDIUM: 138 failure-swallowing handlers — **IDENTITY PATH DONE**
 
 `pyproject.toml` deliberately deselects `BLE001` and `S110`, documenting why.
@@ -1097,13 +1137,24 @@ for the dead fingerprint step beside it.
 > This fix is only load-bearing because **F17** was fixed with it: blocking a
 > route means nothing while the launcher never reads `blocked_reason`.
 
-**Still open: `fingerprintStrategy`.** This half is a product decision, not an
-audit fix. The fingerprint is derived from the profile seed and its device preset,
-so `stable` is the behaviour that already exists while `preset` and `custom` have
-no meaning yet — deciding what they *should* mean, and whether the step should
-exist at all, is the open question. It stays in `PROFILE_FIELDS_UNIMPLEMENTED`, so
-the API reports it as ignored rather than persisting it as applied. That tier is
-meant to reach empty; it now holds one key instead of three.
+> **`fingerprintStrategy` — ✅ resolved by removal.** The fingerprint is derived
+> from the profile seed and its device preset, so `stable` was the only one of the
+> selector's three options that ever meant anything; `preset` and `custom` were a
+> promise the product could not keep. Rather than leave a control that implied
+> three, the wizard step was deleted — the payload key, the three-card selector
+> (`wizard-dialog.tsx`), and the "Strategy" line in the confirmation summary.
+>
+> `PROFILE_FIELDS_UNIMPLEMENTED` is now **empty**, which is its goal state: it
+> held three keys when F8 landed, `networkMode` and `gatewayId` left when the
+> route was wired up, and this was the last. A key in that tier is an admission
+> that the console sends something nothing honours, so a test asserts it stays
+> empty and reads any new entry as a defect report.
+>
+> One consequence worth stating: a client still sending `fingerprintStrategy` now
+> gets a **400** rather than a 200 with a warning, because the key is simply
+> unknown and F8's rule applies. That is the intended behaviour — it is the
+> difference between being told and being ignored — but it is a contract change
+> for anything scripted against the old spelling.
 
 ---
 
