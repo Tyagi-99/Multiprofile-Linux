@@ -57,7 +57,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 | **F5** | 🟡 **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** | 1 d + policy |
 | **F6** | ⚠️ **High** | Performance | Profile store is a full read+parse per request → **3.1 s** for 25 rows at 10k | 1–2 wk |
 | **F7** | ✅ Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page — **fixed** | done |
-| **F8** | 🟡 Medium | Security | API silently accepts and persists **unknown fields** | 4 h |
+| **F8** | ✅ Medium | Security | API silently accepts and persists **unknown fields** — **fixed** | done |
 | **F9** | ❌ Medium | UX | No list virtualization; 25/page pagination | 1 wk |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
 | **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint | 1–2 wk |
@@ -65,6 +65,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 | **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
 | **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
 | **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
+| **F16** | ⚠️ **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reach nothing** — found by F8 | 1 wk + policy |
 
 ---
 
@@ -567,7 +568,67 @@ it behind a debug flag.
 
 ---
 
-### F8 — 🟡 MEDIUM: the API persists unknown fields
+### F8 — ✅ MEDIUM: the API persists unknown fields — **FIXED**
+
+> **Resolved in Gate 2.** A field registry in
+> [`api/validation.py`](../src/multiprofile/api/validation.py) now decides what a
+> profile payload may contain, and `validate_profile_payload` refuses anything
+> outside it *before* the write. The audit's own repro and the typo that cost it
+> a test:
+>
+> ```
+> POST /api/profiles {"name":"junk-field-test","totallyBogusKey":"pwned"}
+> → 400 {"code":"invalid_input","field":"totallyBogusKey","message":"unknown field"}
+>
+> POST /api/profiles {"name":"typo","devicePresetId":"iphone-16"}
+> → 400 … "message":"unknown field; did you mean 'deviceId'?"
+> ```
+>
+> Nothing unknown reaches `profiles.json` — the refusal happens before
+> `create_profile`, and there is a test for that specifically, because a 400 that
+> still persisted the row would be worse than the original bug.
+>
+> **"Unknown" turned out to be three situations, not one**, and collapsing them
+> would have broken the product:
+>
+> 1. **Honoured** — validated as before, plus `status`, which
+>    `frontend/src/lib/mutations.ts` has always sent on the park/unpark path with
+>    nothing validating it. It is now an enum
+>    (`idle, running, queued, failed, parked`).
+> 2. **Server-owned** — accepted and dropped. There is no `GET
+>    /api/profiles/<id>`, so the only way to edit a profile you have just read is
+>    to take a row from `GET /api/profiles` and `PUT` it back — and that row is
+>    enriched with runtime truth the server injected (`launchState`, `cdpPort`,
+>    `proxyOk`, `egressIp`, `lastLaunch`, …). Refusing those keys would have
+>    turned the obvious client into a 400, and only *after* a launch populated
+>    them. A test asserts every key the list endpoint emits is accepted on
+>    update, so the registry cannot drift from the enrichment — this was found
+>    the hard way, twice, while writing the fix.
+> 3. **Recognised and honoured by nothing** — accepted, reported in the
+>    (previously unused) `warnings[]`, and dropped. This tier exists only because
+>    our own wizard populates it; it is a defect list, and F16 is the defect.
+>
+> ```
+> POST /api/profiles {… "fingerprintStrategy":"stable","networkMode":"gateway","gatewayId":"gw_1"}
+> → 200 warnings: [
+>     "ignored 'fingerprintStrategy': no backend code reads it; …",
+>     "ignored 'gatewayId': read only for a proxy pool's members; …",
+>     "ignored 'networkMode': the route is read from networkConfig.mode (upper-case: …)"
+>   ]
+>   stored: none of the three
+> ```
+>
+> Dropping rather than persisting is the point: a setting that cannot take effect
+> but reads back from the API as if it had is what let F16 survive unnoticed.
+>
+> Verified: 17 new tests in `tests/test_api_unknown_fields.py`;
+> `pytest tests/ -q` → **1245 passed, 2 skipped** on Chromium 151. No existing
+> test needed changing, so nothing in the suite relied on unknown keys being
+> accepted. `ruff check src/ tests/` clean.
+
+The original finding follows, unchanged.
+
+### F8 (original) — the API persists unknown fields
 
 **File:** [`api/validation.py:245`](../src/multiprofile/api/validation.py#L245)
 
@@ -673,6 +734,71 @@ window management is not used at all. Cross-platform is new development, not a p
   should ship `NEXT_TELEMETRY_DISABLED=1` in the repo. 5 minutes.
 - **F15:** `next.config.ts` declares `rewrites`, which `output: export` ignores —
   warned twice on every build. Dead config; remove it or drop the export mode.
+
+---
+
+### F16 — ⚠️ HIGH: two wizard steps configure nothing
+
+**Files:** [`frontend/src/components/wizard/wizard-dialog.tsx:106`](../frontend/src/components/wizard/wizard-dialog.tsx#L106),
+[`network.py:551`](../src/multiprofile/network.py#L551)
+
+Found while fixing F8, which is also why it went unnoticed: the API accepted these
+keys, persisted them, and returned them on every subsequent read, so from the
+frontend's side the settings looked applied.
+
+The wizard's create payload sends three keys that **no backend code reads**:
+
+| Key sent | What the backend actually reads | Status |
+|---|---|---|
+| `fingerprintStrategy` (`stable` / `preset` / `custom`) | nothing — zero references in `src/` | dead |
+| `networkMode` (`direct` / `gateway` / …) | nested `networkConfig.mode`, upper-case enum (`DIRECT`, `REMOTE_GATEWAY`, …) | dead |
+| `gatewayId` | only `storage/pools.py` for a **pool member**; a profile routes via `poolId` or `networkConfig` | dead |
+
+`fingerprintStrategy` is a whole wizard step with three selectable cards
+(`wizard-dialog.tsx:592`) and a line in the confirmation summary (`:791`). The
+operator picks a fingerprint strategy, the summary confirms it, and nothing
+downstream has ever consulted it — the fingerprint is derived from the profile
+seed and its device preset either way.
+
+The network step is worse than dead for one of its branches. The proxy branches
+happen to work because the wizard *also* sends the legacy flat `proxyHost` /
+`proxyPort` / `proxyType` fields, which `NetworkConfig.from_legacy_profile` does
+read. `direct` and `gateway` send only `networkMode` (+ `gatewayId`), so they fall
+through to legacy inference on empty proxy fields. Measured:
+
+```
+wizard: gateway  -> mode=DIRECT  blocked=None
+wizard: direct   -> mode=DIRECT  blocked=None
+wizard: socks5   -> mode=SOCKS5  blocked=None
+```
+
+**A profile the operator created as "gateway" browses from the host IP, and
+nothing says so.** `blocked_reason` is `None`, so it is not reported as degraded
+anywhere — it is indistinguishable from a profile deliberately set to direct.
+
+`network_config_for_profile` does guard this case, and its docstring is explicit
+that "falling back to the host IP is the one outcome a proxy pool must never
+produce" — but that guard is on the `poolId` path, and the wizard's gateway branch
+never sets `poolId`. The safeguard is real and the wizard walks around it.
+
+For a product whose entire value is that a profile's route is what you told it to
+be, this is the same class of defect as F1, and the same severity: a setting
+reported as applied that silently is not. It is listed HIGH for that reason, not
+for the dead fingerprint step beside it.
+
+**Not fixed here, deliberately.** Wiring the wizard's choices into
+`networkConfig.mode` is a feature with a policy question attached (what should
+`fingerprintStrategy` *mean*, given the fingerprint is seed-derived?), not an
+audit fix, and it needs a product decision on whether the strategy step should
+exist at all. F8 makes the gap loud in the meantime: each key now comes back as a
+`warnings[]` entry naming where the setting really lives, and is no longer
+persisted as though it had been applied.
+
+**Fix:** either translate the wizard's keys at the API boundary
+(`networkMode` + `gatewayId` → `networkConfig.mode`, and give
+`fingerprintStrategy` a meaning or delete it), or remove the steps. Whichever
+way, the key moves out of `PROFILE_FIELDS_UNIMPLEMENTED` — that tier is meant to
+reach empty.
 
 ---
 
@@ -791,8 +917,12 @@ launch is verified against the real wire and refused on a proven mismatch, there
 one script-injection route, the cleartext proxy password is gone from disk
 (including copies already written), and `evasion.js` is silent unless asked.
 
-**Gate 2 — make it honest and hold the line (1–2 weeks). F5 ✅ DONE.** F5 (derive
-version from the real binary — done: `engine.py`, see the ✅ block above) · F8 ·
+**Gate 2 — make it honest and hold the line (1–2 weeks). F5 ✅ DONE. F8 ✅ DONE.**
+F5 (derive
+version from the real binary — done: `engine.py`, see the ✅ block above) · F8
+(field registry at the API boundary — done, and it surfaced **F16**, which should
+be triaged before Gate 3: a profile created as "gateway" currently browses from
+the host IP) ·
 F11 on the identity path only · close the residual leak F1 left behind: a tab's first document request is issued before its per-target UA
 override lands, so `sec-ch-ua-platform` on that one request still reflects the host.
 Closing it means rewriting headers in the browser process (browser-level `Fetch`

@@ -425,7 +425,7 @@ def create_app() -> Flask:
     @app.post("/api/profiles")
     def profiles_create():
         payload = require_json()
-        validate_profile_payload(payload, partial=False)
+        field_warnings = validate_profile_payload(payload, partial=False)
         if "userAgentId" not in payload and "uaId" in payload:
             payload["userAgentId"] = payload["uaId"]
         # A profile created in a workspace joins that workspace's proxy pool
@@ -438,18 +438,24 @@ def create_app() -> Flask:
             if inherited:
                 payload["poolId"] = inherited
         profile = create_profile(payload)
-        warnings = _all_warnings(profile)
+        # Field warnings first: a setting that never took effect explains the
+        # consistency warnings underneath it more often than the reverse.
+        warnings = field_warnings + _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
 
     @app.put("/api/profiles/<profile_id>")
     def profiles_update(profile_id: str):
         payload = require_json()
-        validate_profile_payload(payload, partial=True)
+        field_warnings = validate_profile_payload(payload, partial=True)
         updated = update_profile(profile_id, payload)
         if not updated:
             return jsonify({"error": "not found"}), 404
-        return jsonify({"ok": True, "profile": updated, "warnings": _all_warnings(updated)})
+        return jsonify({
+            "ok": True,
+            "profile": updated,
+            "warnings": field_warnings + _all_warnings(updated),
+        })
 
     @app.delete("/api/profiles/<profile_id>")
     def profiles_delete(profile_id: str):

@@ -35,6 +35,108 @@ PROXY_SCHEMES = ("http", "https", "socks5")
 JOB_TYPES = ("launch_profile", "stop_profile", "bulk_launch", "bulk_stop")
 PROXY_TYPES = ("none", "custom", "github", "http", "https", "socks5", "socks5h")
 NETWORK_MODES = ("DIRECT", "HTTP_PROXY", "HTTPS_PROXY", "SOCKS5", "REMOTE_GATEWAY")
+PROFILE_STATUSES = ("idle", "running", "queued", "failed", "parked")
+
+# --------------------------------------------------------------------------
+# The profile field registry (F8)
+#
+# ``create_profile`` does ``dict(payload)`` and ``update_profile`` merges
+# ``{**stored, **payload}``, so before this registry existed every key a
+# client sent was written to profiles.json and returned on every later read.
+# Unknown *values* were refused while unknown *keys* were not, which made a
+# typo in a field name indistinguishable from a working request -- the audit
+# lost a test to exactly that, sending ``devicePresetId`` for ``deviceId``
+# and watching the preset silently never apply.
+#
+# Three tiers, because "unknown" is three different situations:
+# --------------------------------------------------------------------------
+
+# 1. A client may set these, and the product honours them.
+PROFILE_FIELDS = frozenset({
+    "name", "userAgent", "userAgentId", "uaId", "startUrl", "notes", "color",
+    "clientId", "poolId", "pool_id", "tags", "seed", "timezone", "language",
+    "webrtcMode", "deviceId", "device_id", "status",
+    "proxyHost", "proxyPort", "proxyUser", "proxyPass", "proxyType", "customProxy",
+    "networkConfig", "webglPolicy", "webgl", "isMobile",
+})
+
+# 2. The server owns these. There is no GET /api/profiles/<id>, so a
+#    read-modify-write client reads a row from GET /api/profiles and PUTs it
+#    back -- and that row is enriched with runtime truth (launch state, cdp
+#    port, proxy verdict, last launch). Refusing those keys would break the
+#    only way the API offers to edit a profile you have just read, so they
+#    are dropped, silently, because sending them back is not a mistake. What
+#    they must never do is let a client dictate them.
+#
+#    Keep in step with the enrichment in ``storage.profiles.load_profiles``
+#    and ``_with_launch_state``; anything either of them writes onto a row
+#    must appear here, or PUTting that row back becomes a 400.
+PROFILE_FIELDS_SERVER_OWNED = frozenset({
+    "id", "createdAt", "fingerprint",
+    # status/pid and the SPA compatibility flags
+    "pid", "isRunning", "isQueued", "isFailed",
+    # runtime registry and control.db projections
+    "launchState", "launchError", "launchErrorCode", "cdpPort", "state",
+    "proxyOk", "egressIp", "lastLaunch", "lastProxyCheck",
+    # written by the launch and network paths, never by a client
+    "allocatedIp", "lastNetworkDiagnostics", "noteEntries",
+})
+
+# 3. Recognised, and honoured by nothing. These are sent by our own wizard
+#    and read by no backend code: ``fingerprintStrategy`` has zero references,
+#    ``networkMode`` is shadowed by the nested ``networkConfig.mode`` (whose
+#    enum is upper-case), and ``gatewayId`` is only ever read for a proxy
+#    pool's members, never for a profile. Refusing them would 400 every
+#    creation the wizard makes, so they are accepted, reported, and dropped --
+#    the drop is the point, since persisting a setting that cannot take effect
+#    is what let this gap survive. This tier is a defect list and should end
+#    up empty: either the feature lands and the key moves to tier 1, or the
+#    key leaves the wizard.
+PROFILE_FIELDS_UNIMPLEMENTED = {
+    "fingerprintStrategy": (
+        "no backend code reads it; the fingerprint is derived from the profile "
+        "seed and its device preset"
+    ),
+    "networkMode": (
+        "the route is read from networkConfig.mode (upper-case: "
+        + ", ".join(NETWORK_MODES) + ") or the legacy proxy* fields"
+    ),
+    "gatewayId": (
+        "read only for a proxy pool's members; a profile reaches a gateway "
+        "through poolId or networkConfig"
+    ),
+}
+
+# What a "did you mean" suggestion may point at: only keys that do something.
+_PROFILE_SETTABLE = PROFILE_FIELDS | frozenset(PROFILE_FIELDS_UNIMPLEMENTED)
+
+
+def _check_profile_keys(payload: dict[str, Any]) -> list[str]:
+    """Refuse unknown keys; drop the ones that cannot take effect.
+
+    Mutates ``payload``: tier 2 and tier 3 keys are removed, so nothing a
+    client sends that the product does not honour is ever persisted. Returns
+    the warnings for tier 3.
+    """
+    import difflib
+
+    warnings: list[str] = []
+    for key in list(payload.keys()):
+        if key in PROFILE_FIELDS:
+            continue
+        if key in PROFILE_FIELDS_SERVER_OWNED:
+            payload.pop(key, None)
+            continue
+        if key in PROFILE_FIELDS_UNIMPLEMENTED:
+            payload.pop(key, None)
+            warnings.append(
+                f"ignored '{key}': {PROFILE_FIELDS_UNIMPLEMENTED[key]}"
+            )
+            continue
+        close = difflib.get_close_matches(key, sorted(_PROFILE_SETTABLE), n=1, cutoff=0.7)
+        hint = f"; did you mean '{close[0]}'?" if close else ""
+        raise ValidationError(key, f"unknown field{hint}")
+    return warnings
 
 
 class ValidationError(Exception):
@@ -207,14 +309,22 @@ def _known_device_ids() -> set[str] | None:
         return None
 
 
-def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
+def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) -> list[str]:
     """Validate a profile create (partial=False) or update (partial=True) body.
 
-    Returns the payload unchanged; raises ValidationError on any violation.
-    Device preset selection is checked against the device registry when it
-    is available: unknown ``deviceId`` values are rejected at the door.
+    Raises ValidationError on any violation, including an unrecognised field
+    name -- see the field registry above. Device preset selection is checked
+    against the device registry when it is available: unknown ``deviceId``
+    values are rejected at the door.
+
+    ``payload`` is mutated: fields the server owns and fields nothing honours
+    are removed, so only settings that can actually take effect are persisted.
+    Returns the warnings to report to the client.
     """
     v_dict(payload, "_body")
+    warnings = _check_profile_keys(payload)
+    if "status" in payload:
+        v_enum(payload["status"], "status", PROFILE_STATUSES, case_insensitive=True)
     if "name" in payload:
         v_str(payload["name"], "name", min_len=1, max_len=120)
     if "userAgent" in payload:
@@ -270,7 +380,7 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
             v_enum(net["mode"], "networkConfig.mode", NETWORK_MODES)
         if "proxy" in net and net["proxy"] is not None:
             _validate_proxy_block(net["proxy"], "networkConfig.proxy")
-    return payload
+    return warnings
 
 
 def validate_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
