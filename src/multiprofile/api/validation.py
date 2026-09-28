@@ -24,6 +24,10 @@ from typing import Any
 
 from flask import jsonify, request
 
+# network.py imports nothing from this package at module level, so this is
+# safe; it owns WebRTCPolicy and therefore owns the canonical vocabulary.
+from ..network import WEBRTC_ALIASES, WEBRTC_MODES, normalize_webrtc_mode
+
 log = logging.getLogger("multiprofile.api.validation")
 
 # Fields whose raw values must never appear in messages or logs.
@@ -350,7 +354,19 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
     if "language" in payload:
         v_str(payload["language"], "language", min_len=1, max_len=32)
     if "webrtcMode" in payload:
-        v_enum(payload["webrtcMode"], "webrtcMode", ("default", "disabled", "proxy"), case_insensitive=True)
+        # Accept both vocabularies and store the canonical one. This field
+        # used to be validated against ("default", "disabled", "proxy") while
+        # WebRTCPolicy, _map_webrtc, fingerprint/_core and evasion.js all
+        # spoke ("default", "disable", "disable_non_proxied_udp"). Nothing
+        # translated, so both non-default values a client could pass fell
+        # through to DEFAULT -- no Chrome flags, no JS hardening, a privacy
+        # control that reported itself set and did nothing. Worse after F8:
+        # the two words that work became 400s.
+        v_enum(
+            payload["webrtcMode"], "webrtcMode",
+            WEBRTC_MODES + tuple(WEBRTC_ALIASES), case_insensitive=True,
+        )
+        payload["webrtcMode"] = normalize_webrtc_mode(payload["webrtcMode"])
     if "networkMode" in payload and payload["networkMode"] not in (None, ""):
         v_enum(
             payload["networkMode"], "networkMode",

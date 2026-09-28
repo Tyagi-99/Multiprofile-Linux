@@ -66,7 +66,7 @@ honest-reporting defects rather than deferring them.
 | **F2** | ✅ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) — **fixed** | done |
 | **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
 | **F4** | ✅ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** — **fixed** | done |
-| **F5** | 🟡 **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** | 1 d + policy |
+| **F5** | ✅ **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** — **fixed** | done |
 | **F6** | ⚠️ **High** | Performance | Profile store is a full read+parse per request → **3.1 s** for 25 rows at 10k | 1–2 wk |
 | **F7** | ✅ Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page — **fixed** | done |
 | **F8** | ✅ Medium | Security | API silently accepts and persists **unknown fields** — **fixed** | done |
@@ -79,6 +79,10 @@ honest-reporting defects rather than deferring them.
 | **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
 | **F16** | 🟡 **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reach nothing** — found by F8; routing **fixed**, fingerprint step still open | policy |
 | **F17** | ✅ **Critical** | Security | An **unresolvable route launched on the host IP** and reported success — found by F16 | done |
+| **F18** | ✅ **Critical** | Security | **Every profile in a proxy pool egressed through the same member** — pools never recorded a decision | done |
+| **F19** | ✅ **High** | Security | The **WebRTC control was inert**: the API's vocabulary matched nothing downstream | done |
+| **F20** | ⚠️ Medium | Reliability | The **durable job queue has no producer** — `parking.py` and 3 handlers are unreachable | 1 wk |
+| **F21** | 🟡 Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case | 2 d |
 
 ---
 
@@ -800,6 +804,106 @@ window management is not used at all. Cross-platform is new development, not a p
 
 ---
 
+### F18 — ✅ CRITICAL: every profile in a pool used the same proxy — **FIXED**
+
+**File:** [`network.py:_network_config_from_pool`](../src/multiprofile/network.py)
+
+Found by re-reading the pool path after F17, and measured before the fix:
+
+```
+5 profiles in a 3-member STICKY pool:   all five  → 10.0.0.1
+assignments recorded:                    {}
+3 profiles in a 2-member ROTATE pool:   all three → 10.1.0.1   (cursor: 0)
+```
+
+`choose_member` is deliberately **pure** — "no disk write, no network" — so that
+reading a profile's route stays a read. The writer, `pools.assign()`, was written
+for the launch path and then never called by it: the only route in was
+`POST /api/pools/<id>/assign`, which no UI code and no launch touches.
+
+So the pool never learned anything. `assignments` stayed `{}` forever and `cursor`
+never moved, which meant the "least loaded" tie-break scored **every** member at
+zero and picked the first one. Consequences, all of them silent:
+
+- every profile in a pool egressed through **one member**;
+- `strategy: "rotate"` never rotated;
+- a profile did not keep its IP across launches (sticky was a no-op);
+- `pool_usage()` and the pools UI's `profileCount` always read 0.
+
+This is worse than a missing feature. An operator who deliberately spreads 50
+profiles across a pool to keep them apart got 50 profiles sharing one IP — which
+**correlates them**, the single outcome a proxy pool exists to prevent. It is the
+same shape as F17, except F17 needed a broken pool to trigger and **this was the
+happy path**.
+
+> **Resolved.** `network_config_for_profile` takes `commit: bool = False`, and
+> `launch_profile` is the only caller that passes `True` — a launch commits the
+> decision, a look never does. That distinction is load-bearing: the function is
+> also called by the health poller, the diagnostics route and
+> `/api/profiles/<id>/network-health`, and a rotate pool that advanced once per
+> *read* would hand a profile a different egress every time anyone opened its
+> page. `pools.assign()` was already correct and is now simply called.
+>
+> ```
+> STICKY, 6 profiles:  10.0.0.1 10.0.0.2 10.0.0.3 10.0.0.1 10.0.0.2 10.0.0.3
+> same profiles again: identical (stickiness holds across launches)
+> plain reads:         assignments unchanged
+> ROTATE, 4 launches:  10.1.0.1 10.1.0.2 10.1.0.1 10.1.0.2
+> reads in between:    do not advance the cursor
+> ```
+>
+> Verified: 11 tests in `tests/test_pool_assignment.py`, including that an empty
+> pool still blocks rather than going direct (F17's rule) and that a disabled
+> member is never assigned.
+
+---
+
+### F19 — ✅ HIGH: the WebRTC control did nothing — **FIXED**
+
+**File:** [`api/validation.py`](../src/multiprofile/api/validation.py), [`network.py:_map_webrtc`](../src/multiprofile/network.py)
+
+Two vocabularies in one codebase, with nothing translating. `WebRTCPolicy`,
+`_map_webrtc`, `fingerprint/_core.py` and `evasion.js` all speak
+`default | disable | disable_non_proxied_udp`. The API validator alone accepted
+`default | disabled | proxy`. Measured:
+
+```
+disabled  -> default      proxy -> default
+disable   -> disable      disable_non_proxied_udp -> disable_non_proxied_udp
+```
+
+Both non-default values a client could send fell through to `DEFAULT`: **no Chrome
+flags, no JS hardening**, and a privacy control that reported itself set while
+doing nothing. For an anti-detect product WebRTC leak protection is a headline
+feature, so this is a claim the product did not honour.
+
+F8 made it worse rather than better: tightening field validation turned the two
+words that *do* work into 400s, so the setting was not merely inert — it was
+**unreachable**. A good fix (a field registry) hardened a broken contract in
+place, which is the risk of validating a vocabulary without checking who consumes
+it.
+
+> **Resolved.** One vocabulary, `normalize_webrtc_mode()` in `network.py` (which
+> owns `WebRTCPolicy` and therefore owns the words). The console's spellings stay
+> as aliases — `disabled → disable`, `proxy → disable_non_proxied_udp` — so
+> profiles **already stored** with them start being honoured instead of quietly
+> staying open. Unknown values normalise to `default`, the only safe direction: a
+> typo must never silently weaken a profile.
+>
+> ```
+> spelling                   -> canonical                -> chrome flags
+> 'disabled'                 -> disable                  -> 3
+> 'proxy'                    -> disable_non_proxied_udp  -> 2
+> 'nonsense'                 -> default                  -> 0
+> and the JS half: 'disabled' -> fingerprint webrtcMode='disable'
+> ```
+>
+> Verified: 28 tests in `tests/test_webrtc_mode.py`. One asserts the two halves
+> **cannot disagree** — flags present iff the injected script is hardened — because
+> fixing one side and not the other is exactly how this survived.
+
+---
+
 ### F17 — ✅ CRITICAL: an unresolvable route launched on the host IP — **FIXED**
 
 **File:** [`browser/launcher.py:712`](../src/multiprofile/browser/launcher.py#L712)
@@ -1145,6 +1249,14 @@ surface without adding stealth. Fix F1–F3 first; then the matrix is worth buil
 
 **Phase 1 stopped here as instructed.** Gate 1 (F1 → F2 → F4 → F7) was then
 approved and implemented — one commit per finding, each with its own live
-measurement; see the ✅ blocks above and `CHANGELOG.md`. Documents 03 and 05–08 are
-still not started, and §04 is still partial (public checkers not run). Gate 2 and
-Gate 3 are not started.
+measurement; see the ✅ blocks above and `CHANGELOG.md`.
+
+**Gate 2 is now substantially done:** F5, F8, F11 (identity path), F16 (routing),
+F17, and the two findings F16/F17 turned up on the way — F18 and F19. What remains
+in Gate 2 is the F1 residual (a new tab's first document request) and F16's
+`fingerprintStrategy`, which needs a product decision rather than an
+implementation. **Gate 3 is not started.**
+
+Documents 03 and 05–08 are still not started, and §04 is still partial — the public
+checkers (CreepJS, Pixelscan, IPHey, BrowserScan, Whoer) have still never been run,
+which is the largest single hole in the evidence base for a fingerprinting product.

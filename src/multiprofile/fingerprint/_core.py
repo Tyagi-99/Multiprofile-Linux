@@ -328,9 +328,13 @@ def resolve_context(
 
     lang = profile.get("language") or "en-US"
     tz = profile.get("timezone") or "America/New_York"
-    webrtc = profile.get("webrtcMode") or "default"
-    if webrtc not in ("default", "disable_non_proxied_udp", "disable"):
-        webrtc = "default"
+    # One vocabulary, shared with network.py and evasion.js. The console's
+    # own words ("disabled", "proxy") used to land here as unknown and be
+    # coerced to "default" -- the JS half of the same gap that left the
+    # Chrome flags off.
+    from ..network import normalize_webrtc_mode
+
+    webrtc = normalize_webrtc_mode(profile.get("webrtcMode"))
 
     return {
         "seed": seed,
@@ -456,9 +460,13 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         languages.append(lang.split("-")[0])
 
     tz = profile.get("timezone") or "America/New_York"
-    webrtc = profile.get("webrtcMode") or "default"
-    if webrtc not in ("default", "disable_non_proxied_udp", "disable"):
-        webrtc = "default"
+    # One vocabulary, shared with network.py and evasion.js. The console's
+    # own words ("disabled", "proxy") used to land here as unknown and be
+    # coerced to "default" -- the JS half of the same gap that left the
+    # Chrome flags off.
+    from ..network import normalize_webrtc_mode
+
+    webrtc = normalize_webrtc_mode(profile.get("webrtcMode"))
 
     # Two different claims, because real Chrome makes them differently: the
     # UA string carries the reduced `<major>.0.0.0` form, while
