@@ -84,6 +84,7 @@ honest-reporting defects rather than deferring them.
 | **F20** | 🟡 Medium | Reliability | The **durable job queue has no producer** — now at least visible; moving the writer is filed | 1 wk |
 | **F21** | ✅ Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case — **fixed** | done |
 | **F22** | ✅ **High** | Fingerprint | Timezone was **JavaScript-only**; every unhooked surface reported the host zone — **fixed** | done |
+| **F23** | ✅ **High** | Fingerprint | `enumerateDevices` **volunteered a persistent id the host withholds**, the same one for all three kinds — **fixed** | done |
 
 ---
 
@@ -764,6 +765,57 @@ restart counts as recovery only after `restart_stability_s` (default 60 s), and 
 crash-looping profile is parked in `error` after 3 restarts. Measured: 10 unbounded
 relaunches before, 3 and parked after. Two regression tests added.
 Uncommitted in the working tree.
+
+---
+
+### F23 — ✅ HIGH: the media-device spoofing was the leak — **FIXED**
+
+**Files:** [`extension/evasion.js`](../src/extension/evasion.js), [`fingerprint/_core.py`](../src/multiprofile/fingerprint/_core.py), [`fingerprint/media.py`](../src/multiprofile/fingerprint/media.py)
+
+`enumerateDevices` was rewritten unconditionally: every device got a stable
+64-char id derived from the profile seed, whatever the browser had actually
+returned. Measured against stock Chromium 151 on the same loopback page, no
+media permission granted:
+
+```
+BARE:  audioinput / videoinput / audiooutput   deviceId=''           label=''  groupId=''
+OURS:  all three                               deviceId='a2118a3d…'  label=''  groupId=''
+```
+
+Chrome **withholds** device ids until permission is granted. Two consequences,
+and both make a profile easier to identify than leaving the surface untouched:
+
+1. **A state no real browser produces.** An id beside an empty label and an
+   empty groupId does not happen: without permission Chrome gives you nothing,
+   with permission it gives you all three. The combination is the tell.
+2. **A volunteered cross-site identifier.** The id is stable for the life of
+   the profile, so any site could read it without asking for anything — while
+   the host's own behaviour leaked precisely nothing here. The spoofing was the
+   only thing leaking.
+
+And the three ids were **identical** — all from `_rng(seed, 20)` — so a
+microphone, a camera and a speaker shared one identifier, which no browser has
+ever done.
+
+> **Resolved.** The hook now substitutes only what the browser is already
+> exposing: a real id is replaced with a seeded one, an empty id stays empty.
+> Chrome's reserved `default` and `communications` ids are passed through
+> untouched, because renaming them breaks `getUserMedia` and is a tell in
+> itself. The three kinds get distinct ids (salts 20/21/22), and `groupIds` are
+> now derived too — the audio pair sharing one group and the camera holding its
+> own, which is the shape of an ordinary machine.
+>
+> After the fix, the profile matches the bare browser exactly:
+> `deviceId=''  label=''  groupId=''`.
+>
+> **Still open: labels under permission.** Once a site is granted camera or
+> microphone access, `label` still passes through as the host's real hardware
+> name. Fixing that needs a per-platform device catalogue rather than a filter —
+> "Default - MacBook Pro Microphone" on a Windows profile would simply be a
+> different contradiction — so it is left as P1 work rather than patched badly.
+>
+> Verified: 7 tests in `tests/test_media_devices.py`, including a live one that
+> asserts a profile volunteers no id where the host would withhold it.
 
 ---
 

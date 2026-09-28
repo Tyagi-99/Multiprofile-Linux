@@ -491,12 +491,26 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         {"brand": "Not-A.Brand", "version": "99.0.0.0"},
     ]
 
-    # Stable per-seed media device IDs — deterministic, not random on each call
-    rng_dev = _rng(seed, 20)
+    # Stable per-seed media device IDs — deterministic, not random on each
+    # call. One salt PER KIND: all three used to share _rng(seed, 20) and so
+    # carried the same 64-char id, which is a microphone, a camera and a
+    # speaker with one identifier between them. No real browser does that.
+    #
+    # evasion.js only substitutes these when the browser is already exposing
+    # real ids; see the enumerateDevices hook for why handing them out
+    # unconditionally was worse than not spoofing at all.
     media_device_ids = {
-        "audioinput": _hex_id(rng_dev),
-        "audiooutput": _hex_id(rng_dev),
-        "videoinput": _hex_id(rng_dev),
+        "audioinput": _hex_id(_rng(seed, 20)),
+        "audiooutput": _hex_id(_rng(seed, 21)),
+        "videoinput": _hex_id(_rng(seed, 22)),
+    }
+    # Chrome groups devices belonging to one physical unit: a webcam's camera
+    # and microphone share a groupId. The audio pair together, the camera
+    # apart, is the ordinary shape.
+    media_device_group_ids = {
+        "audioinput": _hex_id(_rng(seed, 23)),
+        "audiooutput": _hex_id(_rng(seed, 23)),
+        "videoinput": _hex_id(_rng(seed, 24)),
     }
 
     fp = {
@@ -522,6 +536,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         "model": pool.get("model") or "",
         # Stable media device IDs per profile
         "mediaDeviceIds": media_device_ids,
+        "mediaDeviceGroupIds": media_device_group_ids,
         # Nested client hints (legacy field, kept for extension compatibility)
         "clientHints": {
             "platform": pool["ch_platform"],

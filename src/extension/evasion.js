@@ -1141,19 +1141,40 @@
     const MP_DEVICE_IDS = (typeof __MP_INLINE_CFG__ !== 'undefined' && __MP_INLINE_CFG__.mediaDeviceIds)
       ? __MP_INLINE_CFG__.mediaDeviceIds
       : { audioinput: null, audiooutput: null, videoinput: null };
+    const MP_DEVICE_GROUPS = (typeof __MP_INLINE_CFG__ !== 'undefined' && __MP_INLINE_CFG__.mediaDeviceGroupIds)
+      ? __MP_INLINE_CFG__.mediaDeviceGroupIds
+      : { audioinput: null, audiooutput: null, videoinput: null };
 
     if (MP_DEVICE_IDS.audioinput && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
       const origEnum = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
       navigator.mediaDevices.enumerateDevices = makeNative(async function() {
         try {
           const devices = await origEnum();
-          // Replace device IDs with stable seeded values
-          return devices.map((dev, i) => {
-            let stableId = dev.deviceId;
-            if (dev.kind === 'audioinput' && MP_DEVICE_IDS.audioinput) stableId = MP_DEVICE_IDS.audioinput;
-            if (dev.kind === 'audiooutput' && MP_DEVICE_IDS.audiooutput) stableId = MP_DEVICE_IDS.audiooutput;
-            if (dev.kind === 'videoinput' && MP_DEVICE_IDS.videoinput) stableId = MP_DEVICE_IDS.videoinput;
-            return { kind: dev.kind, label: dev.label, deviceId: stableId, groupId: dev.groupId };
+          return devices.map((dev) => {
+            // Only substitute what the browser is ALREADY exposing. Without
+            // media permission Chrome returns deviceId '' (and label '',
+            // groupId '') for every device -- measured on stock Chromium 151.
+            // Replacing that with a stable 64-char id produced a combination
+            // no real browser emits, an id beside an empty label and empty
+            // group, and handed every site the same persistent identifier for
+            // the life of the profile. Spoofing that volunteers an identifier
+            // where the host volunteers none is worse than not spoofing.
+            const realId = dev.deviceId || '';
+            const realGroup = dev.groupId || '';
+            let id = realId;
+            let group = realGroup;
+            if (realId) {
+              const byKind = MP_DEVICE_IDS[dev.kind];
+              if (byKind) id = byKind;
+            }
+            if (realGroup) {
+              const g = MP_DEVICE_GROUPS[dev.kind];
+              if (g) group = g;
+            }
+            // 'default' and 'communications' are Chrome's own reserved ids;
+            // renaming them breaks getUserMedia and is itself a tell.
+            if (realId === 'default' || realId === 'communications') id = realId;
+            return { kind: dev.kind, label: dev.label, deviceId: id, groupId: group };
           });
         } catch(e) {
           return origEnum();
