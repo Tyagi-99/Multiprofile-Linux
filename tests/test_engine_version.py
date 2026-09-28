@@ -153,12 +153,14 @@ def test_alignment_can_be_turned_off(monkeypatch):
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
         ),
-        # CriOS is the iPhone pool's token; matching only "Chrome/" left it behind
+        # CriOS is the iPhone pool's token; matching only "Chrome/" left it
+        # behind. It also takes the FULL build, not the reduced form -- see
+        # test_ios_tokens_keep_the_full_build below.
         (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
             "(KHTML, like Gecko) CriOS/131.0.0.0 Mobile/15E148 Safari/604.1",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 "
-            "(KHTML, like Gecko) CriOS/151.0.0.0 Mobile/15E148 Safari/604.1",
+            f"(KHTML, like Gecko) CriOS/{PINNED} Mobile/15E148 Safari/604.1",
         ),
         # Edge tracks the Chromium major, so BOTH tokens move
         (
@@ -171,6 +173,51 @@ def test_alignment_can_be_turned_off(monkeypatch):
 )
 def test_align_ua_string_moves_only_the_version(ua, expected, pinned_engine):
     assert E.align_ua_string(ua, pinned_engine) == expected
+
+
+@pytest.mark.parametrize("token", sorted(E._UA_FULL_VERSION_TOKENS))
+def test_ios_tokens_keep_the_full_build(token, pinned_engine):
+    """Chrome on iOS never adopted UA reduction, so it must not be reduced.
+
+    UA reduction is a Blink change and Chrome for iOS is WebKit, so a real
+    iOS browser sends its whole build (``CriOS/151.0.7654.32``) where desktop
+    and Android send ``<major>.0.0.0``. The device presets encode exactly that
+    distinction -- full version for CriOS, reduced for the rest -- and
+    reducing these tokens with the others produced ``CriOS/151.0.0.0``: a 0.0
+    patch that no iOS build has shipped, which is the same tell this module
+    removes from ``Sec-CH-UA-Full-Version-List``.
+    """
+    ua = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 "
+        f"(KHTML, like Gecko) {token}/131.0.6778.73 Mobile/15E148 Safari/604.1"
+    )
+    out = E.align_ua_string(ua, pinned_engine)
+    assert f"{token}/{PINNED}" in out
+    assert f"{token}/{pinned_engine.ua_version}" not in out
+    assert ".0.0.0" not in out
+
+
+def test_blink_tokens_still_take_the_reduced_form(pinned_engine):
+    """The counterpart: desktop and Android do reduce, and must keep doing so."""
+    for token in ("Chrome", "Chromium", "Edg", "EdgA", "HeadlessChrome"):
+        ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) {token}/131.0.6778.73 Safari/537.36"
+        out = E.align_ua_string(ua, pinned_engine)
+        assert f"{token}/{pinned_engine.ua_version}" in out, out
+        assert PINNED not in out, out
+
+
+def test_no_ios_preset_claims_a_reduced_version(pinned_engine):
+    """End to end: no shipped iOS-class preset reaches the wire reduced."""
+    from multiprofile.devices.registry import registry
+
+    checked = 0
+    for preset in registry.list():
+        ua = E.align_ua_string(preset.user_agent or "", pinned_engine)
+        for token in E._UA_FULL_VERSION_TOKENS:
+            if f"{token}/" in ua:
+                checked += 1
+                assert f"{token}/{PINNED}" in ua, f"{preset.id}: {ua}"
+    assert checked, "no iOS-class preset found -- has the catalogue changed?"
 
 
 def test_a_safari_ua_has_no_chromium_token_and_is_untouched(pinned_engine):
@@ -233,12 +280,18 @@ def test_every_pool_default_carries_a_version_token_the_parser_can_see(pinned_en
     The iPhone pool says ``CriOS/``; the old parser only matched ``Chrome/``,
     so that pool fell back to the hardcoded 131 no matter what the engine
     was -- and would now disagree with its own aligned UA string.
+
+    What every pool owes is the engine's *major*. The form that major arrives
+    in is per token and is asserted in ``test_ios_tokens_keep_the_full_build``
+    and ``test_blink_tokens_still_take_the_reduced_form``, so pinning the
+    reduced string here would just re-state one of those for the Blink pools
+    and contradict the other for the iOS one.
     """
     from multiprofile.fingerprint._core import POOL_MAP, _chrome_major
 
     for name, pool in sorted(POOL_MAP.items()):
         aligned = E.align_ua_string(pool["userAgent"], pinned_engine)
-        assert "151.0.0.0" in aligned, f"{name}: {aligned!r} was not realigned"
+        assert "/131." not in aligned, f"{name}: {aligned!r} was not realigned"
         assert _chrome_major(aligned) == 151, f"{name}: brands would claim {_chrome_major(aligned)}"
 
 

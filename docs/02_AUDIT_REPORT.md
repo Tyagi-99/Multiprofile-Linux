@@ -405,6 +405,14 @@ entirely as part of F2, which removes this finding at the root.
 >    `Sec-CH-UA-Full-Version-List` carries the real build. The old code put the
 >    reduced form in both, and no Chrome release has ever had a patch version of
 >    `0.0` — that pairing was a tell on its own.
+> 5. **Which form of the version a UA token gets is per token.** UA reduction is
+>    a Blink change, and Chrome for iOS is WebKit under Apple's engine rule — it
+>    never adopted the frozen form. A real Chrome for iOS sends its whole build
+>    (`CriOS/151.0.7922.173`) where desktop and Android send `<major>.0.0.0`, and
+>    the presets were written that way. Rule 4 was first applied to every token
+>    alike, which minted `CriOS/151.0.0.0` on all ten iOS/iPadOS presets — the
+>    same `0.0` patch tell rule 4 exists to remove, reintroduced one line over.
+>    `_UA_FULL_VERSION_TOKENS` (`CriOS`, `EdgiOS`) now takes the full build.
 >
 > Two bugs found while fixing it:
 >
@@ -433,6 +441,35 @@ entirely as part of F2, which removes this finding at the root.
 > `MULTIPROFILE_ENGINE_VERSION=151.0.7654.32` → 1214 passed, so alignment being
 > *active* breaks nothing; live browser suite `-m network` → 19 passed on
 > Chromium 141. `ruff check src/ tests/` clean.
+>
+> **Re-verified on the real engine.** The numbers above were taken on
+> Playwright's Chromium 141 in a container with no system browser. Re-run against
+> the dev machine's own **Chromium 151.0.7922.173 (Arch Linux)**:
+>
+> ```
+> detect_engine_version() → full=151.0.7922.173 major=151 uaVersion=151.0.0.0
+>                           source=binary  binary=/usr/bin/chromium
+> ```
+>
+> The Arch banner (`Chromium 151.0.7922.173 Arch Linux`) parses, as do the
+> `snap` and `Google Chrome` forms; a 3-component banner fills the patch with
+> `0`, and unparseable text yields `None` rather than a guess. Launched live,
+> both a no-preset profile and an `iphone-16` profile reported
+> `identity_ok=True`, reason *verified on the wire* — so the launch-time
+> assertion, which is strict enough to abort a launch, holds with a 151 claim:
+>
+> ```
+> desktop : user-agent … Chrome/151.0.0.0 Safari/537.36
+>           sec-ch-ua "Google Chrome";v="151", "Chromium";v="151", "Not-A.Brand";v="99"
+>           sec-ch-ua-platform "Windows"   sec-ch-ua-mobile ?0
+> iphone  : user-agent … CriOS/151.0.7922.173 Mobile/15E148 Safari/604.1
+>           sec-ch-ua-platform "iOS"       sec-ch-ua-mobile ?1
+> ```
+>
+> `pytest tests/ -q` → **1228 passed, 2 skipped** on Chromium 151;
+> `-m network` → 19 passed; `ruff check src/ tests/` clean.
+> `tests/test_netns.py::test_probe_cleans_up_after_itself`, which fails in the
+> container for a missing `ip` binary, passes here.
 
 The original finding follows, unchanged.
 

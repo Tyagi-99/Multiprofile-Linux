@@ -68,6 +68,16 @@ _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?")
 # exactly, so Edg/ moves with the rest; CriOS is Chrome-on-iOS.
 _UA_VERSION_RE = re.compile(r"\b(Chrome|Chromium|CriOS|Edg|EdgA|EdgiOS|HeadlessChrome)/[\d.]+")
 
+# UA reduction is a Blink change, and Chrome on iOS is not Blink -- it is
+# WebKit under Apple's engine rule, and it never adopted the frozen
+# "<major>.0.0.0" form. A real Chrome for iOS sends its whole build,
+# "CriOS/151.0.7922.173"; the device presets were written that way, with the
+# full version for CriOS and the reduced form for desktop and Android, and
+# that distinction is correct. Reducing these two tokens with the rest would
+# mint "CriOS/151.0.0.0" -- the same 0.0 patch pairing this module rejects
+# elsewhere as a tell, and one no iOS build has ever shipped.
+_UA_FULL_VERSION_TOKENS = frozenset({"CriOS", "EdgiOS"})
+
 # GREASE brands say nothing about the identity and must not be rewritten --
 # their version is deliberate noise. Chromium spells the brand differently on
 # every build, hence the loose match.
@@ -228,18 +238,30 @@ def _detect_uncached(binary: str | None) -> EngineVersion:
 # ---------------------------------------------------------------------------
 
 def align_ua_string(ua: str, engine: EngineVersion | None = None) -> str:
-    """Rewrite the Chromium version tokens in ``ua`` to the engine's major.
+    """Rewrite the Chromium version tokens in ``ua`` to the engine's version.
 
     Only the version numerals move. The platform, the model and the token
     names are the profile's identity and are left exactly as they are, so a
     Windows UA stays a Windows UA. A UA with no Chromium token (a Safari
     string, say) comes back unchanged.
+
+    Which *form* of the version a token gets is per token, because real
+    browsers differ: the reduced ``<major>.0.0.0`` for the Blink tokens that
+    took part in UA reduction, and the full build for the iOS tokens that did
+    not (see ``_UA_FULL_VERSION_TOKENS``).
     """
     engine = engine or detect_engine_version()
     reduced = engine.ua_version
     if not ua or not reduced:
         return ua
-    return _UA_VERSION_RE.sub(lambda m: f"{m.group(1)}/{reduced}", ua)
+
+    def _replace(m: re.Match[str]) -> str:
+        token = m.group(1)
+        if token in _UA_FULL_VERSION_TOKENS:
+            return f"{token}/{engine.full}"
+        return f"{token}/{reduced}"
+
+    return _UA_VERSION_RE.sub(_replace, ua)
 
 
 def align_brands(brands: Any, engine: EngineVersion | None = None, *, full: bool = False) -> list[dict[str, Any]]:
