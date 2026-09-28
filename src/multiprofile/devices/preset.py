@@ -42,7 +42,11 @@ class DevicePreset:
     category: str  # DESKTOP | MOBILE | TABLET
     platform: str  # Windows | Linux | macOS-class | Android | iOS-class | iPadOS-class
     browser_family: str  # e.g. "Chrome"
-    browser_version_policy: str  # e.g. "pinned:131" or "latest-stable"
+    # "match-engine": the claimed Chrome version is taken from the installed
+    # binary at launch, and the literals below are only the template it is
+    # rewritten from (F5). "pinned:<major>" would freeze the claim, which is
+    # how every preset here came to advertise Chrome 131 on a 151 engine.
+    browser_version_policy: str  # "match-engine" | "pinned:<major>" | "latest-stable"
     user_agent: str
     client_hints: Dict[str, Any] = field(
         default_factory=lambda: {

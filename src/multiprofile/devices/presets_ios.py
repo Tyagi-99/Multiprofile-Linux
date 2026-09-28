@@ -100,7 +100,7 @@ def _iphone(
         category=MOBILE,
         platform=IOS,
         browser_family="Chrome",
-        browser_version_policy="pinned:131",
+        browser_version_policy="match-engine",
         user_agent=(
             f"Mozilla/5.0 (iPhone; CPU iPhone OS {ios_version} like Mac OS X) "
             f"AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/{_CRIOS_FULL} "

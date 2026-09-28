@@ -26,6 +26,7 @@ from ..cookies_store import (
     load_cookies,
     save_cookies,
 )
+from ..engine import detect_engine_version
 from ..fingerprint import fingerprint_report
 from ..jobs import cancel_job, create_job, get_job, list_jobs
 from ..network import network_config_for_profile
@@ -87,7 +88,7 @@ from .auth import register_auth, register_request_guard
 from .event_bus import emit_job_progress, emit_profile_status, get_bus
 from .pagination import paginate, parse_limit
 from .sse import register_events_routes
-from .user_agents import USER_AGENTS
+from .user_agents import user_agent_catalog
 from .validation import (
     ValidationError,
     register_error_handlers,
@@ -388,13 +389,17 @@ def create_app() -> Flask:
                 # Which key backend is protecting the proxy passwords. The
                 # operator must be able to see when it is the weaker one.
                 "secrets": _secrets_status(),
+                # What version profiles are allowed to claim, and on what
+                # authority. source="unavailable" means the claim on the wire
+                # was never compared to the engine running it (F5).
+                "engine": detect_engine_version(chrome_path).to_dict(),
                 "reaped": reaped,
             }
         )
 
     @app.get("/api/user-agents")
     def user_agents():
-        return jsonify(USER_AGENTS)
+        return jsonify(user_agent_catalog())
 
     @app.get("/api/profiles")
     def profiles():

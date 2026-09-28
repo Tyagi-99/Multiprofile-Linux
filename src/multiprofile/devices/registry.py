@@ -1,7 +1,7 @@
 """DeviceRegistry — lookup over all device presets."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .preset import DevicePreset
 from .presets_android import ANDROID_PRESETS
@@ -44,3 +44,35 @@ class DeviceRegistry:
 
 # Shared default registry instance.
 registry = DeviceRegistry()
+
+
+def preset_view(preset: DevicePreset) -> Dict[str, Any]:
+    """The preset as an operator should see it, versions realigned to the engine.
+
+    The catalogue literals say Chrome 131; a launch claims the installed
+    engine's major (F5). Serving the raw literals would mean the device page
+    and the wire describe two different browsers, which is exactly the
+    contradiction this finding is about — so the read path and the launch
+    path are rewritten by the same function.
+
+    ``browser_version_resolved`` is the major actually claimed, or None when
+    the engine could not be asked. None is not a pass: it says the claim was
+    never checked.
+    """
+    from ..engine import align_brands, align_ua_string, detect_engine_version
+
+    engine = detect_engine_version()
+    d = preset.to_dict()
+    d["browser_version_resolved"] = engine.major
+    d["engine_version"] = engine.to_dict()
+    if not engine.known:
+        return d
+
+    d["user_agent"] = align_ua_string(d.get("user_agent") or "", engine)
+    hints = dict(d.get("client_hints") or {})
+    if "brands" in hints:
+        hints["brands"] = align_brands(hints.get("brands"), engine)
+    if "full_version_list" in hints:
+        hints["full_version_list"] = align_brands(hints.get("full_version_list"), engine, full=True)
+    d["client_hints"] = hints
+    return d

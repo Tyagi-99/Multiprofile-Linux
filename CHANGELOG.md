@@ -1,5 +1,37 @@
 ## Unreleased
 
+- **The claimed Chrome version now comes from the installed engine** (audit
+  finding F5, new `engine.py`, `fingerprint/_core.py`, `browser/launcher.py`,
+  `browser/cdp_identity.py`, `devices/*`, `api/user_agents.py`): every UA pool,
+  all seven device presets and the UA picker were written against Chrome 131,
+  while the engine actually running them is whatever Chromium the host has —
+  141 in CI, 151 on the dev machine, roughly twenty stable releases later. A
+  page could tell twice over: by probing an engine feature that shipped after
+  131, and by cohort alone, since Chrome 131 has negligible real-world share.
+  - New `engine.py` asks the binary for its version once per process and owns
+    the rewrites. Pool defaults and preset UAs are now templates realigned to
+    that answer; `browser_version_policy` moved from `"pinned:131"` to
+    `"match-engine"`.
+  - **An explicit `profile.userAgent` is never renumbered** — an operator may
+    be matching a fingerprint bought elsewhere. The launch notes report the
+    disagreement instead, and the client hints follow the UA, so the two can
+    never claim different browsers.
+  - **An unknown engine invents nothing.** No binary, an unreadable binary or
+    `MULTIPROFILE_CLAIM_ENGINE_VERSION=0` leaves the literals in place and
+    records `source: "unavailable"`; the launch note calls the claim
+    `UNVERIFIED` rather than reporting a pass.
+  - The UA string carries the reduced `<major>.0.0.0` form and
+    `Sec-CH-UA-Full-Version-List` carries the real build, as a real Chrome
+    does. Both used to carry `131.0.0.0`, a patch version no Chrome release
+    has ever had.
+  - Fixed on the way: `_chrome_version()` matched only `Chrome/`, so the iPhone
+    pool (`CriOS/`) always fell back to the 131 literal; and
+    `GET /api/devices/<id>` served the raw catalogue, so the device page and
+    the wire described different browsers.
+  - Settings: `MULTIPROFILE_ENGINE_VERSION` pins a claimed version explicitly;
+    `MULTIPROFILE_CLAIM_ENGINE_VERSION=0` turns alignment off. `/api/health`
+    reports the resolved engine under `engine`.
+
 - **Profiles no longer browse as the host machine** (audit finding F1,
   `fingerprint/_core.py`, `browser/cdp_identity.py`, `browser/cdp_inject.py`,
   `browser/launcher.py`, new `browser/identity_assert.py`): a profile created

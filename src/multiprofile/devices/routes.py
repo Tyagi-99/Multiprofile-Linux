@@ -14,7 +14,7 @@ from __future__ import annotations
 from flask import jsonify, request
 
 from ..api.pagination import paginate, parse_limit
-from .registry import registry
+from .registry import preset_view, registry
 from .validator import DevicePresetValidator
 
 _validator = DevicePresetValidator()
@@ -71,7 +71,7 @@ def register_devices_routes(app) -> None:
         preset = registry.get(device_id)
         if preset is None:
             return jsonify({"error": "unknown device", "device_id": device_id}), 404
-        return jsonify(preset.to_dict())
+        return jsonify(preset_view(preset))
 
     @app.get("/api/devices/<device_id>/validate")
     def validate_device(device_id: str):

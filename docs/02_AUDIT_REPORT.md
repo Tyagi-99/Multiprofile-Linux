@@ -361,7 +361,82 @@ entirely as part of F2, which removes this finding at the root.
 
 ---
 
-### F5 — 🟡 HIGH: every profile claims Chrome 131; the engine is Chromium 151
+### F5 — ✅ HIGH: every profile claims Chrome 131; the engine is Chromium 151 — **FIXED**
+
+> **Resolved in Gate 2.** New `src/multiprofile/engine.py` is the one place that
+> answers *what version may we claim*: it asks the installed binary once per
+> process, caches the answer, and offers the rewrites that bring a UA string and
+> a client-hints brand list into line with it. Everything that used to hardcode
+> 131 now goes through it — the five UA pools, all seven device presets, the
+> `/api/user-agents` picker, and the `_extract_ua_metadata` fallback in
+> `cdp_identity`.
+>
+> Measured live against Playwright's Chromium **141.0.7390.37**, a profile with
+> no preset and no explicit UA:
+>
+> ```
+> engine        : 141.0.7390.37  (source=binary)
+> --user-agent  : … Chrome/141.0.0.0 Safari/537.36        (was Chrome/131.0.0.0)
+> sec-ch-ua     : "Google Chrome";v="141", "Chromium";v="141", "Not-A.Brand";v="99"
+> fullVersionList: 141.0.7390.37                          (was 131.0.0.0)
+> picker        : "Windows 11 — Chrome 141"               (was "… Chrome 131")
+> preset win11  : … Chrome/141.0.0.0, browser_version_resolved=141
+> ```
+>
+> Four rules, each with a test in `tests/test_engine_version.py` (31 tests):
+>
+> 1. **A pool default and a preset track the binary.** Their 131 literals are
+>    now templates, rewritten at build/launch time. `browser_version_policy`
+>    moved from `"pinned:131"` to `"match-engine"` on all seven presets —
+>    `pinned` is the policy that let the drift happen silently.
+> 2. **An explicit operator UA is never renumbered.** They may be matching a
+>    fingerprint bought elsewhere, and silently moving it would break the
+>    pairing they came for. The disagreement is reported in the launch notes
+>    instead. Crucially the *hints follow the UA*: with an explicit UA beside a
+>    preset, neither is aligned, so the two can never claim different browsers.
+> 3. **An unknown engine invents nothing.** No binary on PATH, a binary that
+>    will not answer, `MULTIPROFILE_CLAIM_ENGINE_VERSION=0` — all yield the
+>    literals plus a record that says `source: "unavailable"`, and the launch
+>    note reads `claimed Chrome version 131 is UNVERIFIED`. A wrong guess and a
+>    stale literal are both lies; only one of them is also unfalsifiable. Same
+>    rule the launch-time identity assertion follows.
+> 4. **The two version claims are made differently, because real Chrome makes
+>    them differently.** The UA string carries the reduced `<major>.0.0.0` form;
+>    `Sec-CH-UA-Full-Version-List` carries the real build. The old code put the
+>    reduced form in both, and no Chrome release has ever had a patch version of
+>    `0.0` — that pairing was a tell on its own.
+>
+> Two bugs found while fixing it:
+>
+> - `_chrome_version()` matched only `Chrome/`. The iPhone pool's UA says
+>   `CriOS/`, so that pool **always** fell back to the 131 literal regardless of
+>   its own UA string — and would now have disagreed with its realigned UA. The
+>   parser matches every Chromium version token (`Chrome`, `Chromium`, `CriOS`,
+>   `Edg`, `EdgA`, `EdgiOS`, `HeadlessChrome`).
+> - `GET /api/devices/<id>` served the raw catalogue, so the device page and the
+>   wire described two different browsers. It now serves `preset_view()`, the
+>   same rewrite the launch path uses, plus `browser_version_resolved`.
+>
+> **It also narrows the F1 residual.** That residual — a new tab's first
+> document request leaves before its per-target override lands — used to leak
+> `sec-ch-ua: "Chromium";v="141"` while the profile claimed 131, so the request
+> disagreed with the identity on *both* version and platform. Measured now, the
+> same request leaks only `sec-ch-ua-platform: "Linux"`; the version component
+> matches. Still a leak, still open, but one signal narrower.
+>
+> Not closed by this: the brief's "≤2 weeks behind stable" is still unreachable
+> on a stock distro engine — the claim is now capped at the user's own update
+> cadence, which is the honest half of §9.2. `MULTIPROFILE_ENGINE_VERSION` lets
+> an operator pin a version explicitly when they know better.
+>
+> Verified: `pytest tests/ -q` → 1214 passed (was 1183); the same suite with
+> `MULTIPROFILE_ENGINE_VERSION=151.0.7654.32` → 1214 passed, so alignment being
+> *active* breaks nothing; live browser suite `-m network` → 19 passed on
+> Chromium 141. `ruff check src/ tests/` clean.
+
+The original finding follows, unchanged.
+
+### F5 (original) — every profile claims Chrome 131; the engine is Chromium 151
 
 **Files:** [`_core.py:185,193`](../src/multiprofile/fingerprint/_core.py#L185),
 [`api/user_agents.py`](../src/multiprofile/api/user_agents.py),
@@ -679,9 +754,9 @@ launch is verified against the real wire and refused on a proven mismatch, there
 one script-injection route, the cleartext proxy password is gone from disk
 (including copies already written), and `evasion.js` is silent unless asked.
 
-**Gate 2 — make it honest and hold the line (1–2 weeks).** F5 (derive version from
-the real binary) · F8 · F11 on the identity path only · close the residual leak F1
-left behind: a tab's first document request is issued before its per-target UA
+**Gate 2 — make it honest and hold the line (1–2 weeks). F5 ✅ DONE.** F5 (derive
+version from the real binary — done: `engine.py`, see the ✅ block above) · F8 ·
+F11 on the identity path only · close the residual leak F1 left behind: a tab's first document request is issued before its per-target UA
 override lands, so `sec-ch-ua-platform` on that one request still reflects the host.
 Closing it means rewriting headers in the browser process (browser-level `Fetch`
 interception).

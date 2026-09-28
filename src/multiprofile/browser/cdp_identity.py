@@ -26,6 +26,8 @@ import time
 import urllib.request
 from typing import Any
 
+from ..engine import detect_engine_version
+
 log = logging.getLogger("multiprofile.browser.cdp_identity")
 
 _CDP_TIMEOUT = 5.0
@@ -271,10 +273,15 @@ def _extract_ua_metadata(fingerprint: dict[str, Any]) -> dict[str, Any]:
     platform_version = fingerprint.get("platformVersion") or "15.0.0"
     is_mobile = fingerprint.get("touch", 0) > 0
 
-    # Extract Chrome version from UA string
+    # Extract the Chromium version from the UA string. The fallback is the
+    # installed engine, not a literal: this branch is only reached when the
+    # fingerprint carries no brand lists, and inventing Chrome 131 there was
+    # the same stale claim F5 is about. CriOS/Edg count — the iPhone pool's
+    # UA has no "Chrome/" token at all.
     ua_str = fingerprint.get("userAgent") or ""
-    chrome_version = "131.0.0.0"
-    m = re.search(r"Chrome/(\d+\.\d+\.\d+\.\d+)", ua_str)
+    engine = detect_engine_version()
+    chrome_version = engine.full or "131.0.0.0"
+    m = re.search(r"\b(?:Chrome|Chromium|CriOS|Edg|EdgA|EdgiOS|HeadlessChrome)/(\d+\.\d+\.\d+\.\d+)", ua_str)
     if m:
         chrome_version = m.group(1)
 

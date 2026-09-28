@@ -84,7 +84,7 @@ def _ipad(*, id: str, name: str, ipados_version: str, vw: int, vh: int,
         category=TABLET,
         platform=IPADOS,
         browser_family="Chrome",
-        browser_version_policy="pinned:131",
+        browser_version_policy="match-engine",
         user_agent=(
             f"Mozilla/5.0 (iPad; CPU OS {ipados_version} like Mac OS X) "
             f"AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/{_CRIOS_FULL} "
@@ -132,7 +132,7 @@ TABLET_PRESETS = [
         category=TABLET,
         platform=ANDROID,
         browser_family="Chrome",
-        browser_version_policy="pinned:131",
+        browser_version_policy="match-engine",
         user_agent=(
             "Mozilla/5.0 (Linux; Android 13; SM-X710) AppleWebKit/537.36 "
             f"(KHTML, like Gecko) {_CHROME_ANDROID} Safari/537.36"

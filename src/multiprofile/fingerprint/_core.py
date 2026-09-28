@@ -17,6 +17,8 @@ import hashlib
 import re
 from typing import Any
 
+from ..engine import align_ua_string, detect_engine_version
+
 
 def normalize_seed(profile: dict[str, Any]) -> int:
     """Return a stable positive int seed from profile.seed or profile id."""
@@ -212,11 +214,20 @@ def _detect_pool(ua: str, is_mobile: bool) -> dict:
     return _DESKTOP_WIN
 
 
+# Every token a Chromium build puts its version behind. Matching only
+# "Chrome/" read the iPhone pool -- whose UA says CriOS/ -- as unversioned
+# and fell back to the 131 literal, so its brands disagreed with its own UA
+# string the moment either one moved.
+_UA_VERSION_TOKEN = re.compile(r"\b(?:Chrome|Chromium|CriOS|Edg|EdgA|EdgiOS|HeadlessChrome)/([\d.]+)")
+
+_FALLBACK_CHROME_VERSION = "131.0.0.0"
+
+
 def _chrome_version(ua: str) -> str:
-    m = re.search(r"Chrome/([\d.]+)", ua or "")
+    m = _UA_VERSION_TOKEN.search(ua or "")
     if m:
         return m.group(1)
-    return "131.0.0.0"
+    return _FALLBACK_CHROME_VERSION
 
 
 def _chrome_major(ua: str) -> int:
@@ -224,7 +235,7 @@ def _chrome_major(ua: str) -> int:
     try:
         return int(full.split(".")[0])
     except (ValueError, IndexError):
-        return 131
+        return int(_FALLBACK_CHROME_VERSION.split(".")[0])
 
 
 def _languages(lang: str) -> list[str]:
@@ -382,14 +393,22 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     this exact dict shape.
     """
     seed = normalize_seed(profile)
-    ua = profile.get("userAgent") or ""
+    explicit_ua = (profile.get("userAgent") or "").strip()
+    ua = explicit_ua
     is_mobile = bool(profile.get("isMobile"))
     pool = _detect_pool(ua, is_mobile)
     # The pool decides what this profile pretends to be; without an explicit
     # UA it must still SAY so, or the launcher has nothing to put on the wire
     # and the profile browses as the host (F1).
+    #
+    # A pool default is OUR claim, so it tracks the engine that will actually
+    # run it instead of the Chrome 131 these literals were written against
+    # (F5). An explicit operator UA is left exactly as given: they may be
+    # matching a fingerprint bought elsewhere, and silently renumbering it
+    # would break the pairing they came for. `engine_version` below records
+    # the disagreement instead.
     if not ua:
-        ua = pool.get("userAgent") or ""
+        ua = align_ua_string(pool.get("userAgent") or "")
 
     screen = _pick(seed, 1, pool["screens"])
     w, h, avail_h, dpr = screen
@@ -409,12 +428,17 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     if webrtc not in ("default", "disable_non_proxied_udp", "disable"):
         webrtc = "default"
 
+    # Two different claims, because real Chrome makes them differently: the
+    # UA string carries the reduced `<major>.0.0.0` form, while
+    # Sec-CH-UA-Full-Version-List carries the real build. Publishing the
+    # reduced form in both -- what this used to do -- claims a build number
+    # no Chrome release has ever had.
+    engine = detect_engine_version()
     ua_full = _chrome_version(ua)
-    major = ua_full.split(".")[0] if ua_full else "131"
-    try:
-        major_int = int(major)
-    except ValueError:
-        major_int = 131
+    major_int = _chrome_major(ua)
+    if not explicit_ua and engine.known:
+        ua_full = engine.full or ua_full
+        major_int = engine.major or major_int
 
     ch_brands = [
         {"brand": "Google Chrome", "version": str(major_int)},
@@ -471,6 +495,10 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         },
         "userAgent": ua,
         "isMobile": pool["touch"] > 0,
+        # What the claim was measured against, so a launch note, /api/health
+        # and the consistency check can all say whether the version on the
+        # wire was verified or merely inherited from a literal.
+        "engineVersion": engine.to_dict(),
     }
     return fp
 

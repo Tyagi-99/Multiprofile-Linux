@@ -103,7 +103,7 @@ def _android(
         category=MOBILE,
         platform=ANDROID,
         browser_family="Chrome",
-        browser_version_policy="pinned:131",
+        browser_version_policy="match-engine",
         user_agent=(
             f"Mozilla/5.0 (Linux; Android {android_version}; {ua_model}) "
             f"AppleWebKit/537.36 (KHTML, like Gecko) {_CHROME_ANDROID} Mobile Safari/537.36"

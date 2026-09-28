@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
+import re
 import signal
 import socket
 import subprocess
@@ -27,6 +27,7 @@ from ..api import events
 from ..audit import audit_log
 from ..config import get_settings
 from ..cookies_store import load_cookies
+from ..engine import detect_engine_version, find_browser_binary
 from ..fingerprint import build_fingerprint, normalize_seed
 from ..network import (
     NetworkMode,
@@ -258,10 +259,11 @@ def extension_src() -> Path:
 
 
 def find_chrome() -> str:
-    for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"):
-        path = shutil.which(name)
-        if path:
-            return path
+    # The candidate list lives in ``engine`` so that the binary we launch and
+    # the binary we ask for a version are the same one, in the same order.
+    path = find_browser_binary()
+    if path:
+        return path
     raise FileNotFoundError(
         "Unable to start browser process.\n"
         "Reason: Chromium/Chrome executable was not found on PATH.\n"
@@ -360,9 +362,19 @@ def _resolve_wire_identity(
 
     Client hints come from the device preset when there is one — it is the
     authority on what the device is — and from the fingerprint otherwise.
+
+    Version: the claimed Chrome major tracks the engine that will actually
+    run the profile (F5). Pool UAs are aligned in ``build_fingerprint``;
+    a preset UA and the preset's own brand lists are aligned here, so the
+    catalogue's Chrome-131 literals do not reach the wire on a 151 engine.
+    An explicit operator UA is never renumbered — and when it is present
+    its version also governs the hints, so the two cannot be aligned to
+    different browsers.
     """
+    from ..engine import align_ua_metadata, align_ua_string
     from .cdp_identity import build_ua_override_params
 
+    engine = detect_engine_version()
     explicit_ua = (profile.get("userAgent") or "").strip()
     preset_cfg: dict[str, Any] = {}
     if device_preset is not None:
@@ -372,7 +384,13 @@ def _resolve_wire_identity(
             log.debug("preset config unreadable while resolving identity", exc_info=True)
     preset_ua = (preset_cfg.get("user_agent") or "").strip()
 
-    ua = explicit_ua or preset_ua or (fingerprint.get("userAgent") or "").strip()
+    if explicit_ua:
+        ua = explicit_ua
+    elif preset_ua:
+        ua = align_ua_string(preset_ua, engine)
+    else:
+        # Already aligned by build_fingerprint, which owns the pool defaults.
+        ua = (fingerprint.get("userAgent") or "").strip()
 
     metadata = None
     if preset_cfg:
@@ -383,8 +401,48 @@ def _resolve_wire_identity(
         except Exception:  # noqa: BLE001 - fall back to fingerprint-derived hints
             log.debug("preset client hints unreadable; using fingerprint", exc_info=True)
             metadata = None
+        if metadata is not None and not explicit_ua:
+            metadata = align_ua_metadata(metadata, engine)
 
     return ua, build_ua_override_params(fingerprint, ua, metadata=metadata)
+
+
+def _engine_version_notes(ua: str, explicit_ua: str) -> list[str]:
+    """Say, in the launch notes, what version was claimed and on what authority.
+
+    The point of F5 is not only that the claim moves with the engine, but
+    that an operator can see whether it did. A claim nobody checked is
+    recorded as unverified, never as a pass — the same rule the launch-time
+    identity assertion follows.
+    """
+    engine = detect_engine_version()
+    claimed = _chrome_major_of(ua)
+
+    if not engine.known:
+        if engine.source == "disabled":
+            return [f"Claimed Chrome version: {claimed or 'unknown'} (engine alignment off by configuration)"]
+        return [
+            f"WARNING: claimed Chrome version {claimed or 'unknown'} is UNVERIFIED — "
+            f"{engine.detail}. The profile is claiming a version nobody compared to the engine."
+        ]
+
+    notes = [
+        f"Claimed Chrome version: {claimed or 'unknown'} "
+        f"(engine {engine.full} via {engine.source}"
+        + (f": {engine.binary}" if engine.binary else "")
+        + ")"
+    ]
+    if explicit_ua and claimed is not None and claimed != engine.major:
+        notes.append(
+            f"WARNING: explicit User-Agent claims Chrome {claimed} but the engine is "
+            f"{engine.major} — left as given; clear profile.userAgent to track the engine"
+        )
+    return notes
+
+
+def _chrome_major_of(ua: str) -> int | None:
+    m = re.search(r"\b(?:Chrome|Chromium|CriOS|Edg|EdgA|EdgiOS|HeadlessChrome)/(\d+)", ua or "")
+    return int(m.group(1)) if m else None
 
 
 def _start_identity_injection(
@@ -758,6 +816,7 @@ def launch_profile(
     ua, ua_override = _resolve_wire_identity(profile, fingerprint, device_preset)
     if ua_override is None:
         notes.append("WARNING: no User-Agent to claim — profile will browse as the host")
+    notes.extend(_engine_version_notes(ua, (profile.get("userAgent") or "").strip()))
 
     # ------------------------------------------------------------------
     # Sandbox
