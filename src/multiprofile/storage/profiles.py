@@ -71,8 +71,11 @@ def _attach_fingerprint(profile: dict[str, Any]) -> None:
 def _normalize_fields(profile: dict[str, Any]) -> dict[str, Any]:
     profile.setdefault("language", "en-US")
     profile.setdefault("webrtcMode", "default")
-    profile.setdefault("notes", profile.get("notes") or "")
-    profile.setdefault("startUrl", profile.get("startUrl") or "https://example.com")
+    # Assigned, not setdefault: an explicit null from a cleared field is
+    # already a key, so setdefault would leave None in place and the launcher
+    # would be handed it (F21). Falsy of any shape means "use the default".
+    profile["notes"] = profile.get("notes") or ""
+    profile["startUrl"] = profile.get("startUrl") or "https://example.com"
     profile.setdefault("customProxy", profile.get("customProxy") or "")
     profile.setdefault("proxyHost", profile.get("proxyHost") or "")
     profile.setdefault("proxyPort", profile.get("proxyPort"))

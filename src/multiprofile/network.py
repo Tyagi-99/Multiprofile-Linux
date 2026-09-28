@@ -344,6 +344,18 @@ class ProxyHealthResult:
             "error": self.error,
             "checkedAt": self.checked_at,
             "status": "HEALTHY" if self.ok else "FAILED",
+            # Both spellings, because the API does not have one. This route
+            # hand-writes camelCase while /api/profiles/<id>/health serialises
+            # its dataclass with asdict() and so emits snake_case for the very
+            # same fields. The console reads snake_case here and showed a
+            # permanent "—" for egress IP and latency as a result (F21).
+            # Additive, matching ProfileRuntime.to_dict which already emits
+            # launch_state and launchState. The real fix is one convention
+            # across ~85 routes, which is a breaking change and its own task.
+            "latency_ms": self.latency_ms,
+            "tcp_ms": self.tcp_ms,
+            "egress_ip": self.egress_ip,
+            "checked_at": self.checked_at,
         }
 
 
@@ -868,6 +880,13 @@ class NetworkDiagnostics:
             "ipv6": dict(self.ipv6),
             "lastTest": self.last_test,
             "error": self.error,
+            # See ProxyHealthResult.to_dict: both spellings until the API has
+            # one convention. The diagnostics tab reads the snake_case names.
+            "profile_id": self.profile_id,
+            "egress_ip": self.egress_ip,
+            "country_code": self.country_code,
+            "latency_ms": self.latency_ms,
+            "last_test": self.last_test,
         }
 
 

@@ -335,9 +335,13 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
         v_str(payload["userAgent"], "userAgent", min_len=1, max_len=4096)
     if "userAgentId" in payload:
         v_str(payload["userAgentId"], "userAgentId", min_len=1, max_len=128)
-    if "startUrl" in payload:
+    # null means "clear this", which is what the profile edit dialog sends for
+    # an emptied field. Rejecting it made clearing a start URL or a note a hard
+    # 400 ("must be a string") with no way to do it from the console at all
+    # (F21). Storage coerces the cleared value to the field's default.
+    if payload.get("startUrl") is not None and "startUrl" in payload:
         v_str(payload["startUrl"], "startUrl", min_len=1, max_len=2048)
-    if "notes" in payload:
+    if payload.get("notes") is not None and "notes" in payload:
         v_str(payload["notes"], "notes", max_len=4096)
     if "color" in payload:
         v_str(payload["color"], "color", min_len=1, max_len=16)

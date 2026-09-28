@@ -62,11 +62,28 @@ def _workspace_fields(payload: dict[str, Any], existing: dict[str, Any] | None =
     }
 
 
+# What a client/workspace record may hold. `create_client` built a fixed dict
+# and so dropped anything else, while `update_client` merged the payload
+# wholesale and so kept anything at all -- two different answers to the same
+# question, and between them they lost "description" on create and accepted
+# arbitrary keys on update (F21). One list now answers it for both.
+CLIENT_FIELDS = (
+    "name",
+    "description",
+    "notes",
+    "color",
+    "createdAt",
+    "defaultPoolId",
+    "tags",
+)
+
+
 def create_client(payload: dict[str, Any]) -> dict[str, Any]:
     items = load_clients()
     client = {
         "id": "client_" + uuid.uuid4().hex[:8],
         "name": (payload.get("name") or "Client").strip() or "Client",
+        "description": payload.get("description") or "",
         "notes": payload.get("notes") or "",
         "color": payload.get("color") or "#6366f1",
         "createdAt": payload.get("createdAt") or date.today().isoformat(),
@@ -81,7 +98,8 @@ def update_client(client_id: str, payload: dict[str, Any]) -> dict[str, Any] | N
     items = load_clients()
     for i, c in enumerate(items):
         if c.get("id") == client_id:
-            merged = {**c, **payload, "id": client_id, **_workspace_fields(payload, c)}
+            known = {k: v for k, v in payload.items() if k in CLIENT_FIELDS}
+            merged = {**c, **known, "id": client_id, **_workspace_fields(payload, c)}
             items[i] = merged
             save_clients(items)
             return items[i]

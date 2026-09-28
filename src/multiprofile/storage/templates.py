@@ -12,8 +12,15 @@ from .xdg import secure_write_json, templates_path
 
 _lock = threading.RLock()
 
+# Anything not named here is dropped on both create and update. That is the
+# right default -- it is why a template cannot accumulate junk -- but it also
+# silently ate "description", which the settings dialog has always sent and
+# then read back as empty, so the field looked like it saved and never did
+# (F21). A dropped field and a persisted unknown field are the same defect
+# seen from opposite sides.
 TEMPLATE_FIELDS = (
     "name",
+    "description",
     "userAgentId",
     "userAgent",
     "isMobile",
