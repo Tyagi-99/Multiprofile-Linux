@@ -36,6 +36,10 @@ whole-script execution is not a design. One route is.
 from __future__ import annotations
 
 import json
+import re
+import socket
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.request
@@ -43,6 +47,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+from multiprofile.engine import find_browser_binary
 
 LAUNCHER = (
     Path(__file__).resolve().parent.parent
@@ -180,6 +186,86 @@ def _cdp_json(port: int, path: str):
         return json.loads(r.read())
 
 
+def _extension_ids(targets) -> set[str]:
+    """The extension ids present in a CDP target list."""
+    out: set[str] = set()
+    for t in targets:
+        m = re.match(r"chrome-extension://([a-p]{32})/", t.get("url") or "")
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _settled_extension_ids(port: int, *, timeout_s: float = 15.0) -> set[str]:
+    """Extension ids once the set has stopped growing.
+
+    Component extensions come up as separate targets over the first second or
+    so, some as background pages and some as service workers. Reading once
+    after a fixed sleep races them, so poll until the set is unchanged across
+    two consecutive reads -- otherwise the baseline below can miss an
+    extension the profile launch happens to catch, and the comparison fails
+    for a timing reason rather than a real one.
+    """
+    deadline = time.time() + timeout_s
+    previous: set[str] | None = None
+    while time.time() < deadline:
+        time.sleep(0.5)
+        try:
+            current = _extension_ids(_cdp_json(port, "/json"))
+        except Exception:  # noqa: BLE001 - browser not up yet
+            continue
+        if previous is not None and current == previous:
+            return current
+        previous = current
+    return previous or set()
+
+
+def _stock_extension_ids() -> set[str]:
+    """What a browser loads on its own, with none of our code involved.
+
+    Chromium ships *component* extensions and they appear as
+    ``chrome-extension://`` targets on a completely stock launch -- on Arch's
+    Chromium 151 a bare browser exposes three (Hangouts and two service
+    workers), while Playwright's bundled Chromium 141 exposed none. So "the
+    target list contains no extension at all" is not a statement about F2 on
+    every build, and asserting it made this test fail on a machine where the
+    fix is intact. The floor is therefore measured on the spot, because the
+    ids differ per build and per channel.
+    """
+    binary = find_browser_binary()
+    if not binary:
+        pytest.skip("no browser binary to measure a stock launch against")
+    port = _free_port()
+    with tempfile.TemporaryDirectory() as profile_dir:
+        proc = subprocess.Popen(
+            [
+                binary,
+                "--headless=new",
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={profile_dir}",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            return _settled_extension_ids(port)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:  # pragma: no cover - stubborn child
+                proc.kill()
+
+
 @pytest.fixture()
 def xdg(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
@@ -200,10 +286,17 @@ def test_a_launched_browser_loads_no_extension(xdg):
     Before the fix the target list carried
     ``chrome-extension://…/background.js`` on Chromium, and that extension's
     manifest injects evasion.js as a MAIN-world content script on every page.
+
+    What is asserted is that our launch adds no extension the browser would not
+    have loaded by itself -- not that no extension exists, which is false on any
+    build that ships component extensions. ``_stock_extension_ids`` measures
+    that floor on this machine.
     """
     import multiprofile.browser.launcher as L
     from multiprofile.browser.runtime_state import get_runtime
     from multiprofile.storage.profiles import create_profile
+
+    stock = _stock_extension_ids()
 
     pid = create_profile({
         "name": "one-hook-targets", "proxyType": "none", "startUrl": "about:blank",
@@ -212,13 +305,15 @@ def test_a_launched_browser_loads_no_extension(xdg):
         res = L.launch_profile(pid, url="about:blank", direct=True)
         assert res.get("ok") is True, res.get("error")
         assert not any(a.startswith("--load-extension") for a in res["cmd"])
-        time.sleep(1.0)
-        targets = _cdp_json(get_runtime(pid).cdp_port, "/json")
+        ours = _settled_extension_ids(get_runtime(pid).cdp_port)
     finally:
         L.stop_profile(pid)
 
-    extensions = [t for t in targets if "chrome-extension://" in (t.get("url") or "")]
-    assert extensions == [], f"an extension is loaded again: {extensions}"
+    added = ours - stock
+    assert added == set(), (
+        f"our launch loaded {sorted(added)}, which a stock browser does not: "
+        f"ours={sorted(ours)} stock={sorted(stock)}"
+    )
 
 
 @live
