@@ -763,6 +763,7 @@
               applyAudioSpoofs(win);
               applyRectSpoofs(win);
               applyWebGPUSpoofs(win);
+              applyBatterySpoofs(win);
             } catch(e) {}
           }
           return win;
@@ -1177,12 +1178,88 @@
     } catch (e) {}
   }
 
+
+  // ==========================================
+  // 14. BATTERY
+  // ==========================================
+  // navigator.getBattery() was untouched, so it answered with the host's
+  // real battery. Measured on this machine, every profile returned:
+  //
+  //   charging=false  level=0.28  chargingTime=Infinity  dischargingTime=5545
+  //
+  // Three things are wrong with that at once. It is the host's state, so it
+  // is identical across profiles -- and unlike a static fingerprint it
+  // *moves*, in lockstep, which is a stronger link than a shared constant:
+  // two "different computers" whose batteries drain together are one
+  // computer. It contradicts the claimed machine, since these profiles
+  // present as desktops with a discrete GPU and no desktop discharges. And
+  // dischargingTime is a live counter, so the value is close to unique at
+  // any instant.
+  //
+  // A desktop without a battery is exactly what the spec describes: charging
+  // true, level 1, chargingTime 0, dischargingTime Infinity. That is what
+  // Chrome reports on a desktop, so for a desktop profile there is nothing
+  // to invent -- the honest answer for the claimed machine is also the
+  // constant one, which removes the moving link entirely.
+  //
+  // Mobile profiles do have a battery, so a constant full charge would be
+  // its own anomaly; those get a per-profile deterministic level instead.
+  function applyBatterySpoofs(scope) {
+    try {
+      const nav = scope.navigator;
+      if (!nav || typeof nav.getBattery !== 'function') return;
+      if (nav.getBattery.__mp_hooked) return;
+
+      const isMobile = TARGET_TOUCH > 0;
+      let state;
+      if (!isMobile) {
+        state = { charging: true, level: 1, chargingTime: 0, dischargingTime: Infinity };
+      } else {
+        // Deterministic in the seed, quantised to the 1% steps the API
+        // reports, and kept away from the ends so it is unremarkable.
+        const pct = 20 + (Math.abs(PROFILE_SEED | 0) % 71);
+        const charging = ((Math.abs(PROFILE_SEED | 0) >> 7) & 1) === 1;
+        state = {
+          charging: charging,
+          level: Math.round(pct) / 100,
+          chargingTime: charging ? (pct >= 99 ? 0 : 60 * (100 - pct)) : Infinity,
+          dischargingTime: charging ? Infinity : 60 * pct
+        };
+      }
+
+      const orig = nav.getBattery;
+      const hooked = makeNative(function getBattery() {
+        return orig.apply(this, arguments).then(function (manager) {
+          try {
+            // Shadow the prototype getters on the real BatteryManager rather
+            // than returning a stand-in, so instanceof and the change events
+            // keep working.
+            for (const key of Object.keys(state)) {
+              const value = state[key];
+              Object.defineProperty(manager, key, {
+                get: makeNative(function () { return value; }, `get ${key}`),
+                configurable: true,
+                enumerable: true
+              });
+            }
+          } catch (e) {}
+          return manager;
+        });
+      }, 'getBattery');
+      try {
+        Object.defineProperty(hooked, '__mp_hooked', { value: true, enumerable: false });
+      } catch (e) {}
+      nav.getBattery = hooked;
+    } catch (e) {}
+  }
+
   // Apply to main window
   applyTimezoneSpoofs(window);
   applyWebRTCSpoofs(window);
   applyAudioSpoofs(window);
   applyRectSpoofs(window);
   applyWebGPUSpoofs(window);
+  applyBatterySpoofs(window);
 
   // ==========================================
   // NAVIGATOR.PLUGINS + MIMETYPES CONSISTENCY
