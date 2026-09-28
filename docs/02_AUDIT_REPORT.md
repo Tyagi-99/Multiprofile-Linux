@@ -72,7 +72,7 @@ honest-reporting defects rather than deferring them.
 | **F8** | ✅ Medium | Security | API silently accepts and persists **unknown fields** — **fixed** | done |
 | **F9** | ❌ Medium | UX | No list virtualization; 25/page pagination | 1 wk |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
-| **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint | 1–2 wk |
+| **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint — **identity path done**, rest is policy | 1–2 wk |
 | **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
 | **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
 | **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
@@ -698,7 +698,7 @@ Uncommitted in the working tree.
 
 ---
 
-### F11 — 🟡 MEDIUM: 138 failure-swallowing handlers
+### F11 — 🟡 MEDIUM: 138 failure-swallowing handlers — **IDENTITY PATH DONE**
 
 `pyproject.toml` deliberately deselects `BLE001` and `S110`, documenting why.
 Current count: **103 blind-except + 35 try-except-pass**.
@@ -711,6 +711,56 @@ silent-failure bug are the same problem seen twice.
 **Fix:** not a blanket cleanup. Classify: handlers on the identity/security path
 must record a structured failure that reaches `/api/health` and the launch notes;
 cosmetic paths can keep `pass` with a comment.
+
+> **Resolved for the identity path.** New
+> [`browser/identity_faults.py`](../src/multiprofile/browser/identity_faults.py) is
+> the sink: a bounded, thread-safe registry of `IdentityFault` records, each a
+> stable `code`, a one-line `detail`, and the `where` that swallowed it — because
+> the whole problem is that the failure used to be invisible from outside that
+> function. The shape follows `engine.py`'s `source: "unavailable"` record, which
+> was already doing this for one case; this generalises it rather than redoing it.
+>
+> A fault reaches the operator in both places the finding asks for:
+>
+> - **`/api/health`** gains an `identity` block — `faults`, `faultCount`,
+>   `byCode`, `truncated`. It is always present, because `faults: []` is a
+>   statement ("nothing has been swallowed since this process started") and a
+>   block that appeared only on trouble could not be used to confirm the
+>   absence of it.
+> - **The launch notes.** `launch_profile` clears the profile's faults at the
+>   start, so a launch reports its own and not the last one's, and sweeps in any
+>   fault raised elsewhere on the identity path before the wire assertion runs.
+>
+> Recording is `log.warning`, not `log.debug`: an identity step that did not
+> happen is not a detail. And `record()` cannot raise, whatever it is handed —
+> it is called from inside `except` blocks, and a recorder that could throw would
+> turn a swallowed failure into a crash, which is worse than the bug it reports
+> and is how this policy would get reverted.
+>
+> Call sites converted, chosen for consequence rather than count:
+>
+> | Code | Was | Consequence it was hiding |
+> |---|---|---|
+> | `preset_unknown` / `preset_unreadable` / `preset_unserializable` | `return None` | a profile naming a `deviceId` built **without that device** — F8's story in code |
+> | `preset_config_unreadable` | `log.debug` | falls back to the pool UA, so the profile does not claim the device it was given |
+> | `preset_hints_unreadable` | `log.debug` | UA from the preset, hints from the fingerprint — the exact UA/hints disagreement F5 exists to prevent |
+> | `inject_connect_failed` | warning only | no hooks, no proxy auth, no cookies reached the browser |
+> | `targets_unenumerable` | `log.debug` | already-open pages went uninjected, i.e. browsing as the host |
+> | `cdp_session_unavailable`, `device_emulation_incomplete`, `ua_override_failed`, `identity_session_error` | note only | now also visible process-wide, not just in one profile's notes |
+>
+> Left alone deliberately: `PinnedCdpSession.close()`'s `pass` (a socket that
+> will not close changes no identity), retry loops that record on final failure,
+> and everything off the identity path. F11 remains open for those; what is
+> closed is the part where a profile's identity could be quietly wrong.
+>
+> Verified: 18 tests in `tests/test_identity_faults.py`, covering the record, the
+> bound, per-profile scoping, both sinks, and the real call sites. One of them
+> pins a bug found while writing this: the note sweep first skipped every fault
+> whose `where` began with `browser.launcher`, on the assumption that the
+> launcher notes its own — but the two faults in `_resolve_wire_identity` are
+> launcher-scope and have no notes list to write to, so that rule hid them
+> completely. The sweep now skips only the exact scope the note-writing helper
+> stamps.
 
 ---
 
@@ -923,7 +973,7 @@ meant to reach empty; it now holds one key instead of three.
 | Item | Status | Note |
 |---|---|---|
 | Separation of concerns | ✅ | clean api/browser/storage/fingerprint split |
-| Error handling | 🟡 | F11 — 138 swallowing handlers. F1 was the consequence; the identity path now asserts instead of swallowing |
+| Error handling | 🟡 | F11 — 138 swallowing handlers. F1 was the consequence; the identity path now asserts instead of swallowing, and what it cannot assert it **records** as a fault reaching `/api/health` and the launch notes |
 | Logging | 🟡 | works; no structure, no rotation, no crash reporting |
 | Crash recovery | ✅ | `db.recover()` at startup; supervisor watchdog (F10 fixed) |
 | Hardcoded secrets | ✅ | scan clean |
@@ -1040,7 +1090,7 @@ version from the real binary — done: `engine.py`, see the ✅ block above) · 
 surfaced **F17**, a Critical host-IP leak — both routing fixes are done, and
 `fingerprintStrategy` is the one piece of F16 left, awaiting a product
 decision) ·
-F11 on the identity path only · close the residual leak F1 left behind: a tab's first document request is issued before its per-target UA
+F11 on the identity path only (done: `identity_faults.py`, see the block above) · close the residual leak F1 left behind: a tab's first document request is issued before its per-target UA
 override lands, so `sec-ch-ua-platform` on that one request still reflects the host.
 Closing it means rewriting headers in the browser process (browser-level `Fetch`
 interception).

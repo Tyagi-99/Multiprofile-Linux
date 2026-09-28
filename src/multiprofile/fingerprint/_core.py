@@ -367,20 +367,52 @@ def device_preset_for_profile(profile: dict[str, Any] | None) -> dict[str, Any] 
 
     Guarded import: returns None when the devices package is unavailable
     or the id is unknown, so callers degrade gracefully.
+
+    "Degrade gracefully" means the profile is built *without the preset it
+    asked for* -- the exact shape of the bug F8 was about, where a device
+    selection was accepted and then silently never applied. A profile naming a
+    deviceId and not getting one is a fault, not a detail, so each route out of
+    here records one (F11). No deviceId at all is not a fault: that is a
+    profile that never asked.
     """
     device_id = (profile or {}).get("deviceId")
     if not device_id:
         return None
+
+    from ..browser.identity_faults import record
+
+    profile_id = str((profile or {}).get("id") or "") or None
     try:
         from ..devices.registry import DeviceRegistry
         preset = DeviceRegistry().get(device_id)
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - recorded, not hidden
+        record(
+            "preset_unreadable",
+            f"device preset '{device_id}' could not be read ({e}); the profile is "
+            "being built without it and will not look like that device",
+            where="fingerprint._core.device_preset_for_profile",
+            profile_id=profile_id,
+        )
         return None
     if preset is None:
+        record(
+            "preset_unknown",
+            f"device preset '{device_id}' is not in the registry; the profile is "
+            "being built without it and will not look like that device",
+            where="fingerprint._core.device_preset_for_profile",
+            profile_id=profile_id,
+        )
         return None
     try:
         return preset.to_dict()
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - recorded, not hidden
+        record(
+            "preset_unserializable",
+            f"device preset '{device_id}' could not be serialised ({e}); the "
+            "profile is being built without it",
+            where="fingerprint._core.device_preset_for_profile",
+            profile_id=profile_id,
+        )
         return None
 
 

@@ -57,6 +57,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import identity_faults
 from .cdp_identity import UA_OVERRIDE_METHOD
 
 log = logging.getLogger("multiprofile.browser.cdp_inject")
@@ -209,6 +210,16 @@ class IdentityInjector:
                 items = json.loads(resp.read().decode("utf-8"))
         except Exception as e:  # noqa: BLE001 - auto-attach still covers new tabs
             log.debug("could not enumerate existing targets for %s: %s", self.profile_id, e)
+            # Auto-attach covers targets opened from here on, so this is not
+            # fatal -- but any page ALREADY open goes uninjected, and an
+            # uninjected page is one browsing as the host (F11).
+            identity_faults.record(
+                "targets_unenumerable",
+                f"already-open page targets could not be listed ({e}); the hooks were "
+                "installed on new targets only, so any page already open is unmasked",
+                where="browser.cdp_inject._existing_page_targets",
+                profile_id=self.profile_id,
+            )
             return []
         return [
             t["id"]
@@ -234,6 +245,13 @@ class IdentityInjector:
         except Exception as e:  # noqa: BLE001 - a failed attach is reported, not raised
             self.status.error = f"cdp_connect_failed: {e}"
             log.warning("identity injection could not connect for %s: %s", self.profile_id, e)
+            identity_faults.record(
+                "inject_connect_failed",
+                f"the identity injector could not attach over CDP ({e}); no hooks, no "
+                "proxy auth and no cookies reached this browser",
+                where="browser.cdp_inject.CdpInjector.start",
+                profile_id=self.profile_id,
+            )
             return self.status
 
         # waitForDebuggerOnStart is what makes this airtight: a new page is

@@ -12,6 +12,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 from .. import __version__
 from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
+from ..browser import identity_faults
 from ..browser import manager as browser_manager
 from ..browser.health import get_all_health, get_profile_health
 from ..browser.launcher import extension_src, find_chrome, launch_profile, stop_profile
@@ -393,6 +394,10 @@ def create_app() -> Flask:
                 # authority. source="unavailable" means the claim on the wire
                 # was never compared to the engine running it (F5).
                 "engine": detect_engine_version(chrome_path).to_dict(),
+                # Steps on the identity path that failed quietly (F11).
+                # "faults": [] is a statement, not an absence: nothing has
+                # been swallowed since this process started.
+                "identity": identity_faults.health_summary(),
                 "reaped": reaped,
             }
         )

@@ -40,6 +40,7 @@ from ..storage import db as _db
 from ..storage.profiles import get_profile, set_runtime, update_profile
 from ..storage.state import InvalidStateTransition, ProfileState
 from ..storage.xdg import chrome_profile_dir, purge_legacy_extension_staging
+from . import identity_faults
 from . import manager as browser_manager
 from .cdp_window import allocate_localhost_port, wait_for_cdp
 from .grid import Rect
@@ -373,15 +374,25 @@ def _resolve_wire_identity(
     """
     from ..engine import align_ua_metadata, align_ua_string
     from .cdp_identity import build_ua_override_params
+    from .identity_faults import record as _record_fault
 
     engine = detect_engine_version()
+    profile_id = str(profile.get("id") or "") or None
     explicit_ua = (profile.get("userAgent") or "").strip()
     preset_cfg: dict[str, Any] = {}
     if device_preset is not None:
         try:
             preset_cfg = device_preset.to_mobile_config_dict() or {}
-        except Exception:  # noqa: BLE001 - a broken preset must not lose the UA
+        except Exception as e:  # noqa: BLE001 - a broken preset must not lose the UA
             log.debug("preset config unreadable while resolving identity", exc_info=True)
+            _record_fault(
+                "preset_config_unreadable",
+                f"device preset '{getattr(device_preset, 'id', '?')}' could not be read "
+                f"({e}); falling back to the pool UA, so this profile will not claim "
+                "the device it was given",
+                where="browser.launcher._resolve_wire_identity",
+                profile_id=profile_id,
+            )
     preset_ua = (preset_cfg.get("user_agent") or "").strip()
 
     if explicit_ua:
@@ -398,13 +409,46 @@ def _resolve_wire_identity(
             from ..fingerprint.mobile import MobileProfileConfig
 
             metadata = MobileProfileConfig.from_preset_dict(preset_cfg).user_agent_metadata()
-        except Exception:  # noqa: BLE001 - fall back to fingerprint-derived hints
+        except Exception as e:  # noqa: BLE001 - fall back to fingerprint-derived hints
             log.debug("preset client hints unreadable; using fingerprint", exc_info=True)
             metadata = None
+            # The UA above may already be the preset's while these hints are
+            # not, which is the one combination F5 works to prevent: a UA and
+            # a set of client hints describing different browsers.
+            _record_fault(
+                "preset_hints_unreadable",
+                f"device preset client hints could not be built ({e}); the hints now "
+                "come from the fingerprint and may disagree with the preset's UA",
+                where="browser.launcher._resolve_wire_identity",
+                profile_id=profile_id,
+            )
         if metadata is not None and not explicit_ua:
             metadata = align_ua_metadata(metadata, engine)
 
     return ua, build_ua_override_params(fingerprint, ua, metadata=metadata)
+
+
+_LAUNCHER_SCOPE = "browser.launcher"
+
+
+def _fault(notes: list[str], code: str, detail: str, *, profile_id: str | None) -> None:
+    """Record an identity fault and write it into this launch's notes (F11).
+
+    Recording carries the failure to ``/api/health``, for an operator who is
+    not reading one profile's notes; the note carries it to the operator who
+    is. Both, from one call, so the two cannot describe different things.
+
+    The ``where`` is deliberately the bare ``browser.launcher``: that exact
+    value is what marks a fault as *already noted*, so the sweep at the end of
+    a launch can add the ones raised elsewhere without printing these twice. A
+    launcher fault recorded outside this helper uses a more specific ``where``
+    (``browser.launcher._resolve_wire_identity``) and is swept like any other,
+    because nothing noted it at its call site.
+    """
+    fault = identity_faults.record(
+        code, detail, where=_LAUNCHER_SCOPE, profile_id=profile_id
+    )
+    notes.append(fault.note() if fault else f"IDENTITY FAULT [{code}] {detail}")
 
 
 def _engine_version_notes(ua: str, explicit_ua: str) -> list[str]:
@@ -664,6 +708,9 @@ def launch_profile(
         return {"error": f"Profile not found: {profile_id}", "errors": ["profile_not_found"], "ok": False}
 
     _record_state(profile_id, ProfileState.STARTING)
+
+    # This launch reports its own identity faults, not the last one's (F11).
+    identity_faults.clear_for(profile_id)
 
     slot_held = _slot_held
     if not slot_held:
@@ -1020,9 +1067,12 @@ def launch_profile(
 
             _sess = open_pinned_cdp_session(debug_port)
             if _sess is None:
-                notes.append(
-                    "CDP identity session FAILED (no page target) — UA/client-hints "
-                    "override rests on the injection session alone"
+                _fault(
+                    notes,
+                    "cdp_session_unavailable",
+                    "no CDP page target for the identity session; the UA/client-hints "
+                    "override rests on the injection session alone",
+                    profile_id=profile_id,
                 )
             else:
                 if device_preset is not None:
@@ -1038,9 +1088,13 @@ def launch_profile(
                             f"{_ok}/{len(_results)} steps)"
                         )
                     else:
-                        notes.append(
-                            f"CDP device emulation FAILED ({device_preset.id}: "
-                            f"{_ok}/{len(_results)} steps)"
+                        _fault(
+                            notes,
+                            "device_emulation_incomplete",
+                            f"device emulation for '{device_preset.id}' applied "
+                            f"{_ok}/{len(_results)} steps; the profile is part-way "
+                            "between the device it claims and the host",
+                            profile_id=profile_id,
                         )
                     for _r in _results:
                         if not _r.get("ok"):
@@ -1053,12 +1107,32 @@ def launch_profile(
                         "(closed only when the browser exits)"
                     )
                 else:
-                    notes.append("CDP UA/client-hints override FAILED")
+                    _fault(
+                        notes,
+                        "ua_override_failed",
+                        "the held-session UA/client-hints override did not apply; "
+                        "the profile may be sending the host's own identity (F1)",
+                        profile_id=profile_id,
+                    )
                 # Held for the browser's lifetime, not for the length of this
                 # function: the overrides above die with this session.
                 _hold_device_session(profile_id, proc.pid, _sess)
         except Exception as e:  # noqa: BLE001 - never fatal to a launch
-            notes.append(f"CDP identity session skipped: {e}")
+            _fault(
+                notes,
+                "identity_session_error",
+                f"the whole CDP identity step was skipped ({e}); neither the device "
+                "emulation nor the UA/client-hints override was applied",
+                profile_id=profile_id,
+            )
+
+        # Faults raised anywhere else on the identity path -- resolving the wire
+        # identity, reading a preset, attaching to targets -- have no route to
+        # this profile's notes on their own (F11). Only the ones _fault() already
+        # wrote are skipped, matched on the exact scope it stamps them with.
+        for _f in identity_faults.faults_for(profile_id):
+            if _f.where != _LAUNCHER_SCOPE:
+                notes.append(_f.note())
 
         # ------------------------------------------------------------------
         # Prove it. Compare the headers the browser actually sends against
