@@ -764,6 +764,7 @@
               applyRectSpoofs(win);
               applyWebGPUSpoofs(win);
               applyBatterySpoofs(win);
+              applySpeechSpoofs(win);
             } catch(e) {}
           }
           return win;
@@ -1253,6 +1254,122 @@
     } catch (e) {}
   }
 
+
+  // ==========================================
+  // 15. SPEECH SYNTHESIS VOICES
+  // ==========================================
+  // speechSynthesis.getVoices() returned an empty array. Measured on this
+  // host, both in a profile and in stock Chromium 151:
+  //
+  //   voices: 0
+  //
+  // That is normal for a Linux box with no speech-dispatcher installed, and
+  // impossible for the Windows machine the profile claims to be: Windows
+  // ships Microsoft David and Zira with the OS, so every Chrome on Windows
+  // enumerates at least those. An empty voice list on a Win32 navigator is a
+  // platform contradiction, and it is one of the cheapest checks a probe can
+  // run -- one property access, no permission, no user gesture.
+  //
+  // The voices are built against the real SpeechSynthesisVoice prototype so
+  // instanceof holds. The core set is deliberately NOT randomised per
+  // profile: nearly every Windows install has exactly David and Zira, so
+  // identical lists are what real machines look like here, and adding noise
+  // would make profiles *less* plausible rather than more. Only the optional
+  // language packs vary, because those genuinely differ between machines.
+  function applySpeechSpoofs(scope) {
+    try {
+      const synth = scope.speechSynthesis;
+      if (!synth || typeof synth.getVoices !== 'function') return;
+      if (synth.getVoices.__mp_hooked) return;
+
+      const isWindows = /Win/i.test(TARGET_PLATFORM || '');
+      const isMac = /Mac/i.test(TARGET_PLATFORM || '');
+      if (!isWindows && !isMac) return;  // a Linux claim on a Linux host is honest
+
+      const lang = TARGET_LANGUAGE || 'en-US';
+      let core, optional;
+      if (isWindows) {
+        core = [
+          ['Microsoft David - English (United States)', 'en-US'],
+          ['Microsoft Zira - English (United States)', 'en-US']
+        ];
+        optional = [
+          ['Microsoft Mark - English (United States)', 'en-US'],
+          ['Microsoft Hazel - English (Great Britain)', 'en-GB'],
+          ['Microsoft Catherine - English (Australia)', 'en-AU']
+        ];
+      } else {
+        core = [['Alex', 'en-US'], ['Samantha', 'en-US'], ['Daniel', 'en-GB']];
+        optional = [['Victoria', 'en-US'], ['Fred', 'en-US'], ['Karen', 'en-AU']];
+      }
+
+      // Chrome's own network voices, present on every platform.
+      const google = [
+        ['Google US English', 'en-US'],
+        ['Google UK English Female', 'en-GB'],
+        ['Google UK English Male', 'en-GB']
+      ];
+
+      const chosen = core.concat(
+        optional.filter((_, i) => ((Math.abs(PROFILE_SEED | 0) >> i) & 1) === 1)
+      );
+
+      const Proto = scope.SpeechSynthesisVoice ? scope.SpeechSynthesisVoice.prototype : null;
+      // Exactly one voice is the default. Marking every local voice whose
+      // language matches would have flagged three at once, which no browser
+      // does and which is a more specific anomaly than the empty list it
+      // replaced.
+      let defaultTaken = false;
+      const build = (name, voiceLang, local) => {
+        const isDefault = !defaultTaken && local && voiceLang === lang;
+        if (isDefault) defaultTaken = true;
+        const voice = Proto ? Object.create(Proto) : {};
+        const props = {
+          name: name,
+          lang: voiceLang,
+          default: isDefault,
+          localService: local,
+          voiceURI: local && isMac
+            ? 'com.apple.speech.synthesis.voice.' + name.toLowerCase()
+            : name
+        };
+        for (const key of Object.keys(props)) {
+          const value = props[key];
+          try {
+            Object.defineProperty(voice, key, {
+              get: makeNative(function () { return value; }, `get ${key}`),
+              configurable: true,
+              enumerable: true
+            });
+          } catch (e) {}
+        }
+        return voice;
+      };
+
+      const voices = chosen.map(v => build(v[0], v[1], true))
+        .concat(google.map(v => build(v[0], v[1], false)));
+
+      const hooked = makeNative(function getVoices() { return voices.slice(); }, 'getVoices');
+      try {
+        Object.defineProperty(hooked, '__mp_hooked', { value: true, enumerable: false });
+      } catch (e) {}
+      try {
+        Object.defineProperty(synth, 'getVoices', {
+          value: hooked, configurable: true, writable: true
+        });
+      } catch (e) { synth.getVoices = hooked; }
+
+      // Sites commonly wait for voiceschanged before reading the list; with
+      // a synchronous answer available the event still has to arrive, or
+      // those sites hang where a real browser would not.
+      try {
+        scope.setTimeout(function () {
+          try { synth.dispatchEvent(new scope.Event('voiceschanged')); } catch (e) {}
+        }, 0);
+      } catch (e) {}
+    } catch (e) {}
+  }
+
   // Apply to main window
   applyTimezoneSpoofs(window);
   applyWebRTCSpoofs(window);
@@ -1260,6 +1377,7 @@
   applyRectSpoofs(window);
   applyWebGPUSpoofs(window);
   applyBatterySpoofs(window);
+  applySpeechSpoofs(window);
 
   // ==========================================
   // NAVIGATOR.PLUGINS + MIMETYPES CONSISTENCY
