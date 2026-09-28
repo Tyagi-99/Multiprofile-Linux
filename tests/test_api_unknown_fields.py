@@ -143,24 +143,29 @@ def test_a_client_cannot_dictate_a_server_owned_field(client):
 # 3. Recognised but unimplemented: reported, never silently kept
 # --------------------------------------------------------------------------
 
-def test_the_wizards_dead_keys_are_reported_not_refused(client):
-    """Our own wizard sends three keys nothing reads.
+def test_a_dead_key_is_reported_not_refused(client):
+    """Our own wizard sends keys nothing reads.
 
     Refusing them would 400 every creation the wizard makes, so they are
-    accepted and named in ``warnings[]``. The gap itself is an open finding.
+    accepted and named in ``warnings[]``. Driven off the registry rather than a
+    list of names, because this tier is a defect list that shrinks: it held
+    three keys when F8 landed, and `networkMode` and `gatewayId` left it when
+    F16 wired the route up for real.
     """
-    r = _create(
-        client,
-        name="wizard",
-        deviceId="iphone-16",
-        fingerprintStrategy="stable",
-        networkMode="gateway",
-        gatewayId="gw_1",
-    )
+    payload = {"name": "wizard", "deviceId": "iphone-16"}
+    payload.update({key: "x" for key in V.PROFILE_FIELDS_UNIMPLEMENTED})
+    r = _create(client, **payload)
     assert r.status_code == 200, r.get_json()
     warnings = " ".join(r.get_json()["warnings"])
-    for key in ("fingerprintStrategy", "networkMode", "gatewayId"):
+    for key in V.PROFILE_FIELDS_UNIMPLEMENTED:
         assert key in warnings, f"{key} was accepted without a word: {warnings}"
+
+
+def test_the_route_keys_have_left_the_unimplemented_tier(client):
+    """F16: networkMode and gatewayId are honoured now, not merely tolerated."""
+    assert "networkMode" not in V.PROFILE_FIELDS_UNIMPLEMENTED
+    assert "gatewayId" not in V.PROFILE_FIELDS_UNIMPLEMENTED
+    assert {"networkMode", "gatewayId"} <= V.PROFILE_FIELDS
 
 
 def test_a_setting_that_cannot_take_effect_is_not_persisted(client):

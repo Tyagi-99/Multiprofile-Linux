@@ -543,16 +543,154 @@ def network_config_for_profile(profile: dict[str, Any]) -> NetworkConfig:
     profile in a pool precisely so the pool decides. If the pool cannot
     supply a member the result is a BLOCKED config, never DIRECT -- falling
     back to the host IP is the one outcome a proxy pool must never produce.
+
+    A profile asking for a remote gateway is resolved the same way and with
+    the same rule: the gateway's endpoint is read from gateways.json, and a
+    gateway that is gone or has no endpoint blocks rather than falling back.
+
+    The last step applies that rule to *every* route (F16): if the profile
+    asked for something other than DIRECT and what came back is DIRECT, the
+    request did not resolve, and a silent DIRECT is the one answer that must
+    never be given.
     """
     pool_id = profile.get("poolId") or profile.get("pool_id")
     if pool_id:
         return _network_config_from_pool(str(pool_id), profile)
 
+    requested = _requested_network_mode(profile)
+    if requested == NetworkMode.REMOTE_GATEWAY:
+        return _network_config_from_gateway(profile)
+
     nc_raw = profile.get("networkConfig")
     if nc_raw and isinstance(nc_raw, dict) and nc_raw.get("mode"):
-        return NetworkConfig.from_dict(nc_raw)
-    # Legacy migration: build from scattered fields
-    return NetworkConfig.from_legacy_profile(profile)
+        resolved = NetworkConfig.from_dict(nc_raw)
+    else:
+        # Legacy migration: build from scattered fields
+        resolved = NetworkConfig.from_legacy_profile(profile)
+    return _refuse_silent_direct(resolved, requested, profile)
+
+
+# What the console's own vocabulary means. The wizard sends lower-case words
+# ("direct", "gateway", "socks5") while NetworkConfig speaks the upper-case
+# enum, and for a long time nothing translated between the two -- the wizard's
+# network step reached no code at all (F16).
+_REQUESTED_MODE_WORDS = {
+    "direct": NetworkMode.DIRECT,
+    "none": NetworkMode.DIRECT,
+    "gateway": NetworkMode.REMOTE_GATEWAY,
+    "remote_gateway": NetworkMode.REMOTE_GATEWAY,
+    "http": NetworkMode.HTTP_PROXY,
+    "http_proxy": NetworkMode.HTTP_PROXY,
+    "https": NetworkMode.HTTPS_PROXY,
+    "https_proxy": NetworkMode.HTTPS_PROXY,
+    "socks5": NetworkMode.SOCKS5,
+    "socks5h": NetworkMode.SOCKS5,
+    "custom": NetworkMode.HTTP_PROXY,
+}
+
+
+def _requested_network_mode(profile: dict[str, Any]) -> NetworkMode | None:
+    """The route the operator asked for, in whatever spelling they asked it.
+
+    Returns None when the profile expresses no preference, which is not the
+    same as asking for DIRECT: "no preference" may be satisfied by the legacy
+    fields, while an explicit request that cannot be satisfied must block.
+    """
+    raw = profile.get("networkMode")
+    if not raw:
+        nc = profile.get("networkConfig")
+        if isinstance(nc, dict):
+            raw = nc.get("mode")
+    if not raw:
+        # A bare gatewayId is a request for that gateway.
+        return NetworkMode.REMOTE_GATEWAY if profile.get("gatewayId") else None
+    return _REQUESTED_MODE_WORDS.get(str(raw).strip().lower())
+
+
+def _refuse_silent_direct(
+    resolved: NetworkConfig,
+    requested: NetworkMode | None,
+    profile: dict[str, Any],
+) -> NetworkConfig:
+    """Never answer a request for a route with an unannounced DIRECT.
+
+    The legacy path infers the route from scattered proxy fields, so a profile
+    that asked for SOCKS5 with no host -- or, before this, for a gateway --
+    came back as a perfectly ordinary DIRECT config. Nothing downstream could
+    tell that apart from a profile the operator deliberately set to direct, so
+    the browser launched on the host IP and the launch was reported healthy.
+    """
+    if requested is None or requested == NetworkMode.DIRECT:
+        return resolved
+    if resolved.blocked_reason or resolved.mode != NetworkMode.DIRECT:
+        return resolved
+    return NetworkConfig(
+        mode=NetworkMode.DIRECT,
+        webrtc_policy=_map_webrtc(profile.get("webrtcMode") or "default"),
+        blocked_reason=(
+            f"This profile asks for {requested.value}, but no usable endpoint could be "
+            "resolved from its settings. Refusing to launch on the host IP "
+            "(fail-closed): set the proxy details, pick a pool or gateway, or "
+            "choose Direct Connection."
+        ),
+    )
+
+
+def _network_config_from_gateway(profile: dict[str, Any]) -> NetworkConfig:
+    """Resolve a profile's own remote gateway into a route.
+
+    Mirrors ``_network_config_from_pool``, including its refusal to fall back:
+    a gateway that no longer exists, or that carries no endpoint, blocks the
+    launch instead of quietly becoming DIRECT.
+    """
+    from .storage.gateways import get_gateway
+
+    webrtc = _map_webrtc(profile.get("webrtcMode") or "default")
+
+    def blocked(reason: str) -> NetworkConfig:
+        return NetworkConfig(mode=NetworkMode.DIRECT, webrtc_policy=webrtc, blocked_reason=reason)
+
+    gateway_id = str(profile.get("gatewayId") or "").strip()
+    if not gateway_id:
+        nc = profile.get("networkConfig")
+        if isinstance(nc, dict):
+            gateway_id = str(nc.get("gatewayId") or "").strip()
+    if not gateway_id:
+        return blocked(
+            "This profile is set to use a remote gateway but names none. "
+            "Pick a gateway, or choose Direct Connection."
+        )
+
+    # safe=False: this endpoint is about to authenticate against a real proxy,
+    # so it needs the actual password -- get_gateway() masks it by default and
+    # a masked password would reach Chrome as "***".
+    gw = get_gateway(gateway_id, safe=False)
+    if not gw:
+        return blocked(
+            f"Remote gateway '{gateway_id}' no longer exists. "
+            "Pick another gateway or clear it."
+        )
+    host = str(gw.get("host") or "").strip()
+    if not host:
+        return blocked(
+            f"Remote gateway '{gw.get('label') or gateway_id}' has no endpoint configured."
+        )
+
+    scheme = str(gw.get("scheme") or "socks5").lower()
+    return NetworkConfig(
+        mode=NetworkMode.REMOTE_GATEWAY,
+        proxy=ProxyConfig(
+            scheme=scheme,
+            host=host,
+            port=int(gw.get("port") or 1080),
+            username=gw.get("username") or None,
+            password=gw.get("password") or None,
+        ),
+        gateway_id=gateway_id,
+        webrtc_policy=webrtc,
+        # Gateways inherit the fail-closed default, exactly as pools do.
+        proxy_fallback=ProxyFallback.BLOCK,
+    )
 
 
 def _network_config_from_pool(pool_id: str, profile: dict[str, Any]) -> NetworkConfig:

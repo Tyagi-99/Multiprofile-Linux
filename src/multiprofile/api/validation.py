@@ -57,8 +57,16 @@ PROFILE_FIELDS = frozenset({
     "clientId", "poolId", "pool_id", "tags", "seed", "timezone", "language",
     "webrtcMode", "deviceId", "device_id", "status",
     "proxyHost", "proxyPort", "proxyUser", "proxyPass", "proxyType", "customProxy",
-    "networkConfig", "webglPolicy", "webgl", "isMobile",
+    "networkConfig", "networkMode", "gatewayId", "webglPolicy", "webgl", "isMobile",
 })
+
+# The console's own spelling of a route, which is what the wizard sends.
+# Resolved by ``network._requested_network_mode``; kept lower-case here
+# because that is the vocabulary the UI and the legacy proxyType share.
+REQUESTED_NETWORK_MODES = (
+    "direct", "none", "gateway", "remote_gateway",
+    "http", "http_proxy", "https", "https_proxy", "socks5", "socks5h", "custom",
+)
 
 # 2. The server owns these. There is no GET /api/profiles/<id>, so a
 #    read-modify-write client reads a row from GET /api/profiles and PUTs it
@@ -96,14 +104,6 @@ PROFILE_FIELDS_UNIMPLEMENTED = {
     "fingerprintStrategy": (
         "no backend code reads it; the fingerprint is derived from the profile "
         "seed and its device preset"
-    ),
-    "networkMode": (
-        "the route is read from networkConfig.mode (upper-case: "
-        + ", ".join(NETWORK_MODES) + ") or the legacy proxy* fields"
-    ),
-    "gatewayId": (
-        "read only for a proxy pool's members; a profile reaches a gateway "
-        "through poolId or networkConfig"
     ),
 }
 
@@ -351,6 +351,25 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
         v_str(payload["language"], "language", min_len=1, max_len=32)
     if "webrtcMode" in payload:
         v_enum(payload["webrtcMode"], "webrtcMode", ("default", "disabled", "proxy"), case_insensitive=True)
+    if "networkMode" in payload and payload["networkMode"] not in (None, ""):
+        v_enum(
+            payload["networkMode"], "networkMode",
+            REQUESTED_NETWORK_MODES, case_insensitive=True,
+        )
+    if "gatewayId" in payload and payload["gatewayId"] is not None:
+        v_str(payload["gatewayId"], "gatewayId", min_len=1, max_len=128)
+    # A gateway route with no gateway named cannot resolve, and the launch would
+    # be refused later with a less useful message. Say so at the door instead.
+    if str(payload.get("networkMode") or "").strip().lower() in ("gateway", "remote_gateway"):
+        named = payload.get("gatewayId") or (
+            (payload.get("networkConfig") or {}).get("gatewayId")
+            if isinstance(payload.get("networkConfig"), dict) else None
+        )
+        if not named:
+            raise ValidationError(
+                "gatewayId",
+                "required when networkMode is a gateway: name the gateway to route through",
+            )
 
     device_id = payload.get("deviceId", payload.get("device_id"))
     if device_id is not None and device_id != "":

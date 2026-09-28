@@ -50,10 +50,11 @@ could not be resolved launched on the **host IP** and reported `ok: True`, with 
 note reading "Network mode: DIRECT" and the wire assertion confirming the spoofed
 identity. A perfect fingerprint on the operator's own IP is the one failure worse
 than no spoofing at all, and it was reachable from the ordinary console: put a
-profile in a proxy pool, then remove the pool's members. The fail-closed guard
-existed and was correct; the launcher never consulted it. The thread that found it
-started as a validation nitpick about unknown JSON keys, which is the argument for
-fixing small honest-reporting defects rather than deferring them.
+profile in a proxy pool, remove the pool's members. The fail-closed guard existed
+and was correct; the launcher never consulted it. Fixed, along with the routing
+half of F16 that led to it. The thread that found it started as a validation
+nitpick about unknown JSON keys, which is the argument for fixing the small
+honest-reporting defects rather than deferring them.
 
 ---
 
@@ -76,7 +77,7 @@ fixing small honest-reporting defects rather than deferring them.
 | **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
 | **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
 | **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
-| **F16** | ⚠️ **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reach nothing** — found by F8 | 1 wk + policy |
+| **F16** | 🟡 **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reach nothing** — found by F8; routing **fixed**, fingerprint step still open | policy |
 | **F17** | ✅ **Critical** | Security | An **unresolvable route launched on the host IP** and reported success — found by F16 | done |
 
 ---
@@ -759,9 +760,8 @@ Found while fixing F16, and the more serious of the two by a wide margin.
 `blocked_reason`, on a **DIRECT-looking** config — `mode=DIRECT`, `proxy=None`.
 That shape is deliberate and the code says why: `needs_proxy_check()` is False
 when `proxy` is None, so a proxy mode carrying no proxy would sail through the
-gate, and the refusal is stated outright rather than encoded as an empty proxy.
-`check_proxy_before_launch` honours it, checks it *first*, and its comment notes
-that DIRECT-looking configs reach it too.
+gate. `check_proxy_before_launch` honours `blocked_reason` and checks it *first*,
+with a comment noting that DIRECT-looking configs reach it too.
 
 The launcher then called that gate like this:
 
@@ -772,8 +772,8 @@ if settings.proxy_check_enabled and net.needs_proxy_check():
 
 `needs_proxy_check()` is False for every blocked config, so **the only code that
 reads `blocked_reason` sat behind a condition a blocked config can never
-satisfy** — and `proxy_check_enabled` could switch it off for everything at once.
-Measured, on a profile assigned to a pool with no enabled member:
+satisfy** — and `proxy_check_enabled` could switch it off for everything.
+Measured, a profile assigned to a pool with no enabled member:
 
 ```
 resolved : mode=DIRECT blocked_reason="Pool 'dead-pool' has no enabled member (pool is empty)"
@@ -785,40 +785,39 @@ notes     : "Network mode: DIRECT"
 
 The browser launched on the host IP, the launch was reported healthy, the note
 presented DIRECT as the intended mode, and the wire assertion confirmed the
-spoofed identity — which is the combination that makes it invisible. For this
-product that is the worst available failure: the fingerprint is perfect and the IP
-is the operator's own. `run_diagnostics` has the matching fail-closed branch and
-could have reported the truth, but nothing consulted it at launch either.
+spoofed identity — which is exactly the combination that makes it invisible. For
+this product that is the worst possible failure: the fingerprint is perfect and
+the IP is the operator's own. `run_diagnostics` had the matching fail-closed
+branch and could report the truth, but nothing consulted it at launch either.
 
 The pool code was right all along. Its docstring states that if a pool cannot
-supply a member the result is blocked, "never DIRECT — falling back to the host IP
-is the one outcome a proxy pool must never produce." The guard was correct and
+supply a member the result is blocked, "never DIRECT — falling back to the host
+IP is the one outcome a proxy pool must never produce." The guard was correct and
 unreachable.
 
 > **Resolved.** `blocked_reason` is now checked unconditionally, before the probe
 > branch and outside `proxy_check_enabled` — disabling the proxy *probe* is a
 > choice about network calls at launch, not consent to browse from the host IP
-> when a route was demanded. The launch returns `errors: ["route_unresolved"]`,
-> records `ProfileState.ERROR`, audits `launch_blocked_route_unresolved`, and
-> releases the concurrency slot it had already taken (a leaked slot would spend
-> the launch budget on launches that never happened; there is a test for that
-> specifically).
+> when a route was demanded. The launch returns
+> `errors: ["route_unresolved"]`, records `ProfileState.ERROR`, audits
+> `launch_blocked_route_unresolved`, and releases the concurrency slot it had
+> already taken (a leaked slot would burn the launch budget on launches that
+> never happened, and there is a test for that specifically).
 >
 > ```
 > LAUNCH ok : False
 > error     : Pool 'dead-pool' has no enabled member (pool is empty)
 > errors    : ['route_unresolved']
-> with MULTIPROFILE_PROXY_CHECK_ENABLED=0 → still refused
+> with MULTIPROFILE_PROXY_CHECK_ENABLED=0 -> still refused
 > ```
 >
 > Verified: `tests/test_route_fail_closed.py`, which asserts the measurement
-> above and the probe-disabled case, checks the slot is returned, and confirms the
-> ordinary dead-proxy health path still reports normally rather than being
-> shadowed by the new check.
+> above and the probe-disabled case, and checks that the ordinary dead-proxy
+> health path still reports normally rather than being shadowed by the new check.
 
 ---
 
-### F16 — ⚠️ HIGH: two wizard steps configure nothing
+### F16 — 🟡 HIGH: two wizard steps configure nothing — **ROUTING FIXED**
 
 **Files:** [`frontend/src/components/wizard/wizard-dialog.tsx:106`](../frontend/src/components/wizard/wizard-dialog.tsx#L106),
 [`network.py:551`](../src/multiprofile/network.py#L551)
@@ -867,19 +866,55 @@ be, this is the same class of defect as F1, and the same severity: a setting
 reported as applied that silently is not. It is listed HIGH for that reason, not
 for the dead fingerprint step beside it.
 
-**Not fixed here, deliberately.** Wiring the wizard's choices into
-`networkConfig.mode` is a feature with a policy question attached (what should
-`fingerprintStrategy` *mean*, given the fingerprint is seed-derived?), not an
-audit fix, and it needs a product decision on whether the strategy step should
-exist at all. F8 makes the gap loud in the meantime: each key now comes back as a
-`warnings[]` entry naming where the setting really lives, and is no longer
-persisted as though it had been applied.
+> **Routing resolved.** The console's own route vocabulary is now translated
+> where every other route is resolved, in `network_config_for_profile`:
+>
+> - `_requested_network_mode` reads the operator's request in whatever spelling
+>   it arrives — the wizard's lower-case `networkMode`, the nested upper-case
+>   `networkConfig.mode`, or a bare `gatewayId`. The *absence* of a preference is
+>   kept distinct from a request for `direct`, because only the second is a
+>   statement, and only an unmet statement may block.
+> - `_network_config_from_gateway` resolves a profile's gateway to an endpoint
+>   from `gateways.json`, mirroring `_network_config_from_pool` including
+>   `ProxyFallback.BLOCK` and its refusal to fall back. It reads the gateway with
+>   `safe=False`, since a masked password would reach Chrome as `***`. A gateway
+>   that is missing, unnamed or endpoint-less blocks.
+> - `_refuse_silent_direct` generalises the rule to every route: **if the profile
+>   asked for something other than DIRECT and DIRECT is what came back, the
+>   request did not resolve.** That also closes a case nobody had filed —
+>   `networkMode: "socks5"` with empty proxy fields was equally silent.
+>
+> `networkMode` and `gatewayId` moved from `PROFILE_FIELDS_UNIMPLEMENTED` into the
+> honoured tier, with `networkMode` validated against the console's vocabulary and
+> `gatewayId` required when the mode is a gateway — refused at the door rather
+> than at launch:
+>
+> ```
+> POST /api/profiles {"name":"wiz","networkMode":"gateway"}
+> → 400 field=gatewayId "required when networkMode is a gateway: name the gateway…"
+>
+> POST /api/profiles {"name":"wiz","networkMode":"gateway","gatewayId":"gw_7391ddcf"}
+> → 200 warnings: []
+>   resolved -> REMOTE_GATEWAY | proxy: socks5://10.0.0.9:1080
+>   launch   -> refused: pre-launch health check failed (gateway unreachable),
+>               "Launch blocked to prevent host IP exposure"
+> ```
+>
+> No frontend change was needed: the wizard's `NetMode` vocabulary
+> (`direct | http | https | socks5 | gateway`) is accepted in full, so every
+> branch it can produce now either resolves or is refused, and none of them can
+> reach a silent DIRECT. Verified in `tests/test_route_fail_closed.py`.
+>
+> This fix is only load-bearing because **F17** was fixed with it: blocking a
+> route means nothing while the launcher never reads `blocked_reason`.
 
-**Fix:** either translate the wizard's keys at the API boundary
-(`networkMode` + `gatewayId` → `networkConfig.mode`, and give
-`fingerprintStrategy` a meaning or delete it), or remove the steps. Whichever
-way, the key moves out of `PROFILE_FIELDS_UNIMPLEMENTED` — that tier is meant to
-reach empty.
+**Still open: `fingerprintStrategy`.** This half is a product decision, not an
+audit fix. The fingerprint is derived from the profile seed and its device preset,
+so `stable` is the behaviour that already exists while `preset` and `custom` have
+no meaning yet — deciding what they *should* mean, and whether the step should
+exist at all, is the open question. It stays in `PROFILE_FIELDS_UNIMPLEMENTED`, so
+the API reports it as ignored rather than persisting it as applied. That tier is
+meant to reach empty; it now holds one key instead of three.
 
 ---
 
@@ -1001,9 +1036,10 @@ one script-injection route, the cleartext proxy password is gone from disk
 **Gate 2 — make it honest and hold the line (1–2 weeks). F5 ✅ DONE. F8 ✅ DONE.**
 F5 (derive
 version from the real binary — done: `engine.py`, see the ✅ block above) · F8
-(field registry at the API boundary — done, and it surfaced **F16**, which should
-be triaged before Gate 3: a profile created as "gateway" currently browses from
-the host IP) ·
+(field registry at the API boundary — done; it surfaced **F16**, whose fix
+surfaced **F17**, a Critical host-IP leak — both routing fixes are done, and
+`fingerprintStrategy` is the one piece of F16 left, awaiting a product
+decision) ·
 F11 on the identity path only · close the residual leak F1 left behind: a tab's first document request is issued before its per-target UA
 override lands, so `sec-ch-ua-platform` on that one request still reflects the host.
 Closing it means rewriting headers in the browser process (browser-level `Fetch`
