@@ -271,8 +271,46 @@ def _decrypt_proxy_pass(value: Any) -> str | None:
     return decrypt_secret(value) or None
 
 
+# The console and the engine were speaking different languages about WebRTC.
+# WebRTCPolicy, _map_webrtc, fingerprint/_core.py and evasion.js all use
+# "default" / "disable" / "disable_non_proxied_udp"; the API validator alone
+# accepted "default" / "disabled" / "proxy". Nothing translated, so both
+# non-default values an operator could actually send fell through to DEFAULT:
+# no Chrome flags, no JS hardening, and a WebRTC privacy control that did
+# nothing while reporting itself set. After F8 tightened field validation the
+# two words that DO work became 400s, so the setting was not merely inert, it
+# was unreachable.
+#
+# One vocabulary, with the console's spellings kept as aliases so profiles
+# already stored with them start behaving instead of silently staying open.
+WEBRTC_MODES = ("default", "disable", "disable_non_proxied_udp")
+
+WEBRTC_ALIASES = {
+    "": "default",
+    "none": "default",
+    "off": "disable",
+    "disabled": "disable",          # the console's word for DISABLED
+    "block": "disable",
+    "proxy": "disable_non_proxied_udp",   # "only via the proxy" = PROXY_ONLY
+    "proxy_only": "disable_non_proxied_udp",
+    "relay": "disable_non_proxied_udp",
+}
+
+
+def normalize_webrtc_mode(mode: Any) -> str:
+    """Canonical WebRTC mode for any spelling the product has used.
+
+    Unknown values normalise to ``"default"``, which is the only safe
+    direction: a typo must not silently *weaken* a profile, and DEFAULT is
+    what the browser does unaided.
+    """
+    m = str(mode or "").lower().strip()
+    m = WEBRTC_ALIASES.get(m, m)
+    return m if m in WEBRTC_MODES else "default"
+
+
 def _map_webrtc(mode: str) -> WebRTCPolicy:
-    m = (mode or "").lower().strip()
+    m = normalize_webrtc_mode(mode)
     if m == "disable_non_proxied_udp":
         return WebRTCPolicy.PROXY_ONLY
     if m == "disable":
@@ -535,8 +573,19 @@ _POOL_SCHEME_MODES = {
 }
 
 
-def network_config_for_profile(profile: dict[str, Any]) -> NetworkConfig:
+def network_config_for_profile(
+    profile: dict[str, Any],
+    *,
+    commit: bool = False,
+) -> NetworkConfig:
     """Read NetworkConfig for a profile, migrating legacy fields if needed.
+
+    ``commit`` says this call is a launch, not a look. Only a launch may
+    record a pool decision -- persisting a sticky assignment or advancing a
+    rotate cursor -- because this function is also called by the health
+    poller, the diagnostics route and the network-health endpoint, and a
+    rotate pool that advanced once per *read* would hand a profile a
+    different egress every time anyone opened its page.
 
     A profile carrying ``poolId`` draws its route from that shared pool and
     the pool wins over the profile's own proxy fields: the operator put the
@@ -555,7 +604,7 @@ def network_config_for_profile(profile: dict[str, Any]) -> NetworkConfig:
     """
     pool_id = profile.get("poolId") or profile.get("pool_id")
     if pool_id:
-        return _network_config_from_pool(str(pool_id), profile)
+        return _network_config_from_pool(str(pool_id), profile, commit=commit)
 
     requested = _requested_network_mode(profile)
     if requested == NetworkMode.REMOTE_GATEWAY:
@@ -693,8 +742,29 @@ def _network_config_from_gateway(profile: dict[str, Any]) -> NetworkConfig:
     )
 
 
-def _network_config_from_pool(pool_id: str, profile: dict[str, Any]) -> NetworkConfig:
-    from .storage.pools import choose_member, get_pool, resolve_member
+def _network_config_from_pool(
+    pool_id: str,
+    profile: dict[str, Any],
+    *,
+    commit: bool = False,
+) -> NetworkConfig:
+    """Resolve a pooled profile's route, recording the choice on a launch.
+
+    ``choose_member`` is deliberately pure -- no disk write, no network -- so
+    that reads stay reads. Nothing ever called the writer, though, so the pool
+    never learned anything: ``assignments`` stayed empty forever and
+    ``cursor`` never moved. The "least loaded" tie-break then scored every
+    member at zero and picked the first one, so **every profile in a pool
+    egressed through the same member**: no balancing, no stickiness across
+    launches, and ``strategy: "rotate"`` that never rotated. Worse than a
+    missing feature -- profiles an operator deliberately spread across a pool
+    were all sharing one IP, which correlates them, which is the one thing a
+    pool exists to prevent.
+
+    ``pools.assign()`` was written for this and is the writer; a launch calls
+    it, a look does not.
+    """
+    from .storage.pools import assign, choose_member, get_pool, resolve_member
 
     webrtc = _map_webrtc(profile.get("webrtcMode") or "default")
 
@@ -705,7 +775,14 @@ def _network_config_from_pool(pool_id: str, profile: dict[str, Any]) -> NetworkC
     if pool is None:
         return blocked(f"Proxy pool '{pool_id}' no longer exists. Pick another pool or clear it.")
 
-    member, reason = choose_member(pool, str(profile.get("id") or ""))
+    profile_id = str(profile.get("id") or "")
+    if commit:
+        member, reason = assign(pool_id, profile_id)
+        # assign() re-reads the pool under its own lock; take the fresh copy so
+        # resolve_member below reads the same revision the decision was made on.
+        pool = get_pool(pool_id) or pool
+    else:
+        member, reason = choose_member(pool, profile_id)
     if member is None:
         return blocked(reason)
 

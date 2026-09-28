@@ -734,7 +734,11 @@ def launch_profile(
         net = _NC(mode=_NM.DIRECT)
         notes.append("Network: DIRECT (caller override)")
     else:
-        net = network_config_for_profile(profile)
+        # commit=True: this is the one call that is a launch rather than a
+        # look, so it is the one allowed to record the pool's decision -- the
+        # sticky assignment that keeps this profile's egress stable, or the
+        # rotate cursor that moves the next one along.
+        net = network_config_for_profile(profile, commit=True)
 
     # GitHub proxy type is NOT a network route — block clearly
     if (profile.get("proxyType") or "").lower() == "github" and not direct:
