@@ -157,6 +157,35 @@ def _probe_gpu_available() -> bool:
     return False
 
 
+def _webgpu_args() -> list[str]:
+    """Keep WebGPU working under the x11 ozone platform we force.
+
+    Window placement needs ``--ozone-platform=x11`` (on Wayland,
+    ``getWindowBounds`` echoes back whatever we just set while the compositor
+    leaves the window in its default cascade), and that costs the WebGPU
+    adapter. Measured on this host against stock Chromium 151:
+
+        --ozone-platform=x11 --use-gl=angle --use-angle=gl
+            requestAdapter() -> null
+        --ozone-platform=wayland --use-gl=angle --use-angle=gl
+            requestAdapter() -> {vendor: "intel", architecture: "gen-12lp"}
+        --ozone-platform=x11 ... --enable-features=Vulkan
+            requestAdapter() -> {vendor: "intel", architecture: "gen-12lp"}
+
+    A profile claiming an RTX 4060 in WebGL while WebGPU says the machine has
+    no adapter at all is a contradiction inside one page, and it was ours, not
+    the host's. Vulkan restores the adapter without giving up the window
+    control, so both surfaces can describe the same card.
+
+    ``MULTIPROFILE_WEBGPU=0`` turns it off for a host whose Vulkan stack
+    misbehaves; the profile then launches without a WebGPU adapter, and the
+    launch records an identity fault saying so.
+    """
+    if os.environ.get("MULTIPROFILE_WEBGPU", "1").strip().lower() in {"0", "false", "no"}:
+        return []
+    return ["--enable-features=Vulkan"]
+
+
 def chrome_gpu_args(gpu_mode: str) -> list[str]:
     """Return Chrome GPU flags appropriate for the environment.
 
@@ -179,12 +208,14 @@ def chrome_gpu_args(gpu_mode: str) -> list[str]:
         return [
             "--use-gl=angle",
             "--use-angle=gl",
+            *_webgpu_args(),
         ]
     # auto
     if _probe_gpu_available():
         return [
             "--use-gl=angle",
             "--use-angle=gl",
+            *_webgpu_args(),
         ]
     # No GPU available — use software renderer but be honest about it
     log.info("GPU not detected, using SwiftShader software renderer")

@@ -35,6 +35,11 @@
   let TARGET_MEMORY = 8;
   let TARGET_GPU_VENDOR = "Google Inc. (NVIDIA)";
   let TARGET_GPU_RENDERER = "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+  // Derived in fingerprint/_core.py from the renderer above, so the two
+  // vocabularies for the same card cannot drift apart. Null means "claim
+  // nothing" -- inventing an identity that disagreed with the WebGL string
+  // would recreate the contradiction this exists to remove.
+  let TARGET_WEBGPU = null;
   let SCREEN_W = 1920;
   let SCREEN_H = 1080;
   let SCREEN_AVAIL_H = 1040;
@@ -104,6 +109,7 @@
       if (MP_CFG.gpu) {
         if (MP_CFG.gpu.vendor) TARGET_GPU_VENDOR = MP_CFG.gpu.vendor;
         if (MP_CFG.gpu.renderer) TARGET_GPU_RENDERER = MP_CFG.gpu.renderer;
+        if (MP_CFG.gpu.webgpu && MP_CFG.gpu.webgpu.vendor) TARGET_WEBGPU = MP_CFG.gpu.webgpu;
       }
       if (MP_CFG.screen) {
         if (MP_CFG.screen.w) SCREEN_W = MP_CFG.screen.w;
@@ -749,6 +755,14 @@
               if (win.WebGLRenderingContext) hookWebGLProto(win.WebGLRenderingContext.prototype);
               if (win.WebGL2RenderingContext) hookWebGLProto(win.WebGL2RenderingContext.prototype);
               applyWebRTCSpoofs(win);
+              // Surfaces added after this hook was written were not reaching
+              // iframes: an audio or rect fingerprint taken inside a frame
+              // returned the host's, while the same read in the top document
+              // returned the profile's. One page disagreeing with itself is
+              // the tell these spoofs exist to prevent.
+              applyAudioSpoofs(win);
+              applyRectSpoofs(win);
+              applyWebGPUSpoofs(win);
             } catch(e) {}
           }
           return win;
@@ -1087,11 +1101,88 @@
     } catch (e) {}
   }
 
+
+  // ==========================================
+  // 13. WEBGPU ADAPTER IDENTITY
+  // ==========================================
+  // WebGL and WebGPU describe the same card in different vocabularies and a
+  // page can read both. Measured on this host, one profile said both of these
+  // at once:
+  //
+  //   WebGL   ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ...)
+  //   WebGPU  requestAdapter() -> null
+  //
+  // No Windows machine with an RTX 4060 has no WebGPU adapter. The null came
+  // from our own launch configuration -- forcing --ozone-platform=x11, which
+  // the window placement needs, left Dawn without one. Measured against stock
+  // Chromium 151 on the same host, where an adapter IS returned, it described
+  // the host truthfully and identically for every profile:
+  //
+  //   {vendor: "intel", architecture: "gen-12lp"}
+  //
+  // So the surface both contradicted the WebGL claim and linked every profile
+  // on the machine to every other. The launcher now restores the adapter with
+  // --enable-features=Vulkan; this rewrites what it says about itself.
+  //
+  // Only the four identity fields are replaced. The adapter itself is the
+  // real one, so limits, features and requestDevice() keep working -- a
+  // synthesised adapter that failed on first use would be a louder tell than
+  // the one it replaced.
+  function applyWebGPUSpoofs(scope) {
+    try {
+      if (!TARGET_WEBGPU || !TARGET_WEBGPU.vendor) return;
+      const gpu = scope.navigator && scope.navigator.gpu;
+      if (!gpu || typeof gpu.requestAdapter !== 'function') return;
+      if (gpu.__mp_hooked) return;
+
+      const FIELDS = ['vendor', 'architecture', 'device', 'description'];
+      const disguise = (info) => {
+        if (!info) return info;
+        try {
+          for (const key of FIELDS) {
+            const value = TARGET_WEBGPU[key] != null ? TARGET_WEBGPU[key] : '';
+            Object.defineProperty(info, key, {
+              get: makeNative(function () { return value; }, `get ${key}`),
+              configurable: true,
+              enumerable: true
+            });
+          }
+        } catch (e) {}
+        return info;
+      };
+
+      const origRequestAdapter = gpu.requestAdapter;
+      gpu.requestAdapter = makeNative(function requestAdapter() {
+        return origRequestAdapter.apply(this, arguments).then(function (adapter) {
+          if (!adapter) return adapter;
+          try {
+            // `info` is a prototype getter returning a live GPUAdapterInfo;
+            // shadowing it with an own accessor leaves the rest of the
+            // adapter untouched.
+            disguise(adapter.info);
+            if (typeof adapter.requestAdapterInfo === 'function') {
+              const origInfo = adapter.requestAdapterInfo;
+              adapter.requestAdapterInfo = makeNative(function requestAdapterInfo() {
+                return origInfo.apply(this, arguments).then(disguise);
+              }, 'requestAdapterInfo');
+            }
+          } catch (e) {}
+          return adapter;
+        });
+      }, 'requestAdapter');
+
+      try {
+        Object.defineProperty(gpu, '__mp_hooked', { value: true, enumerable: false });
+      } catch (e) {}
+    } catch (e) {}
+  }
+
   // Apply to main window
   applyTimezoneSpoofs(window);
   applyWebRTCSpoofs(window);
   applyAudioSpoofs(window);
   applyRectSpoofs(window);
+  applyWebGPUSpoofs(window);
 
   // ==========================================
   // NAVIGATOR.PLUGINS + MIMETYPES CONSISTENCY

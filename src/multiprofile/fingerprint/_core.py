@@ -420,6 +420,63 @@ def device_preset_for_profile(profile: dict[str, Any] | None) -> dict[str, Any] 
         return None
 
 
+# ---------------------------------------------------------------------------
+# WebGPU adapter identity
+# ---------------------------------------------------------------------------
+#
+# WebGL and WebGPU describe the same card in different vocabularies, and a
+# page can read both. Measured on this host before this existed, one profile
+# said both of these at once::
+#
+#     WebGL   ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ...)
+#     WebGPU  requestAdapter() -> null
+#
+# No Windows machine with an RTX 4060 has no WebGPU adapter. And where an
+# adapter *was* returned it described the host truthfully -- ``intel`` /
+# ``gen-12lp`` on this laptop -- identically for every profile, so the surface
+# linked them to each other as well as contradicting the WebGL claim.
+#
+# Chrome reports these lowercase, with the architecture as the GPU family
+# rather than the model: an RTX 4060 is ``nvidia`` / ``ada``, a GTX 1660 is
+# ``nvidia`` / ``turing``. Deriving both from the renderer string the profile
+# already claims keeps one source of truth, the way F5 did for the UA.
+_GPU_ARCHITECTURES: tuple[tuple[str, str, str], ...] = (
+    # (needle in the WebGL renderer, vendor, architecture)
+    ("RTX 40", "nvidia", "ada"),
+    ("RTX 30", "nvidia", "ampere"),
+    ("GTX 16", "nvidia", "turing"),
+    ("RTX 20", "nvidia", "turing"),
+    ("GTX 10", "nvidia", "pascal"),
+    ("RX 7", "amd", "rdna-3"),
+    ("RX 6", "amd", "rdna-2"),
+    ("RX 5", "amd", "rdna-1"),
+    ("Iris Xe", "intel", "gen-12lp"),
+    ("UHD Graphics 6", "intel", "gen-9"),
+    ("UHD Graphics", "intel", "gen-11"),
+    ("Apple M1", "apple", "apple-m1"),
+    ("Apple M2", "apple", "apple-m2"),
+    ("Apple M3", "apple", "apple-m3"),
+    ("Apple GPU", "apple", "apple-a"),
+    ("Adreno", "qualcomm", "adreno-7xx"),
+    ("Mali", "arm", "mali-g78"),
+)
+
+
+def webgpu_identity(renderer: str, vendor: str = "") -> dict[str, str]:
+    """The WebGPU adapter identity matching a claimed WebGL renderer.
+
+    Returned empty when nothing matches, which the injector reads as "do not
+    claim an adapter identity" -- inventing one that disagreed with the WebGL
+    string would recreate the contradiction this exists to remove.
+    """
+    haystack = f"{renderer} {vendor}"
+    for needle, gpu_vendor, architecture in _GPU_ARCHITECTURES:
+        if needle.lower() in haystack.lower():
+            return {"vendor": gpu_vendor, "architecture": architecture,
+                    "device": "", "description": ""}
+    return {}
+
+
 def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     """Build a deterministic fingerprint dict from seed + UA/isMobile.
 
@@ -451,6 +508,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     cores = _pick(seed, 2, pool["cores"])
     memory = _pick(seed, 3, pool["memory"])
     gpu = _pick(seed, 4, pool["gpus"])
+    gpu_webgpu = webgpu_identity(gpu[1], gpu[0])
 
     lang = profile.get("language") or "en-US"
     languages = [lang]
@@ -520,7 +578,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         "memory": memory,
         "screen": {"w": w, "h": h, "availH": avail_h, "dpr": dpr},
         "touch": pool["touch"],
-        "gpu": {"vendor": gpu[0], "renderer": gpu[1]},
+        "gpu": {"vendor": gpu[0], "renderer": gpu[1], "webgpu": gpu_webgpu},
         "languages": languages,
         "language": lang,
         "timezone": tz,
