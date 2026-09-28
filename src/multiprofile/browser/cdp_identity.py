@@ -347,6 +347,18 @@ def build_ua_override_params(
     }
 
 
+# The path ``identity_assert`` serves its loopback probe on, shared here
+# because two modules must agree on it and both already import this one.
+#
+# The injector MUST NOT rewrite headers on this request. The probe exists to
+# observe what the browser would really send, and rewriting it would make the
+# launch-time assertion tautological: it would report "identity verified" from
+# headers the injector had just corrected, even when the UA override had failed
+# outright. That would quietly disarm the one check standing between F1 and a
+# repeat of it -- and F1 was a *reporting* bug before it was a spoofing bug.
+IDENTITY_PROBE_PATH = "/identity-probe"
+
+
 def _brand_list_header(brands: Any) -> str:
     """Format a client-hints brand list the way Chrome puts it on the wire."""
     parts = []

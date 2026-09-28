@@ -58,7 +58,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import identity_faults
-from .cdp_identity import UA_OVERRIDE_METHOD, low_entropy_client_hints
+from .cdp_identity import (
+    IDENTITY_PROBE_PATH,
+    UA_OVERRIDE_METHOD,
+    low_entropy_client_hints,
+)
 
 log = logging.getLogger("multiprofile.browser.cdp_inject")
 
@@ -69,6 +73,21 @@ except ImportError:  # pragma: no cover - dependency is declared in pyproject
 
 _CONNECT_TIMEOUT = 8.0
 _RECV_TIMEOUT = 1.0
+
+
+def _first_request_hints_enabled() -> bool:
+    """Whether to arm browser-scope Fetch for the first-request hint fix.
+
+    Read at attach time rather than captured at import, so a test or an
+    operator can turn it off without rebuilding anything. Never raises: a
+    missing config module must not stop a browser launching.
+    """
+    try:
+        from ..config import get_settings
+
+        return bool(get_settings().first_request_hints)
+    except Exception:  # noqa: BLE001 - default to the safe (correct) behaviour
+        return True
 
 
 def build_identity_script(
@@ -119,6 +138,7 @@ class InjectionStatus:
     auth_armed: bool = False
     cookies_applied: int = 0
     ua_override_applied: bool = False
+    timezone_applied: bool = False
     targets_seen: int = 0
     error: str | None = None
     detail: list[str] = field(default_factory=list)
@@ -130,6 +150,7 @@ class InjectionStatus:
             "authArmed": self.auth_armed,
             "cookiesApplied": self.cookies_applied,
             "uaOverrideApplied": self.ua_override_applied,
+            "timezoneApplied": self.timezone_applied,
             "targetsSeen": self.targets_seen,
             "error": self.error,
             "detail": list(self.detail),
@@ -166,9 +187,11 @@ class IdentityInjector:
         proxy_auth: ProxyAuth | None = None,
         cookies: list[dict[str, Any]] | None = None,
         ua_override: dict[str, Any] | None = None,
+        timezone_id: str | None = None,
         profile_id: str = "",
     ):
         self.port = int(port)
+        self.timezone_id = (timezone_id or "").strip() or None
         self.script = script or ""
         self.proxy_auth = proxy_auth
         self.cookies = cookies or []
@@ -266,7 +289,7 @@ class IdentityInjector:
             "flatten": True,
         })
 
-        if self.hint_headers:
+        if self.hint_headers and _first_request_hints_enabled():
             # Fetch on the BROWSER session, not per target, and this is the
             # whole point of it. Network.setUserAgentOverride is scoped to a
             # renderer, but a new tab's first document request is formed by
@@ -407,8 +430,18 @@ class IdentityInjector:
 
         override: dict[str, Any] = {"requestId": request_id}
         try:
+            request = params.get("request") or {}
+            # Never touch the launch-time identity probe. It measures what the
+            # browser would really send, so correcting its headers here would
+            # make the assertion tautological -- "verified" from headers this
+            # handler had just written, even with the UA override dead. It is
+            # also, during a launch, the ONLY document request there is, so
+            # skipping it takes ~0.5s back off every launch.
+            if IDENTITY_PROBE_PATH in str(request.get("url") or ""):
+                self._send("Fetch.continueRequest", override, session_id=session_id)
+                return
+
             if self.hint_headers:
-                request = params.get("request") or {}
                 headers = dict(request.get("headers") or {})
                 # Case-insensitively drop what we are about to set, so a
                 # header the browser spelled differently cannot survive
@@ -465,6 +498,20 @@ class IdentityInjector:
             # page session cannot.
             self._send(UA_OVERRIDE_METHOD, self.ua_override, session_id=session_id)
             self.status.ua_override_applied = True
+
+        if self.timezone_id:
+            # The engine's own clock, not a patched one. evasion.js hooks
+            # Intl.DateTimeFormat, resolvedOptions, getTimezoneOffset,
+            # toString and toTimeString -- but not toLocaleString, and that
+            # gap was measurable: a profile set to America/New_York reported
+            # Eastern time from Date.toString and Asia/Kolkata time from
+            # Date.toLocaleString, in the same document. Patching one method
+            # at a time cannot win that game; setting the renderer's timezone
+            # makes every surface agree, including the ones nobody has
+            # thought of yet.
+            self._send("Emulation.setTimezoneOverride",
+                       {"timezoneId": self.timezone_id}, session_id=session_id)
+            self.status.timezone_applied = True
 
         if self.script:
             # Page must be enabled on this session before the page machinery
@@ -534,6 +581,7 @@ def start_injection(
     proxy_auth: ProxyAuth | None = None,
     cookies: list[dict[str, Any]] | None = None,
     ua_override: dict[str, Any] | None = None,
+    timezone_id: str | None = None,
 ) -> InjectionStatus:
     """Start (and register) injection for a profile, replacing any previous one."""
     stop_injection(profile_id)
@@ -543,6 +591,7 @@ def start_injection(
         proxy_auth=proxy_auth,
         cookies=cookies,
         ua_override=ua_override,
+        timezone_id=timezone_id,
         profile_id=profile_id,
     )
     status = injector.start()

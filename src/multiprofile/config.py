@@ -59,6 +59,14 @@ class Settings:
     # precisely because nothing checked. Set False only to diagnose the
     # assertion itself.
     identity_assert_enabled: bool = True
+    # Rewrite client hints on a new tab's FIRST document request, which the
+    # browser process forms before any renderer exists (F1's residual). Costs
+    # ~0.5s per launch, measured: arming Fetch at browser scope drops a
+    # Chromium navigation fast-path, and the cost is the same whether or not a
+    # request is actually paused. On by default -- an identity that
+    # contradicts itself once per tab is the defect this product exists to
+    # avoid -- but switchable for anyone who needs the launch budget more.
+    first_request_hints: bool = True
     # evasion.js diagnostics. OFF by default: the script used to log
     # "[Evasion] evasion.js active on: <url>" on every page and in every frame,
     # which is a plain-text confession in any DevTools session, screen share or
@@ -109,6 +117,7 @@ def get_settings() -> Settings:
         proxy_check_enabled=_env_bool("MULTIPROFILE_PROXY_CHECK_ENABLED", True),
         gpu_mode=(os.environ.get("MULTIPROFILE_GPU_MODE") or "auto").strip().lower(),
         identity_assert_enabled=_env_bool("MULTIPROFILE_IDENTITY_ASSERT", True),
+        first_request_hints=_env_bool("MULTIPROFILE_FIRST_REQUEST_HINTS", True),
         evasion_debug=_env_bool("MULTIPROFILE_EVASION_DEBUG", False),
         # [supervisor]
         supervisor_enabled=_env_bool("MULTIPROFILE_SUPERVISOR_ENABLED", True),

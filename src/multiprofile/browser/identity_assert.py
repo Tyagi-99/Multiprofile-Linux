@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .cdp_identity import open_pinned_browser_session
+from .cdp_identity import IDENTITY_PROBE_PATH, open_pinned_browser_session
 
 log = logging.getLogger("multiprofile.browser.identity_assert")
 
@@ -206,7 +206,7 @@ class _Probe:
     @property
     def url(self) -> str:
         host, port = self._server.server_address[:2]
-        return f"http://{host}:{port}/identity-probe"
+        return f"http://{host}:{port}{IDENTITY_PROBE_PATH}"
 
     def __enter__(self) -> "_Probe":
         self._thread.start()
