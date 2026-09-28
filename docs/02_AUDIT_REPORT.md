@@ -85,6 +85,7 @@ honest-reporting defects rather than deferring them.
 | **F21** | ✅ Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case — **fixed** | done |
 | **F22** | ✅ **High** | Fingerprint | Timezone was **JavaScript-only**; every unhooked surface reported the host zone — **fixed** | done |
 | **F23** | ✅ **High** | Fingerprint | `enumerateDevices` **volunteered a persistent id the host withholds**, the same one for all three kinds — **fixed** | done |
+| **F24** | ✅ **High** | Fingerprint | **AudioContext and ClientRects linked every profile on the machine** — identical to 12 decimal places — **fixed** | done |
 
 ---
 
@@ -765,6 +766,68 @@ restart counts as recovery only after `restart_stability_s` (default 60 s), and 
 crash-looping profile is parked in `error` after 3 restarts. Measured: 10 unbounded
 relaunches before, 3 and parked after. Two regression tests added.
 Uncommitted in the working tree.
+
+---
+
+### F24 — ✅ HIGH: AudioContext and ClientRects linked every profile — **FIXED**
+
+**File:** [`extension/evasion.js`](../src/extension/evasion.js)
+
+Both surfaces were entirely unhooked. `evasion.js` opens by claiming
+*"Canvas & AudioContext noise injection"*; `AudioContext` appeared in that
+header comment and **nowhere else in the file**. `getClientRects`,
+`getBoundingClientRect` and `DOMRect` had zero references anywhere in the repo.
+
+Both are computed by the host — the audio stack and the rendering stack — so
+every profile returned the same answer. Measured, two profiles with different
+seeds, claiming a GTX 1660 and an RTX 3060 respectively:
+
+```
+seed 111   audio 172.6716509661   rect 10.093750,20.187500,30.296875,40.390625
+seed 222   audio 172.6716509661   rect 10.093750,20.187500,30.296875,40.390625
+```
+
+Identical to twelve decimal places, while canvas and WebGL differed per profile.
+
+**This is worse than either profile being identified alone: it links them to
+each other.** Two "different computers" that share an audio fingerprint and
+sub-pixel text metrics exactly are one computer, and cross-profile linkage is
+the specific failure an anti-detect product exists to prevent. A site does not
+need to know *who* a profile is to know it is the same operator as the last
+fifty.
+
+> **Resolved.** Both surfaces get per-profile deterministic noise, seeded the
+> same way canvas already is. The properties that matter are not "is it noisy"
+> but:
+>
+> - **stable** — the noise is a pure function of `(seed, index, original
+>   value)`, so a rect re-read gives the same answer. Drag-and-drop, sticky
+>   headers and hit-testing all read a rect more than once; a value that
+>   drifted would break real sites *and* be a louder tell than the shared one
+>   it replaced.
+> - **reproducible** — a freshly rendered `OfflineAudioContext` agrees with the
+>   first, the way a real machine does. Per-render randomness would defeat
+>   linkage and be obvious to any site that renders twice.
+> - **small** — ~1e-7 audio amplitude (inaudible, no effect on playback) and
+>   ~1e-3 of a pixel on rects, which is below Chrome's own 1/64 px layout
+>   quantisation and disturbs no layout logic.
+>
+> ```
+> seed 111   audio 172.6716513248   rect 10.093502,20.187662,30.297356,40.390277
+> seed 222   audio 172.6716503918   rect 10.094142,20.187091,30.296750,40.390467
+> ```
+>
+> Verified: 7 live tests in `tests/test_audio_rects_live.py`, which assert the
+> two profiles differ, that each is stable across reads, and that the audio
+> value is reproducible across renders — the third being the one that is easy
+> to get wrong.
+
+**WebGPU: unverified here, not fixed.** `navigator.gpu` still has zero
+references, so an adapter would report the host. On this machine
+`requestAdapter()` returns **no adapter** under the launch configuration, so the
+leak could not be reproduced and has not been fixed on guesswork. It needs
+re-measuring on a desktop session with GPU acceleration before it is worth
+hooking — noted so the gap is not mistaken for coverage.
 
 ---
 

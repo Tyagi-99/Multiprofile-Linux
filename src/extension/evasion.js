@@ -991,9 +991,127 @@
     } catch(e) {}
   }
 
+  // ==========================================
+  // 11. AUDIOCONTEXT FINGERPRINT (PER-PROFILE DETERMINISTIC)
+  // ==========================================
+  // Measured before this existed: two profiles with different seeds, claiming
+  // a GTX 1660 and an RTX 3060 respectively, both rendered
+  //
+  //     OfflineAudioContext -> oscillator -> compressor  sum = 172.6716509661
+  //
+  // byte for byte. The audio stack is the host's, so every profile on one
+  // machine shared one audio fingerprint -- while canvas and WebGL differed
+  // per profile. Two "different computers" with identical audio is how
+  // profiles get linked to each other, which is worse than either of them
+  // being identified alone.
+  //
+  // The noise is a pure function of (seed, sample index, original value), so
+  // reading the same buffer twice gives the same answer. A value that moved
+  // between reads would be a louder tell than the shared one, and would also
+  // break anything doing real audio work. Amplitude is ~1e-7: inaudible, and
+  // far below the threshold where playback is affected.
+  function applyAudioSpoofs(scope) {
+    try {
+      const AB = scope.AudioBuffer;
+      if (AB && AB.prototype && AB.prototype.getChannelData) {
+        const orig = AB.prototype.getChannelData;
+        const seen = new WeakMap();
+        AB.prototype.getChannelData = makeNative(function(channel) {
+          const data = orig.call(this, channel);
+          try {
+            let done = seen.get(this);
+            if (!done) { done = new Set(); seen.set(this, done); }
+            if (done.has(channel)) return data;   // already nudged; stay stable
+            done.add(channel);
+            for (let i = 0; i < data.length; i++) {
+              if (data[i] !== 0) {
+                data[i] += (getNoiseValue(PROFILE_SEED + i) - 0.5) * 1e-7;
+              }
+            }
+          } catch (e) {}
+          return data;
+        }, 'getChannelData');
+      }
+
+      const AN = scope.AnalyserNode;
+      if (AN && AN.prototype) {
+        for (const name of ['getFloatFrequencyData', 'getByteFrequencyData']) {
+          const fn = AN.prototype[name];
+          if (!fn) continue;
+          AN.prototype[name] = makeNative(function(array) {
+            fn.call(this, array);
+            try {
+              for (let i = 0; i < array.length; i++) {
+                const n = (getNoiseValue(PROFILE_SEED + i) - 0.5);
+                array[i] += (name === 'getByteFrequencyData') ? 0 : n * 1e-4;
+              }
+            } catch (e) {}
+          }, name);
+        }
+      }
+    } catch (e) {}
+  }
+
+  // ==========================================
+  // 12. CLIENTRECTS / DOMRECT (PER-PROFILE DETERMINISTIC)
+  // ==========================================
+  // Same measurement, same problem: two profiles claiming different hardware
+  // both reported
+  //
+  //     getBoundingClientRect -> 10.093750, 20.187500, 30.296875, 40.390625
+  //
+  // identically, because sub-pixel layout metrics come from the host's
+  // rendering stack. Another vector linking every profile on the machine.
+  //
+  // The nudge is deterministic in the ORIGINAL value, so an unchanged element
+  // measures the same every time -- a rect that drifted between calls would
+  // break drag-and-drop, sticky headers and hit-testing on real sites, and a
+  // site polling one rect would see it move. It is kept at ~1e-3 of a pixel:
+  // enough to separate two machines, far too small to disturb layout logic.
+  function applyRectSpoofs(scope) {
+    try {
+      const nudge = (v) => {
+        if (typeof v !== 'number' || !isFinite(v) || v === 0) return v;
+        const k = Math.abs(Math.round(v * 1000));
+        return v + (getNoiseValue(PROFILE_SEED + k) - 0.5) * 1e-3;
+      };
+      const patchRect = (r) => {
+        try {
+          const x = nudge(r.x), y = nudge(r.y);
+          const w = nudge(r.width), h = nudge(r.height);
+          return new scope.DOMRect(x, y, w, h);
+        } catch (e) { return r; }
+      };
+
+      for (const proto of [scope.Element && scope.Element.prototype,
+                           scope.Range && scope.Range.prototype]) {
+        if (!proto) continue;
+        if (proto.getBoundingClientRect) {
+          const orig = proto.getBoundingClientRect;
+          proto.getBoundingClientRect = makeNative(function() {
+            return patchRect(orig.apply(this, arguments));
+          }, 'getBoundingClientRect');
+        }
+        if (proto.getClientRects) {
+          const origList = proto.getClientRects;
+          proto.getClientRects = makeNative(function() {
+            const list = origList.apply(this, arguments);
+            try {
+              const out = Array.prototype.map.call(list, patchRect);
+              out.item = (i) => out[i] || null;
+              return out;
+            } catch (e) { return list; }
+          }, 'getClientRects');
+        }
+      }
+    } catch (e) {}
+  }
+
   // Apply to main window
   applyTimezoneSpoofs(window);
   applyWebRTCSpoofs(window);
+  applyAudioSpoofs(window);
+  applyRectSpoofs(window);
 
   // ==========================================
   // NAVIGATOR.PLUGINS + MIMETYPES CONSISTENCY
