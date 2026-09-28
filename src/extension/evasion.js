@@ -479,49 +479,29 @@
     }
 
     // ==========================================
-    // 5. FONT UNIQUENESS & METRICS ISOLATION SHIELD
+    // 5. FONTS -- handled at the engine, not here
     // ==========================================
-    const origMeasureText = CanvasRenderingContext2D.prototype.measureText;
-    const desktopPool = ["Comic Sans MS", "Impact", "Garamond", "Trebuchet MS", "Palatino", "Bookman", "Georgia", "Verdana"];
-    const iosExcluded = ["Comic Sans MS", "Impact", "Lucida Console", "Lucida Sans Unicode", "Trebuchet MS"];
-
-    // Determine fonts to suppress for this profile
-    let suppressedFonts = [];
-    if (isIPhone || isAndroid) {
-      suppressedFonts = iosExcluded;
-    } else {
-      const idx1 = PROFILE_SEED % desktopPool.length;
-      const idx2 = (PROFILE_SEED * 3 + 1) % desktopPool.length;
-      suppressedFonts = [desktopPool[idx1]];
-      if (idx1 !== idx2) suppressedFonts.push(desktopPool[idx2]);
-    }
-
-    CanvasRenderingContext2D.prototype.measureText = makeNative(function measureText(text) {
-      const currentFont = (this.font || "").toLowerCase();
-      for (const sf of suppressedFonts) {
-        if (currentFont.includes(sf.toLowerCase())) {
-          // Emulate font fallback to monospace width so probe detects font as uninstalled
-          const prev = this.font;
-          this.font = '72px monospace';
-          const fallback = origMeasureText.call(this, text);
-          this.font = prev;
-          return fallback;
-        }
-      }
-      return origMeasureText.call(this, text);
-    }, 'measureText');
-
-    // Also align document.fonts.check if available
-    if (document.fonts && document.fonts.check) {
-      const origFontsCheck = document.fonts.check;
-      document.fonts.check = makeNative(function check(font, text) {
-        const fLower = (font || "").toLowerCase();
-        for (const sf of suppressedFonts) {
-          if (fLower.includes(sf.toLowerCase())) return false;
-        }
-        return origFontsCheck.call(this, font, text);
-      }, 'check');
-    }
+    // This section used to hook measureText and document.fonts.check to hide
+    // one or two names picked out of a hardcoded eight-font pool. It has been
+    // removed rather than extended, for two reasons.
+    //
+    // It solved the wrong problem. A profile claiming Windows enumerated
+    // thirteen Linux fonts, five of which (C059, P052, Z003, D050000L,
+    // Standard Symbols PS) exist on no Windows machine -- and the hook's
+    // response was to hide Georgia.
+    //
+    // And a canvas-only hook is a tell in itself. Measured on this host,
+    // canvas and DOM font detection agree exactly, so suppressing a font in
+    // measureText while a span measuring the same family still laid out at
+    // its real width would have produced a disagreement no real browser
+    // shows. The DOM half cannot be moved honestly from JavaScript, because
+    // reporting a width the engine did not lay out desynchronises measurement
+    // from rendering.
+    //
+    // The font set is now decided for the whole engine via a per-profile
+    // fontconfig (see multiprofile/browser/fontconfig.py), so canvas, DOM,
+    // document.fonts, workers and what is actually painted all agree without
+    // anything having to lie.
 
   } catch(e) {}
 

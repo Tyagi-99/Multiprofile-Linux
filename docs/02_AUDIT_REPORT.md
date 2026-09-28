@@ -769,6 +769,97 @@ Uncommitted in the working tree.
 
 ---
 
+### F25 — ✅ HIGH: a Windows profile enumerated this host's Linux fonts — **FIXED (residual documented)**
+
+**Files:** [`browser/fontconfig.py`](../src/multiprofile/browser/fontconfig.py) (new),
+[`browser/launcher.py`](../src/multiprofile/browser/launcher.py),
+[`extension/evasion.js`](../src/extension/evasion.js)
+
+Font enumeration was unaddressed. Measured on this host, a profile reporting
+`navigator.platform === 'Win32'` and `sec-ch-ua-platform: "Windows"`:
+
+| | |
+|---|---|
+| Windows fonts found | **0** — no Calibri, Segoe UI, Tahoma, Consolas |
+| Linux fonts found | **13** — including `C059`, `P052`, `Z003`, `D050000L`, `Standard Symbols PS` |
+
+Those five are the URW base-35 faces ghostscript installs. They are on no
+Windows machine. A missing Calibri is weak evidence about an unusual install;
+those five names are proof that a self-declared Windows box is a Linux one.
+
+The existing hook made this worse rather than better. `evasion.js` picked one
+or two names from a hardcoded eight-font pool and forced `measureText` to fall
+back for them — so a "Windows" profile hid *Georgia* while announcing
+`D050000L`.
+
+**Why this was not fixed in JavaScript.** Measured here, canvas and DOM font
+detection agree exactly, so hooking only `measureText` would have introduced a
+*new* contradiction. The DOM half cannot be moved honestly: reporting a width
+the engine did not lay out desynchronises measurement from rendering on any
+page that uses the font for real.
+
+Chromium resolves local fonts through fontconfig, which honours
+`FONTCONFIG_FILE`. Measured against stock Chromium 151:
+
+```
+DEFAULT     [C059, P052, Z003, D050000L, Standard Symbols PS, Nimbus Roman,
+             Nimbus Sans, Liberation Sans, Noto Sans, Arial, Times New Roman]
+RESTRICTED  [Liberation Sans, Noto Sans]
+```
+
+So each launch now writes a per-profile fontconfig and points the child at it.
+Every surface agrees for free — canvas, DOM, `document.fonts`, workers, and
+what is actually painted — because none of them is lying. Same move as F22:
+anchor at the engine where an anchor exists. The superseded `evasion.js`
+section was removed, not extended.
+
+Measured after:
+
+| | before | after |
+|---|---|---|
+| ghostscript faces | 5 | **0** |
+| distribution faces (DejaVu, Nimbus, Cantarell, …) | 8 | **0** |
+| core Windows families | 0 | **3** (Arial, Times New Roman, Courier New) |
+| canvas/DOM disagreements | 0 | **0** |
+
+Cost: 53 ms per launch. Claims are honest — a name is claimed only where a
+metric-compatible file can back it (Liberation for the core three), and the 13
+that cannot be backed on this host are left absent and recorded as an identity
+fault rather than faked with the wrong metrics.
+
+**Residual, not closed.** The backer's own name stays enumerable. fontconfig
+renaming governs *matching*, but Chrome reads a face's names from the font
+file's internal `name` table:
+
+```
+fc-list   Courier New      | Courier New | CourierNewPSMT
+Chrome    Liberation Mono  | LiberationMono
+```
+
+So the three Liberation names remain visible. This is a strict improvement —
+absence of Calibri is weak, `D050000L` was proof — but it is not closure.
+
+**Decision needed.** Closing it requires the claimed names to be genuine in
+the file, which is packaging, not code:
+
+1. **Ship metric-compatible fonts** (`carlito`, `caladea`, `gelasio`, and the
+   Chrome OS core set `arimo`/`tinos`/`cousine`). This raises the credible
+   Windows claim from 3 families to ~8 and is legally clean, since those
+   fonts are redistributable under their own names. It adds package
+   dependencies, which cannot be verified here because `build-deb.sh` does
+   not run on this machine.
+2. **Rewrite the font binary's `name` table** so the file itself says Arial.
+   This closes the residual completely but puts a third party's trademark
+   into a file this product ships. Aliasing Arial to Liberation Sans is what
+   every Linux distribution already does in `30-metric-aliases.conf`;
+   asserting a file *is* Arial is a different act and needs legal review.
+
+Option 1 is the recommendation. Neither was taken here.
+
+31 tests added (25 policy, 6 live). Suite: 1423 passed, 5 skipped.
+
+---
+
 ### F24 — ✅ HIGH: AudioContext and ClientRects linked every profile — **FIXED**
 
 **File:** [`extension/evasion.js`](../src/extension/evasion.js)

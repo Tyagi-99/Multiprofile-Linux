@@ -40,7 +40,7 @@ from ..storage import db as _db
 from ..storage.profiles import get_profile, set_runtime, update_profile
 from ..storage.state import InvalidStateTransition, ProfileState
 from ..storage.xdg import chrome_profile_dir, purge_legacy_extension_staging
-from . import identity_faults
+from . import fontconfig, identity_faults
 from . import manager as browser_manager
 from .cdp_window import allocate_localhost_port, wait_for_cdp
 from .grid import Rect
@@ -998,6 +998,20 @@ def launch_profile(
     _tz = str(profile.get("timezone") or fingerprint.get("timezone") or "").strip()
     if _tz:
         env["TZ"] = _tz
+
+    # The font set the engine can see. Chromium resolves local fonts through
+    # fontconfig, so pointing the child at a per-profile config is what stops
+    # a profile claiming Windows from enumerating this host's Linux fonts --
+    # and unlike a measureText hook it moves canvas, DOM, document.fonts,
+    # workers and actual rendering together, because none of them is lying.
+    try:
+        _fc = fontconfig.prepare_for_profile(
+            profile_id, fingerprint, chrome_profile_dir(profile_id), notes
+        )
+        if _fc is not None:
+            env["FONTCONFIG_FILE"] = str(_fc)
+    except Exception as e:  # never let font policy stop a launch
+        _fault(notes, "font_policy_failed", str(e), profile_id=profile_id)
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     except OSError as e:
