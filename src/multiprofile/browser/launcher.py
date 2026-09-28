@@ -705,10 +705,44 @@ def launch_profile(
         }
 
     # ------------------------------------------------------------------
-    # PRE-LAUNCH PROXY HEALTH CHECK — block on failure (default policy)
+    # UNRESOLVED ROUTE — block unconditionally.
+    #
+    # A route that was REQUIRED and could not be resolved is recorded as
+    # blocked_reason on a DIRECT-looking config: mode DIRECT, proxy None. That
+    # shape is deliberate (see NetworkConfig.blocked_reason), and it means
+    # needs_proxy_check() is False, so this used to be checked only inside a
+    # branch a blocked config could never enter -- and proxy_check_enabled
+    # could switch it off entirely. The result was that a profile in a pool
+    # with no available member launched on the HOST IP, reporting ok=True with
+    # a note reading "Network mode: DIRECT" as though that had been the
+    # intent, and the wire assertion happily confirming the identity.
+    #
+    # Disabling the proxy *probe* is a choice about network calls at launch. It
+    # is not a choice to browse from the host IP when a route was demanded, so
+    # this check sits outside that setting and ahead of it.
     # ------------------------------------------------------------------
     proxy_health: ProxyHealthResult | None = None
     settings = get_settings()
+    if net.blocked_reason:
+        if slot_held:
+            browser_manager.release_slot(profile_id)
+        audit_log(
+            "launch_blocked_route_unresolved",
+            profile_id=profile_id,
+            ok=False,
+            detail={"error": net.blocked_reason, "mode": net.mode.value},
+        )
+        _record_state(
+            profile_id,
+            ProfileState.ERROR,
+            note=f"route_unresolved: {net.blocked_reason}",
+        )
+        return {
+            "ok": False,
+            "error": net.blocked_reason,
+            "errors": ["route_unresolved"],
+        }
+
     if settings.proxy_check_enabled and net.needs_proxy_check():
         allowed, block_reason, proxy_health = check_proxy_before_launch(
             net, timeout=float(settings.proxy_check_timeout)

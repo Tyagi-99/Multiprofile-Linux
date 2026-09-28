@@ -44,6 +44,17 @@ returns the hook's source code, comments included.
 anti-detection layer is not. Findings F1–F3 are ship-stoppers for the product's
 own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 
+**Addendum (Gate 2).** The orchestration layer turned out to carry a ship-stopper
+of its own, found only by following F8's trail: **F17** — a profile whose route
+could not be resolved launched on the **host IP** and reported `ok: True`, with a
+note reading "Network mode: DIRECT" and the wire assertion confirming the spoofed
+identity. A perfect fingerprint on the operator's own IP is the one failure worse
+than no spoofing at all, and it was reachable from the ordinary console: put a
+profile in a proxy pool, then remove the pool's members. The fail-closed guard
+existed and was correct; the launcher never consulted it. The thread that found it
+started as a validation nitpick about unknown JSON keys, which is the argument for
+fixing small honest-reporting defects rather than deferring them.
+
 ---
 
 ## Findings
@@ -66,6 +77,7 @@ own value proposition. F1 is a days-not-weeks fix; F3 is architectural.**
 | **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
 | **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
 | **F16** | ⚠️ **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reach nothing** — found by F8 | 1 wk + policy |
+| **F17** | ✅ **Critical** | Security | An **unresolvable route launched on the host IP** and reported success — found by F16 | done |
 
 ---
 
@@ -734,6 +746,75 @@ window management is not used at all. Cross-platform is new development, not a p
   should ship `NEXT_TELEMETRY_DISABLED=1` in the repo. 5 minutes.
 - **F15:** `next.config.ts` declares `rewrites`, which `output: export` ignores —
   warned twice on every build. Dead config; remove it or drop the export mode.
+
+---
+
+### F17 — ✅ CRITICAL: an unresolvable route launched on the host IP — **FIXED**
+
+**File:** [`browser/launcher.py:712`](../src/multiprofile/browser/launcher.py#L712)
+
+Found while fixing F16, and the more serious of the two by a wide margin.
+
+`NetworkConfig` records a route that was required but could not be resolved as
+`blocked_reason`, on a **DIRECT-looking** config — `mode=DIRECT`, `proxy=None`.
+That shape is deliberate and the code says why: `needs_proxy_check()` is False
+when `proxy` is None, so a proxy mode carrying no proxy would sail through the
+gate, and the refusal is stated outright rather than encoded as an empty proxy.
+`check_proxy_before_launch` honours it, checks it *first*, and its comment notes
+that DIRECT-looking configs reach it too.
+
+The launcher then called that gate like this:
+
+```python
+if settings.proxy_check_enabled and net.needs_proxy_check():
+    allowed, block_reason, proxy_health = check_proxy_before_launch(net, …)
+```
+
+`needs_proxy_check()` is False for every blocked config, so **the only code that
+reads `blocked_reason` sat behind a condition a blocked config can never
+satisfy** — and `proxy_check_enabled` could switch it off for everything at once.
+Measured, on a profile assigned to a pool with no enabled member:
+
+```
+resolved : mode=DIRECT blocked_reason="Pool 'dead-pool' has no enabled member (pool is empty)"
+LAUNCH ok : True | error: None
+proxy flag: (NONE — browsing from the host IP)
+notes     : "Network mode: DIRECT"
+            "identity verified on the wire: sec-ch-ua … Windows …"
+```
+
+The browser launched on the host IP, the launch was reported healthy, the note
+presented DIRECT as the intended mode, and the wire assertion confirmed the
+spoofed identity — which is the combination that makes it invisible. For this
+product that is the worst available failure: the fingerprint is perfect and the IP
+is the operator's own. `run_diagnostics` has the matching fail-closed branch and
+could have reported the truth, but nothing consulted it at launch either.
+
+The pool code was right all along. Its docstring states that if a pool cannot
+supply a member the result is blocked, "never DIRECT — falling back to the host IP
+is the one outcome a proxy pool must never produce." The guard was correct and
+unreachable.
+
+> **Resolved.** `blocked_reason` is now checked unconditionally, before the probe
+> branch and outside `proxy_check_enabled` — disabling the proxy *probe* is a
+> choice about network calls at launch, not consent to browse from the host IP
+> when a route was demanded. The launch returns `errors: ["route_unresolved"]`,
+> records `ProfileState.ERROR`, audits `launch_blocked_route_unresolved`, and
+> releases the concurrency slot it had already taken (a leaked slot would spend
+> the launch budget on launches that never happened; there is a test for that
+> specifically).
+>
+> ```
+> LAUNCH ok : False
+> error     : Pool 'dead-pool' has no enabled member (pool is empty)
+> errors    : ['route_unresolved']
+> with MULTIPROFILE_PROXY_CHECK_ENABLED=0 → still refused
+> ```
+>
+> Verified: `tests/test_route_fail_closed.py`, which asserts the measurement
+> above and the probe-disabled case, checks the slot is returned, and confirms the
+> ordinary dead-proxy health path still reports normally rather than being
+> shadowed by the new check.
 
 ---
 
