@@ -209,6 +209,41 @@ def _operator_state(launch_state: str | None) -> str | None:
 _LIST_OMITTED_FIELDS = ("fingerprint",)
 
 
+def _with_effective_geo(row: dict) -> dict:
+    """Add the timezone the launch will actually claim, and why.
+
+    The stored ``timezone`` is not always what the page will see. When
+    ``geoAuto`` is set it is only the creation default, and the launch
+    replaces it with something that agrees with where the traffic leaves
+    from: the exit IP's country through a proxy, this machine's own zone with
+    no proxy (F43). Before F43 the two happened to agree -- both said
+    America/New_York -- so rendering the stored value was harmless. It is not
+    harmless now, and a detail page labelled "Timezone" showing a value the
+    browser will not use is rule 1 of `docs/05` §10 wearing a field label.
+
+    Detail only, never the list: this resolves the profile's route, and doing
+    that per row is the shape of cost F9 was about.
+    """
+    try:
+        from ..geo import align_to_exit
+        from ..network import NetworkMode, network_config_for_profile
+
+        mode = network_config_for_profile(row, commit=False).mode
+        plan = align_to_exit(
+            row, row.get("fingerprint"), row.get("lastNetworkDiagnostics"),
+            direct=(mode == NetworkMode.DIRECT),
+        )
+    except Exception as e:  # noqa: BLE001 - a detail page must still render
+        log.debug("effective geo unavailable for %s: %s", row.get("id"), e)
+        return row
+
+    row["effectiveTimezone"] = plan["timezone"] or row.get("timezone")
+    row["effectiveLanguage"] = plan["language"] or row.get("language")
+    row["geoSource"] = plan["source"]
+    row["geoConflicts"] = plan["conflicts"]
+    return row
+
+
 def _list_rows(profiles: list) -> list:
     """Project profiles for the operator table."""
     rows = _with_launch_state(profiles)
@@ -543,7 +578,7 @@ def create_app() -> Flask:
         profile = get_profile(profile_id)
         if not profile:
             return jsonify({"error": "not_found", "id": profile_id}), 404
-        return jsonify(_with_launch_state([profile])[0])
+        return jsonify(_with_effective_geo(_with_launch_state([profile])[0]))
 
     def _apply_aliases(payload: dict) -> dict:
         """Fold legacy field names into their current ones, before validation.
