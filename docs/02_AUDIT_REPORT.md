@@ -93,8 +93,8 @@ engineering draft rather than legal advice.
 | **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint — **identity path done**, rest is policy | 1–2 wk |
 | **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
 | **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
-| **F14** | 🟡 Low | Privacy | Next.js build-time telemetry enabled by default | 5 min |
-| **F15** | 🟡 Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | 15 min |
+| **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
+| **F15** | ✅ Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | done |
 | **F16** | ✅ **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reached nothing** — found by F8; routing fixed, strategy step removed | done |
 | **F17** | ✅ **Critical** | Security | An **unresolvable route launched on the host IP** and reported success — found by F16 | done |
 | **F18** | ✅ **Critical** | Security | **Every profile in a proxy pool egressed through the same member** — pools never recorded a decision | done |
@@ -2416,13 +2416,36 @@ window management is not used at all. Cross-platform is new development, not a p
 
 ---
 
-### F14 / F15 — 🟡 LOW
+### F14 / F15 — ✅ LOW: a noisy build that phoned home — **FIXED**
 
-- **F14:** `npm run build` prints *"Next.js now collects completely anonymous
-  telemetry"*. Build-time only and not user data, but a privacy-positioned product
-  should ship `NEXT_TELEMETRY_DISABLED=1` in the repo. 5 minutes.
-- **F15:** `next.config.ts` declares `rewrites`, which `output: export` ignores —
-  warned twice on every build. Dead config; remove it or drop the export mode.
+**Files:** [`frontend/next.config.ts`](../frontend/next.config.ts),
+[`frontend/package.json`](../frontend/package.json)
+
+- **F14:** `npm run build` printed *"Next.js now collects completely anonymous
+  telemetry"*. Build-time only and not user data, but a product whose own
+  selling point is that it makes **no network requests of its own** should not
+  phone home to build itself. `NEXT_TELEMETRY_DISABLED=1` is now set in the
+  `build`, `dev`, `export` and `publish` scripts — in the repository rather
+  than via `next telemetry disable`, which writes to each developer's global
+  config and so does not travel with the code.
+
+- **F15:** `next.config.ts` declared `rewrites`, which `output: "export"`
+  ignores, so every production build printed two warnings saying the rewrite
+  would not apply. Both were true, and a build that always prints warnings
+  trains whoever runs it to skim past them — which is how a real warning gets
+  missed.
+
+  The rewrite could not simply be deleted: it proxies `/api/*` to Flask on
+  `127.0.0.1:8765` and is what makes `npm run dev` talk to real data. The
+  config is now a function of the build phase, so dev declares the rewrite and
+  the export build declares `output: "export"`, and neither declares the other.
+
+Verified: `npm run publish` completes with **no warnings**, and `next dev`
+boots and answers `/api/health` with a 502-class error from the unreachable
+Flask upstream rather than a 404 — which is the proof the rewrite is still
+live, since without it that path would not route anywhere at all.
+
+---
 
 ---
 
