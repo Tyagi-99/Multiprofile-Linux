@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from .. import __version__
+from .. import __version__, usage
 from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
 from ..browser import identity_faults
@@ -561,6 +561,32 @@ def create_app() -> Flask:
         warnings = field_warnings + _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
+
+    @app.get("/api/usage")
+    def usage_summary():
+        """What the fleet ran, over a window.
+
+        Nothing measured this before, so every commercial question -- what a
+        seat is worth, whether a cap is generous or mean, which workspace is
+        expensive -- was a guess. The metered quantity is seconds spent
+        running, because that is what a fleet costs; a launch count is easy to
+        record and says nothing.
+        """
+        period = (request.args.get("period") or "month").strip().lower()
+        if period not in usage.PERIODS:
+            raise ValidationError("period", f"must be one of {', '.join(usage.PERIODS)}")
+        return jsonify({"ok": True, **usage.summary(period)})
+
+    @app.get("/api/usage/sessions")
+    def usage_sessions_list():
+        """The sessions behind the summary. A total nobody can drill into is
+        a number to be taken on trust."""
+        period = (request.args.get("period") or "month").strip().lower()
+        if period not in usage.PERIODS:
+            raise ValidationError("period", f"must be one of {', '.join(usage.PERIODS)}")
+        limit = parse_limit(request.args.get("limit"), maximum=1000)
+        items = usage.sessions(period, limit=limit)
+        return jsonify({"ok": True, "items": items, "count": len(items), "period": period})
 
     @app.get("/api/profiles/capacity")
     def profiles_capacity():

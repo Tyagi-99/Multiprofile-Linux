@@ -963,6 +963,69 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F37 — ✅ HIGH: nothing measured what the fleet did — **FIXED**
+
+**Files:** [`usage.py`](../src/multiprofile/usage.py) (new),
+[`storage/db.py`](../src/multiprofile/storage/db.py),
+[`api/server.py`](../src/multiprofile/api/server.py)
+
+`storage/db.py` made `client_id` a column with the comment that "billing has
+to aggregate by it". There was nothing to aggregate. The product recorded no
+runtime, no session history and no launch count, so every commercial question
+it might be asked — what a seat is worth, whether a cap is generous or mean,
+which workspace is expensive, what a fair-use limit should be — was a guess,
+and would have stayed a guess however the pricing page was written.
+
+This is also an operator-facing gap before it is a commercial one: "which of
+my profiles is actually being used?" had no answer.
+
+**What is metered.** Seconds spent in the `RUNNING` state. A launch is a count
+and trivial to record, but it is not what a fleet costs: twenty profiles
+started and closed immediately and twenty left open overnight are the same
+number of launches and very different amounts of memory, proxy bandwidth and
+wear.
+
+**Where it is metered.** Inside `db.set_profile_state`, the transition the
+launcher, the supervisor, the job handlers and the API all already route
+through. Metering from those four callers would mean four places that must
+each remember, and the one that forgets produces a bill that is quietly short
+— the identical shape to **F1** (a control that reported success while sitting
+off the path that mattered) and **F19** (an API vocabulary matching nothing
+downstream). The meter is deliberately outside the state transaction, so a
+metering failure can never roll back a state change: the record of what the
+browser is doing outranks the record of what it cost.
+
+**Three properties it is built to have.**
+
+*It cannot double-bill.* A repeated or forced transition to `RUNNING` returns
+the existing open session rather than opening a second one.
+
+*It rounds against its author.* A session abandoned by a crash is closed at
+the profile's **last heartbeat**, never at the time the process next starts —
+the machine may have been off for three days. A clock that runs backwards
+floors at zero rather than producing negative time. A meter that can be shown
+to round in its author's favour is worth nothing to the person being billed.
+
+*It attributes to who owned the profile then.* `client_id` is snapshotted when
+the session opens rather than joined at read time, because a profile can be
+moved between workspaces and a join would silently rewrite last month's
+numbers every time one changed hands. Usage for a **deleted** profile keeps
+counting toward the total and loses only its name: dropping the row would make
+the totals stop adding up, which would quietly discount whatever was deleted.
+
+`GET /api/usage` gives totals by profile and by workspace over a day / week /
+month / all window; `GET /api/usage/sessions` gives the rows behind them,
+because a total nobody can drill into is a number to be taken on trust, which
+is what a bill must not be. Nothing is backfilled — inventing history for a
+table a bill would be drawn from is the one thing metering must not do — so an
+upgraded install starts measuring at its first launch.
+
+33 tests added. One found a real defect while being written: the stale-
+heartbeat guard compared **whole seconds**, so a heartbeat recorded 300 ms
+after a session opened read as older than the session and was discarded.
+
+---
+
 ### F36 — ✅ HIGH: deleting a profile destroyed the asset, irreversibly — **FIXED**
 
 **Files:** [`storage/db.py`](../src/multiprofile/storage/db.py),

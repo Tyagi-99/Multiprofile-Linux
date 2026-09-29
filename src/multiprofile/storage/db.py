@@ -44,7 +44,7 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
@@ -219,6 +219,34 @@ CREATE TABLE IF NOT EXISTS profiles_trash (
     data_json  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trash_deleted ON profiles_trash(deleted_at);
+
+-- Usage. One row per time a profile was actually running, which is the only
+-- quantity this product can meter honestly: launches are a count, but what a
+-- fleet costs -- in memory, in proxy bandwidth, in anything a plan would
+-- price -- is time spent running.
+--
+-- `client_id` is snapshotted when the session opens rather than joined at
+-- read time. A profile can be moved between workspaces, and a bill has to say
+-- who owned it *while it ran*; a join would silently rewrite history every
+-- time a profile changed hands.
+--
+-- `ended_at` NULL means the session is open. `end_reason` says how it closed,
+-- because "stopped" and "the machine lost power" are the same duration and
+-- very different facts.
+CREATE TABLE IF NOT EXISTS usage_sessions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id  TEXT NOT NULL,
+    client_id   TEXT,
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT,
+    seconds     INTEGER,
+    end_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usage_profile ON usage_sessions(profile_id);
+CREATE INDEX IF NOT EXISTS idx_usage_client ON usage_sessions(client_id);
+CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_sessions(started_at);
+-- Finding an open session is the hot path: it happens on every stop.
+CREATE INDEX IF NOT EXISTS idx_usage_open ON usage_sessions(profile_id, ended_at);
 """
 
 
@@ -258,6 +286,10 @@ def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
     #     number. Nothing writes to a trashed profile, so the size is measured
     #     once, when it is trashed. CREATE TABLE above covers a new database;
     #     this adds the column to one that already has the table.
+    # v5: `usage_sessions`, created by _SCHEMA_SQL. Nothing to backfill -- the
+    #     product never recorded runtime before, and inventing history for a
+    #     table a bill would be drawn from is the one thing metering must not
+    #     do. An upgraded install starts measuring from its first launch.
     if from_v == 3:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles_trash)")}
         if "disk_bytes" not in cols:
@@ -370,7 +402,42 @@ def set_profile_state(
                         "WHERE profile_id = ?",
                         (final, note, now, profile_id),
                     )
+    # Metering hangs off the transition, not off the callers. Four call sites
+    # reach this function (launcher, supervisor, job handlers, the API);
+    # metering from each would mean four places that must remember, and the
+    # one that forgets bills short. Outside the transaction above so a
+    # metering failure can never roll back the state change -- the record of
+    # what the browser is doing matters more than the record of what it cost.
+    if final != old:
+        try:
+            _meter_transition(profile_id, old, final)
+        except Exception:  # noqa: BLE001 - bookkeeping must not break a launch
+            log.warning("usage metering failed for %s", profile_id, exc_info=True)
     return {"old": old, "new": final}
+
+
+def _meter_transition(profile_id: str, old: str, new: str) -> None:
+    """Open a usage session on entering RUNNING, close it on leaving."""
+    running = ProfileState.RUNNING.value
+    if new == running:
+        open_usage_session(profile_id, _client_of(profile_id))
+    elif old == running:
+        close_usage_session(profile_id, reason="error" if new == "error" else "stopped")
+
+
+def _client_of(profile_id: str) -> str | None:
+    """The workspace a profile belongs to, read at session start.
+
+    Read straight from the column rather than through storage.profiles: this
+    module is imported by that one, and metering must not be able to fail on
+    an import cycle.
+    """
+    conn = _connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT client_id FROM profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+    return (row["client_id"] if row else None) or None
 
 
 def upsert_profile_runtime(profile_id: str, **fields: Any) -> dict[str, Any]:
@@ -422,6 +489,189 @@ def record_heartbeat(profile_id: str) -> None:
                 "WHERE profile_id = ?",
                 (_utcnow(), _utcnow(), profile_id),
             )
+
+
+# ---------------------------------------------------------------------------
+# Usage metering
+# ---------------------------------------------------------------------------
+#
+# Every function here is driven from `set_profile_state`, which is the single
+# transition every caller -- launcher, supervisor, job handlers -- already
+# routes through. Metering from the callers instead would mean four places
+# that must each remember to record, and the one that forgets produces a bill
+# that is quietly short. That is the same shape as F1 and F19: a control that
+# exists but is not on the path that matters.
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _elapsed_seconds(start: str | None, end: str | None) -> int:
+    a, b = _parse_iso(start), _parse_iso(end)
+    if a is None or b is None:
+        return 0
+    return max(0, int((b - a).total_seconds()))
+
+
+def _is_after(later: str | None, earlier: str | None) -> bool:
+    """Whether ``later`` is genuinely the later timestamp.
+
+    Distinct from ``_elapsed_seconds(...) > 0``, which was the first version
+    and was wrong: it truncates to whole seconds, so a heartbeat recorded
+    300 ms after a session opened read as *older* than the session and was
+    discarded as stale.
+    """
+    a, b = _parse_iso(earlier), _parse_iso(later)
+    return a is not None and b is not None and b > a
+
+
+def open_usage_session(profile_id: str, client_id: str | None = None) -> int | None:
+    """Record that a profile started running. Returns the session id.
+
+    Opening twice for one profile is a no-op rather than a second row: a
+    forced or repeated transition to RUNNING must not bill the same minute
+    twice. The existing open session's id is returned.
+    """
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id FROM usage_sessions WHERE profile_id = ? AND ended_at IS NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+        cur = conn.execute(
+            "INSERT INTO usage_sessions (profile_id, client_id, started_at)"
+            " VALUES (?, ?, ?)",
+            (profile_id, client_id or None, _utcnow()),
+        )
+        return int(cur.lastrowid) if cur.lastrowid else None
+
+
+def close_usage_session(
+    profile_id: str, *, reason: str = "stopped", at: str | None = None
+) -> int:
+    """Close the open session for a profile. Returns the seconds recorded.
+
+    ``at`` exists for recovery, which must close an abandoned session at the
+    last moment the profile was known to be alive rather than at "now".
+    """
+    conn = _connect()
+    ended = at or _utcnow()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, started_at FROM usage_sessions"
+            " WHERE profile_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return 0
+        # A clock that went backwards, or an `at` earlier than the start,
+        # must not produce a negative duration -- _elapsed_seconds floors it.
+        seconds = _elapsed_seconds(row["started_at"], ended)
+        conn.execute(
+            "UPDATE usage_sessions SET ended_at = ?, seconds = ?, end_reason = ?"
+            " WHERE id = ?",
+            (ended, seconds, reason, row["id"]),
+        )
+        return seconds
+
+
+def close_abandoned_sessions() -> int:
+    """Close sessions left open by a crash. Returns how many were closed.
+
+    Called from :func:`recover` on process start. Each is closed at the last
+    heartbeat the profile recorded, falling back to its start -- never at
+    "now", because the machine may have been off for three days and a bill
+    that charges for them is worse than one that undercounts.
+    """
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute(
+            "SELECT u.id, u.profile_id, u.started_at, r.last_heartbeat"
+            " FROM usage_sessions u"
+            " LEFT JOIN profiles_runtime r ON r.profile_id = u.profile_id"
+            " WHERE u.ended_at IS NULL"
+        ).fetchall()
+        closed = 0
+        for row in rows:
+            heartbeat = row["last_heartbeat"]
+            # A heartbeat from before the session started belongs to an
+            # earlier run; it would bill zero, which is the safe direction,
+            # but the start is the more honest floor.
+            ended = row["started_at"]
+            if _is_after(heartbeat, row["started_at"]):
+                ended = heartbeat
+            conn.execute(
+                "UPDATE usage_sessions SET ended_at = ?, seconds = ?,"
+                " end_reason = 'abandoned' WHERE id = ?",
+                (ended, _elapsed_seconds(row["started_at"], ended), row["id"]),
+            )
+            closed += 1
+        return closed
+
+
+def usage_rows(
+    since: str | None = None, until: str | None = None
+) -> list[dict[str, Any]]:
+    """Closed and open sessions in a window, newest first.
+
+    An open session reports the seconds it has run so far, so "currently
+    running" is visible rather than missing until it stops.
+    """
+    conn = _connect()
+    clauses, params = [], []
+    if since:
+        clauses.append("started_at >= ?")
+        params.append(since)
+    if until:
+        clauses.append("started_at < ?")
+        params.append(until)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _lock:
+        rows = conn.execute(
+            "SELECT id, profile_id, client_id, started_at, ended_at, seconds,"
+            f" end_reason FROM usage_sessions{where} ORDER BY id DESC",
+            params,
+        ).fetchall()
+    now = _utcnow()
+    out = []
+    for row in rows:
+        record = dict(row)
+        if record["ended_at"] is None:
+            record["seconds"] = _elapsed_seconds(record["started_at"], now)
+            record["open"] = True
+        else:
+            record["seconds"] = int(record["seconds"] or 0)
+            record["open"] = False
+        out.append(record)
+    return out
+
+
+def count_usage_sessions() -> int:
+    conn = _connect()
+    with _lock:
+        return int(
+            conn.execute("SELECT COUNT(*) AS n FROM usage_sessions").fetchone()["n"]
+        )
+
+
+def delete_usage_for_profile(profile_id: str) -> int:
+    conn = _connect()
+    with _lock, conn:
+        cur = conn.execute("DELETE FROM usage_sessions WHERE profile_id = ?", (profile_id,))
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -591,10 +841,16 @@ def recover() -> dict[str, Any]:
                 "browser state unknown — explicit restart required",
             },
         )
+    # A profile that was running when the process died left a usage session
+    # open. Closed here, at the last heartbeat rather than at "now": the
+    # machine may have been off for days, and a meter that charges for them is
+    # a worse failure than one that undercounts.
+    closed_sessions = close_abandoned_sessions()
     result = {
         "recovered_jobs": recovered_jobs,
         "failed_jobs": failed_jobs,
         "recovered_profiles": recovered_profiles,
+        "closed_usage_sessions": closed_sessions,
     }
     log.info("startup recovery: %s", result)
     return result
@@ -631,6 +887,12 @@ __all__ = [
     "recover",
     "record_heartbeat",
     "set_profile_state",
+    "open_usage_session",
+    "close_usage_session",
+    "close_abandoned_sessions",
+    "usage_rows",
+    "count_usage_sessions",
+    "delete_usage_for_profile",
     "upsert_profile_runtime",
     "update_job_record",
 ]
