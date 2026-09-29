@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from .. import __version__, usage
+from .. import __version__, plans, usage
 from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
 from ..browser import identity_faults
@@ -561,6 +561,18 @@ def create_app() -> Flask:
         warnings = field_warnings + _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
+
+    @app.get("/api/plan")
+    def plan_describe():
+        """What this installation is allowed to do, and what it has used.
+
+        Every limit says whether anything actually enforces it. Reporting a
+        limit nothing checks is the failure this audit kept finding -- a
+        control present in the interface and absent from the path -- so the
+        two that are real are marked real and the three that are declarative
+        are marked declarative.
+        """
+        return jsonify({"ok": True, **plans.describe()})
 
     @app.get("/api/usage")
     def usage_summary():

@@ -963,6 +963,59 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F38 — ✅ MEDIUM: the limits were scattered, anonymous and partly fictional — **FIXED**
+
+**Files:** [`plans.py`](../src/multiprofile/plans.py) (new),
+[`config.py`](../src/multiprofile/config.py),
+[`api/server.py`](../src/multiprofile/api/server.py)
+
+The limits existed; they were just unreachable. `MAX_PROFILES` lived in the
+profile store, `MAX_CONCURRENT_PROFILES` in the browser manager, and neither
+was visible from the other or from the console. An operator who hit one got a
+refusal naming a number they had never chosen and could not find without
+reading two modules and knowing which environment variables the process
+happened to start with.
+
+A named set of limits — a plan — makes that one request instead of an
+archaeology exercise, and it is the same object a hosted product would sell.
+`GET /api/plan` returns the plan, every limit, and current usage against it.
+
+**The part worth being pedantic about.** Every limit reports whether anything
+**enforces** it. Two do (`maxProfiles`, `maxConcurrent`); three are
+declarative (`maxWorkspaces`, `maxApiTokens`, `includedRuntimeHours`) and say
+so. A plan listing five limits of which two are real, without distinguishing
+them, would be exactly the failure this audit kept finding — **F1**'s control
+that reported success while doing nothing, **F19**'s API vocabulary matching
+nothing downstream — wearing commercial dress. The tests assert `enforced`
+against the store and the browser manager rather than against the plan's own
+claim.
+
+**Two deliberate non-features.**
+
+*A plan authorises nothing.* This module reports and applies limits; it does
+not check a licence, phone home, or decide whether anyone paid. The local
+build runs `self-hosted`, deliberately the most generous plan, because a tool
+someone runs on their own machine has no business refusing to work.
+Enforcement that means anything commercially belongs on a server that issues
+the plan, and that server does not exist — see `docs/08`.
+
+*Environment variables still win.* `MAX_PROFILES=400` overrides the plan.
+That is not a hole in a security control, because there is no security control
+here; it is the acknowledgement that on a local install the operator owns the
+machine. The report labels each value `plan` or `env`, because "150 because
+the plan says so" and "150 because `MAX_PROFILES` says so" send someone to
+different places to change it.
+
+`self-hosted` is pinned to **150 stored / 20 concurrent** — the measured
+operating size from F33 and F35 — and a test asserts the two stay equal, since
+if they drift apart one of them is lying to the operator. An unrecognised plan
+name falls back to the default and reports the fallback rather than silently
+changing the limits.
+
+18 tests added.
+
+---
+
 ### F37 — ✅ HIGH: nothing measured what the fleet did — **FIXED**
 
 **Files:** [`usage.py`](../src/multiprofile/usage.py) (new),

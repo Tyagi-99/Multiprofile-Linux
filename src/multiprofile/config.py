@@ -27,6 +27,22 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _plan_limit(field: str, fallback: int) -> int:
+    """The active plan's value for a limit, or the historical default.
+
+    Imported lazily: `plans` reads settings, so a module-level import here
+    would be a cycle. A plan that cannot be resolved falls back to the number
+    this product shipped with rather than to zero -- a limit that reads as
+    "you may store nothing" would be a far worse failure than a stale default.
+    """
+    try:
+        from .plans import active_plan
+
+        return int(getattr(active_plan(), field, fallback))
+    except Exception:  # noqa: BLE001 - config must resolve even if plans does not
+        return fallback
+
+
 @dataclass(frozen=True)
 class Settings:
     """Process-wide settings (immutable snapshot)."""
@@ -111,8 +127,14 @@ class Settings:
 
 def get_settings() -> Settings:
     return Settings(
-        max_concurrent_profiles=_env_int("MAX_CONCURRENT_PROFILES", 20, minimum=1, maximum=64),
-        max_profiles=_env_int("MAX_PROFILES", 150, minimum=1, maximum=10_000),
+        max_concurrent_profiles=_env_int(
+            "MAX_CONCURRENT_PROFILES", _plan_limit("max_concurrent", 20),
+            minimum=1, maximum=64,
+        ),
+        max_profiles=_env_int(
+            "MAX_PROFILES", _plan_limit("max_profiles", 150),
+            minimum=1, maximum=10_000,
+        ),
         trash_retention_days=_env_int(
             "MULTIPROFILE_TRASH_RETENTION_DAYS", 30, minimum=0, maximum=3650
         ),
