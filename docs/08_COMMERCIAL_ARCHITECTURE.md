@@ -209,9 +209,9 @@ articulate its own failure case is a sales deck:
 **Do not build §2 yet.** Two things should happen first, in this order.
 
 **Close F3, or decide not to.** It is the product's competitive ceiling, it
-blocks `06_ROADMAP.md` (not yet written, and unwritable until F3 is settled),
-and it is the one open question on this
-list that nobody else can answer. Every estimate above assumes a product worth
+is the first decision in [`06_ROADMAP`](06_ROADMAP.md), which is written as
+a fork because of it, and it is the one open question on this list that
+nobody else can answer. Every estimate above assumes a product worth
 selling; that assumption rests on F3.
 
 **Then validate demand at a price.** The substrate built in this phase makes

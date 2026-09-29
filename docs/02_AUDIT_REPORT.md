@@ -58,6 +58,24 @@ honest-reporting defects rather than deferring them.
 
 ---
 
+## Deliverables
+
+| | Document |
+|---|---|
+| 01 | [Project snapshot](01_PROJECT_SNAPSHOT.md) |
+| 02 | This report |
+| 03 | [Feature matrix](03_FEATURE_MATRIX.md) |
+| 04 | [Fingerprint test results](04_FINGERPRINT_TEST_RESULTS.md) |
+| 05 | [UI specification](05_UI_SPEC.md) |
+| 06 | [Roadmap](06_ROADMAP.md) |
+| 07 | [Security & compliance](07_SECURITY_AND_COMPLIANCE.md) |
+| 08 | [Commercial architecture](08_COMMERCIAL_ARCHITECTURE.md) |
+
+Plus a draft [Acceptable Use Policy](ACCEPTABLE_USE.md), marked as an
+engineering draft rather than legal advice.
+
+---
+
 ## Findings
 
 | ID | Sev | Area | Summary | Effort |
