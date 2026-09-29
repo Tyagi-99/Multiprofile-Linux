@@ -90,7 +90,7 @@ engineering draft rather than legal advice.
 | **F8** | ✅ Medium | Security | API silently accepts and persists **unknown fields** — **fixed** | done |
 | **F9** | ✅ Medium | UX | Listing got **quadratically slower**; the whole store was materialised per page — **SQL paging + one-page fleet** | done |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
-| **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint — **identity path done**, rest is policy | 1–2 wk |
+| **F11** | 🟡 Medium | Code quality | Failure-swallowing handlers — **identity and security paths done**; 135 remain, policy not bugs | 1–2 wk |
 | **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
 | **F13** | ✅ Medium | Reliability | Window tiling was X11-bound; dead on the Wayland host it is developed on | done |
 | **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
@@ -2324,7 +2324,7 @@ workers spin against an empty table. The console's "Park" button does
 
 ---
 
-### F11 — 🟡 MEDIUM: 138 failure-swallowing handlers — **IDENTITY PATH DONE**
+### F11 — 🟡 MEDIUM: failure-swallowing handlers — **IDENTITY + SECURITY PATHS DONE**
 
 `pyproject.toml` deliberately deselects `BLE001` and `S110`, documenting why.
 Current count: **103 blind-except + 35 try-except-pass**.
@@ -2376,8 +2376,47 @@ cosmetic paths can keep `pass` with a comment.
 >
 > Left alone deliberately: `PinnedCdpSession.close()`'s `pass` (a socket that
 > will not close changes no identity), retry loops that record on final failure,
-> and everything off the identity path. F11 remains open for those; what is
-> closed is the part where a profile's identity could be quietly wrong.
+> and everything off the identity path.
+
+**Addendum — the security path.** A second class, picked the same way (by
+consequence, not by count). Four places wrote a file, called `chmod(0o600)`
+and swallowed the `OSError`:
+
+| Where | What it protects |
+|---|---|
+| `xdg.secure_write_json` | every profiles / gateways / pools write |
+| `xdg.harden_existing` | the startup repair pass |
+| `db._harden` | `control.db` and its WAL sidecars |
+| `secrets._store_in_file` | **the key every proxy password is encrypted with** |
+
+Not raising is right — a filesystem with no permission bits is a legitimate
+place to run, and crashing a launch over a mode bit would be worse than the
+problem. But *must not raise* was never a reason for *must not tell anyone*.
+The result was the quietest possible version of **F4**: the code intends 0600,
+the chmod fails, the file is renamed into place at whatever the umask allows,
+and every later reader sees 0600 in the source and 0644 on disk. The last row
+is the worst — a readable key makes the encryption decorative.
+
+`db._harden` carried a comment asserting that "the startup hardening pass
+reports what it could not fix". **It did not.** `harden_data_dir` returned only
+the names it *changed*, so a failure was indistinguishable from a file that was
+already fine. That claim was load-bearing and false — the same shape as
+**F19**, a control believed to live somewhere else.
+
+All four now record into a bounded, thread-safe registry in `storage/xdg.py`,
+surfaced as a `permissions` block on `/api/health` beside `identity`, and
+logged at **error** level at startup. `faults: []` is a statement — every write
+and repair landed owner-only — for the same reason the identity block is always
+present. `harden_existing` no longer folds "could not fix it" into the same
+`False` that means "already fine". A missing WAL sidecar is not reported,
+because it appears on first write and noise would bury the real ones.
+
+14 tests added, including that a broken `chmod` still writes the file, still
+does not raise, and reaches `/api/health`.
+
+F11 remains open for the rest: **135** blind-except / try-except-pass sites
+outside the identity and security paths, which is policy work rather than a
+bug hunt.
 >
 > Verified: 18 tests in `tests/test_identity_faults.py`, covering the record, the
 > bound, per-profile scoping, both sinks, and the real call sites. One of them

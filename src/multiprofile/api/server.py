@@ -91,7 +91,7 @@ from ..storage.templates import (
     template_to_profile_payload,
     update_template,
 )
-from ..storage.xdg import chrome_profile_dir, data_dir, profiles_path
+from ..storage.xdg import chrome_profile_dir, data_dir, permission_health, profiles_path
 
 # v1.7.0 API hardening (Workstream 3): validation, cursor pagination, auth,
 # live events. WS1 (events bus / jobs table) and WS2 (metrics routes) are
@@ -437,6 +437,10 @@ def create_app() -> Flask:
                 # "faults": [] is a statement, not an absence: nothing has
                 # been swallowed since this process started.
                 "identity": identity_faults.health_summary(),
+                # Files this process could not make owner-only (F11/F4).
+                # Same reasoning as the identity block: [] is a statement that
+                # every write and repair landed 0600, not an absence.
+                "permissions": permission_health(),
                 "reaped": reaped,
             }
         )

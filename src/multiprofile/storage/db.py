@@ -99,12 +99,20 @@ def _harden(path: str) -> None:
     files written by older versions.
     """
     for suffix in ("", "-wal", "-shm"):
+        target = path + suffix
+        if not os.path.exists(target):
+            # A sidecar that does not exist yet is not a failure: WAL and SHM
+            # appear on first write and are hardened on the next pass.
+            continue
         try:
-            os.chmod(path + suffix, 0o600)
-        except OSError:
-            # Missing sidecar, or a filesystem with no permission bits. The
-            # startup hardening pass reports what it could not fix.
-            pass
+            os.chmod(target, 0o600)
+        except OSError as e:
+            # This comment used to say the startup hardening pass reports what
+            # it could not fix. It did not -- `harden_data_dir` returned only
+            # what it changed -- so the claim was load-bearing and false.
+            from .xdg import record_permission_fault
+
+            record_permission_fault(target, f"chmod on the control database failed: {e}")
 
 
 def _connect() -> sqlite3.Connection:

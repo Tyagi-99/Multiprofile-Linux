@@ -27,11 +27,20 @@ def prepare_data_dir() -> None:
     directory. Side effects belong in the entrypoint, not the factory.
     """
     try:
-        from .storage.xdg import harden_data_dir
+        from .storage.xdg import harden_data_dir, permission_faults
 
         fixed = harden_data_dir()
         if fixed:
             log.warning("tightened permissions on operator data: %s", ", ".join(fixed))
+        # What it could not fix matters more than what it did: those files are
+        # still readable by someone else. Startup says so, and /api/health
+        # keeps saying so.
+        stuck = permission_faults()
+        if stuck:
+            log.error(
+                "could not make %d file(s) owner-only: %s",
+                len(stuck), ", ".join(f["path"] for f in stuck),
+            )
     except Exception as e:  # noqa: BLE001 - never block startup
         log.debug("permission hardening skipped: %s", e)
 
