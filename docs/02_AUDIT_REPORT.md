@@ -2790,7 +2790,7 @@ unreachable.
 
 ---
 
-### F16 — 🟡 HIGH: two wizard steps configure nothing — **ROUTING FIXED**
+### F16 — ✅ HIGH: two wizard steps configure nothing — **FIXED**
 
 **Files:** [`frontend/src/components/wizard/wizard-dialog.tsx:106`](../frontend/src/components/wizard/wizard-dialog.tsx#L106),
 [`network.py:551`](../src/multiprofile/network.py#L551)
