@@ -66,9 +66,9 @@ from ..storage.profiles import (
     create_profile,
     delete_profile,
     duplicate_profile,
-    filter_profiles,
     get_profile,
     load_profiles,
+    query_page,
     reap_orphans,
     update_profile,
 )
@@ -87,7 +87,7 @@ from ..storage.xdg import chrome_profile_dir, data_dir, profiles_path
 # wired defensively — the app must boot even if those modules are absent.
 from .auth import register_auth, register_request_guard
 from .event_bus import emit_job_progress, emit_profile_status, get_bus
-from .pagination import paginate, parse_limit
+from .pagination import decode_cursor, encode_cursor, paginate, parse_limit
 from .sse import register_events_routes
 from .user_agents import user_agent_catalog
 from .validation import (
@@ -246,21 +246,11 @@ def _with_launch_state(profiles: list) -> list:
         out.append(q)
     return out
 
-def _all_filtered_profiles(q=None, client_id=None, status=None, tag=None) -> list:
-    """Collect every profile matching the filters (filter_profiles caps its
-    own page at 500, so walk it until a short page)."""
-    out: list = []
-    offset = 0
-    while True:
-        result = filter_profiles(
-            q=q, client_id=client_id, status=status, tag=tag, limit=500, offset=offset
-        )
-        batch = result["items"] if isinstance(result, dict) else result
-        out.extend(batch)
-        if len(batch) < 500:
-            break
-        offset += 500
-    return out
+#: The most profiles one "select all" may resolve to. Not a storage limit --
+#: the query is cheap either way -- but a guard on what a single click can set
+#: in motion: launching ten thousand browsers because someone cleared a filter
+#: is not a thing the operator meant.
+SELECT_ALL_CAP = 5000
 
 
 def _read_all_audit() -> list:
@@ -424,15 +414,67 @@ def create_app() -> Flask:
         status = request.args.get("status")
         tag = request.args.get("tag")
         limit = parse_limit(request.args.get("limit"))
-        filtered = _all_filtered_profiles(q=q, client_id=client_id, status=status, tag=tag)
-        page = paginate(
-            filtered,
-            cursor=request.args.get("cursor"),
-            limit=limit,
-            key_fn=lambda p: (str(p.get("id") or ""), str(p.get("id") or "")),
+
+        # The database orders, filters and cuts the page. This used to collect
+        # every match into Python first -- in chunks of 500, each of which
+        # re-read the whole store -- so one page of 25 out of 10,000 profiles
+        # took five seconds. The cursor contract is unchanged: keyset on id,
+        # opaque cursor, `total` counts every match rather than the page.
+        position = decode_cursor(request.args.get("cursor"))
+        after_id = str(position[1]) if position is not None else None
+        result = query_page(
+            q=q, client_id=client_id, status=status, tag=tag,
+            after_id=after_id, limit=limit,
         )
-        page["items"] = _with_launch_state(page["items"])
-        return jsonify(page)
+        items = result["items"]
+        next_cursor = None
+        if result["has_more"] and items:
+            last_id = str(items[-1].get("id") or "")
+            next_cursor = encode_cursor(last_id, last_id)
+        return jsonify({
+            "items": _with_launch_state(items),
+            "next_cursor": next_cursor,
+            "limit": result["limit"],
+            "total": result["total"],
+        })
+
+    @app.get("/api/profiles/ids")
+    def profiles_ids():
+        """Every profile id matching the filters, for select-all.
+
+        Selection in the console is bounded by the page, so "select all" means
+        "select the 25 rows you can see" and a bulk action on a filtered set of
+        400 means paging through it sixteen times. Resolving the filter to ids
+        server-side is what lets the client act on the whole match; it returns
+        ids rather than profiles because the client already has everything else
+        it needs and a full set of 10,000 profiles is megabytes it will not use.
+
+        Capped: a selection larger than the cap is refused with the count, so
+        the client can say what it would have selected instead of silently
+        acting on a truncated set -- which is how a "delete all" quietly
+        deletes some.
+        """
+        q = request.args.get("q")
+        client_id = request.args.get("clientId")
+        status = request.args.get("status")
+        tag = request.args.get("tag")
+        result = query_page(
+            q=q, client_id=client_id, status=status, tag=tag,
+            limit=SELECT_ALL_CAP + 1,
+        )
+        ids = [str(p.get("id") or "") for p in result["items"]]
+        if len(ids) > SELECT_ALL_CAP:
+            return jsonify({
+                "ok": False,
+                "error": "selection_too_large",
+                "total": result["total"],
+                "cap": SELECT_ALL_CAP,
+                "message": (
+                    f"{result['total']} profiles match; narrow the filter or "
+                    f"act on at most {SELECT_ALL_CAP} at a time"
+                ),
+            }), 413
+        return jsonify({"ids": ids, "total": result["total"], "cap": SELECT_ALL_CAP})
 
     @app.post("/api/profiles")
     def profiles_create():

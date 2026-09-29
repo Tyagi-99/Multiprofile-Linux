@@ -474,6 +474,22 @@ def duplicate_profile(profile_id: str) -> dict[str, Any] | None:
     return clone_profile(profile_id, mode="config_only")
 
 
+def _matches_status(profile: dict[str, Any], status: str) -> bool:
+    """The status predicate, kept in one place.
+
+    Status is not stored -- it is synthesised on read from the runtime
+    registry -- so it cannot be a WHERE clause without the database
+    disagreeing with the live process table. It stays a Python filter, and
+    this is the only definition of it.
+    """
+    st = status.lower().strip()
+    if st == "running":
+        return profile.get("status") == "running" or bool(profile.get("isRunning"))
+    if st == "idle":
+        return not (profile.get("status") == "running" and profile.get("pid"))
+    return (profile.get("status") or "").lower() == st
+
+
 def filter_profiles(
     *,
     q: str | None = None,
@@ -483,36 +499,71 @@ def filter_profiles(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    items = load_profiles()
-    filtered = items
-    if q:
-        ql = q.lower().strip()
-        filtered = [
-            p
-            for p in filtered
-            if ql in (p.get("name") or "").lower()
-            or ql in (p.get("notes") or "").lower()
-            or ql in (p.get("userAgent") or "").lower()
-            or any(ql in str(t).lower() for t in (p.get("tags") or []))
-        ]
-    if client_id:
-        filtered = [p for p in filtered if p.get("clientId") == client_id]
+    """Offset-paginated filtered profiles.
+
+    The text, client and tag predicates run in SQL now. They used to run in
+    Python over a freshly loaded copy of the entire store -- and the caller
+    that wanted every match called this in chunks of 500, so the whole store
+    was read and decorated once per chunk.
+    """
+    _ensure_ready()
+    result = db.query_profiles(q=q, client_id=client_id, tag=tag)
+    items = _decorate(result["items"])
+    total = result["total"]
     if status:
-        st = status.lower().strip()
-        if st == "running":
-            filtered = [p for p in filtered if p.get("status") == "running" or p.get("isRunning")]
-        elif st == "idle":
-            filtered = [p for p in filtered if not (p.get("status") == "running" and p.get("pid"))]
-        else:
-            filtered = [p for p in filtered if (p.get("status") or "").lower() == st]
-    if tag:
-        tl = tag.lower().strip()
-        filtered = [p for p in filtered if any(tl == str(t).lower() for t in (p.get("tags") or []))]
-    total = len(filtered)
+        items = [p for p in items if _matches_status(p, status)]
+        total = len(items)
     limit = max(1, min(int(limit or 50), 500))
     offset = max(0, int(offset or 0))
-    page = filtered[offset : offset + limit]
+    page = items[offset : offset + limit]
     return {"items": page, "total": total, "limit": limit, "offset": offset}
+
+
+def query_page(
+    *,
+    q: str | None = None,
+    client_id: str | None = None,
+    status: str | None = None,
+    tag: str | None = None,
+    after_id: str | None = None,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """One keyset page, cut in SQL.
+
+    This is what the list endpoint wants: the database orders, filters and
+    limits, so serving 25 rows reads 25 rows instead of the whole table.
+
+    A status filter is the exception, and deliberately so. Status is
+    synthesised on read, so SQL cannot cut on it; asking for one falls back to
+    scanning the matching set. That is acceptable because status narrows to
+    what is *running*, which is bounded by the browser slot limit -- an
+    operator filtering by status is asking about a handful of profiles, not
+    ten thousand. The cost is stated rather than hidden.
+    """
+    limit = max(1, min(int(limit or 25), 500))
+    _ensure_ready()
+
+    if status:
+        result = db.query_profiles(q=q, client_id=client_id, tag=tag)
+        items = [p for p in _decorate(result["items"])
+                 if _matches_status(p, status)]
+        total = len(items)
+        if after_id:
+            items = [p for p in items if str(p.get("id") or "") > after_id]
+        page = items[:limit]
+        has_more = len(items) > limit
+    else:
+        # limit + 1 so "is there a next page" costs one row, not a second
+        # query and not a full count of the remainder.
+        result = db.query_profiles(
+            q=q, client_id=client_id, tag=tag, after_id=after_id, limit=limit + 1
+        )
+        total = result["total"]
+        rows = result["items"]
+        has_more = len(rows) > limit
+        page = _decorate(rows[:limit])
+
+    return {"items": page, "total": total, "limit": limit, "has_more": has_more}
 
 
 def pid_alive(pid: int | None) -> bool:

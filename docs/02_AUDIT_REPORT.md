@@ -737,18 +737,75 @@ response already carries a `warnings` array that is currently unused here.
 
 ---
 
-### F9 — ❌ MEDIUM: no list virtualization
+### F9 — ✅ MEDIUM: listing profiles got quadratically slower — **API FIXED, UI REMAINS**
 
-**File:** `frontend/src/components/profiles/profiles-page.tsx`
+**Files:** [`storage/db.py`](../src/multiprofile/storage/db.py),
+[`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
+[`api/server.py`](../src/multiprofile/api/server.py)
 
-Measured in the live console with 603 profiles: `domRows: 25`,
-`hasVirtualSpacer: false`, pagination controls `Page 1` / `Next`.
+Originally filed as "no list virtualization", measured in the live console
+with 603 profiles: `domRows: 25`, `hasVirtualSpacer: false`. That reading was
+right about the renderer and right that the real failure was in the API — and
+it survived the storage move in F6, because F6 made the *store* fast while
+this path still materialised everything repeatedly.
 
-The DOM stays small, so the UI itself will not jank — the brief's "60 fps at 10,000
-rows" fails in the **API** (F6), not the renderer. But the brief asks for a
-virtualized list, and pagination at 25/page is a materially different UX from the
-competitors' infinite-scroll grids: no jump-to-row, no select-all-across-pages, and
-bulk actions are bounded by the page.
+The list endpoint collected every matching profile into Python and sliced the
+page out of it. The collector walked in chunks of 500, and the function it
+called re-read and re-decorated the whole table on **every chunk** — so
+serving 25 rows out of 10,000 profiles materialised the store twenty times:
+
+| | 2,000 | 10,000 |
+|---|---|---|
+| first page (25 rows) | 246 ms | **5,006 ms** |
+| filter by tag | 118 ms | 2,628 ms |
+
+Five times the data for twenty times the work.
+
+Filtering, ordering and the keyset cut now happen in SQL. Warm, at 10,000
+profiles:
+
+| | before | after |
+|---|---|---|
+| no filter | 4,561 ms | **0.5 ms** |
+| tag filter | 1,568 ms | 24.5 ms |
+
+(The "before" figures understate it: that loop was measured already calling
+the new SQL-backed inner function, so the original was slower still.)
+
+**The predicates mirror the Python ones exactly**, not approximately. A
+cheaper `data_json LIKE '%term%'` would have matched field *names* and any
+other string in the document, so the `total` returned beside the page would
+have disagreed with the page — a filter that quietly means something different
+at scale is worse than a slow one. A parametrised test runs both
+implementations over the same corpus and asserts identical id sets and counts.
+Search terms are escaped, so a profile named `100%` is found rather than
+matching everything.
+
+**Status stays a Python filter, deliberately.** A profile's status is not
+stored — it is synthesised on read from the runtime registry — so it cannot be
+a `WHERE` clause without the database disagreeing with the live process table.
+Asking for one falls back to scanning the matching set, which is acceptable
+because status narrows to what is *running*, bounded by the browser slot
+limit. The cost is stated in the docstring rather than hidden.
+
+**Select-all across a filter** is now possible: `GET /api/profiles/ids`
+resolves a filter to its ids. Selection was bounded by the page, so a bulk
+action on a filtered set of 400 meant paging through it sixteen times. It is
+capped at 5,000 and refuses an oversized selection **with the count**, rather
+than truncating — truncating is how a "delete all" quietly deletes some.
+
+`_all_filtered_profiles` was deleted rather than left unused, since it encoded
+the pattern being fixed.
+
+**Not done — the UI half.** The console still renders a 25-row page with
+Next/Prev and a "select all profiles on this page" checkbox. The API can now
+serve a much larger page and resolve a whole filter, but the frontend has not
+been changed to use either, so the operator-visible gaps the original finding
+named — no jump-to-row, no select-all-across-pages, bulk actions bounded by
+the page — remain. That work needs a frontend change and an `npm run publish`
+rebuild of `src/static`, and is tracked as the remaining half of F9.
+
+24 tests added.
 
 ---
 
