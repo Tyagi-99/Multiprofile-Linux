@@ -90,6 +90,178 @@ def _first_request_hints_enabled() -> bool:
         return True
 
 
+_WORKER_TARGET_TYPES = frozenset({"service_worker", "shared_worker", "worker"})
+
+
+def build_worker_identity_script(fingerprint: dict[str, Any]) -> str:
+    """The identity a worker realm gets, as a self-contained script.
+
+    ``evasion.js`` is written against a window: it touches ``document``,
+    ``HTMLIFrameElement`` and ``screen``, none of which exist in a worker. It
+    used to reach workers by wrapping the ``Worker`` constructor and building
+    a new blob that ran a prelude and then ``importScripts()`` the real
+    script. That covered dedicated workers and nothing else, and it broke one
+    of them.
+
+    Two failures came out of it, both measured on this host.
+
+    A **service worker** is registered by URL and fetched by the browser, so
+    no constructor wrapper can reach it. One page reported::
+
+        top document     platform: Win32          hardwareConcurrency: 8
+        service worker   platform: Linux x86_64   hardwareConcurrency: 16
+
+    The User-Agent was right in both, because that comes from a process-wide
+    flag, and so was the timezone, because that is set on the engine. Only the
+    values spoofed in JavaScript were missing -- and they were missing in the
+    one realm that outlives the page. A service worker persists across
+    navigations and can be messaged by any page in scope, so a script reading
+    the host's real platform and core count through one gets a stable
+    cross-profile identifier for free.
+
+    A **module worker** has no ``importScripts()``. The wrapper called it
+    anyway inside a ``try/catch``, so the prelude loaded, the real script
+    silently never did, and the worker answered nothing::
+
+        bare Chromium 151   classic: Linux x86_64/16   module: Linux x86_64/16
+        profile (wrapper)   classic: Win32/12          module: TIMEOUT
+
+    That breaks any site whose bundler emits a module worker, and a browser
+    where module workers hang is not the Chrome the User-Agent claims.
+
+    So the wrapper is gone and this is the single mechanism. The worker is
+    auto-attached with ``waitForDebuggerOnStart``, which freezes it before its
+    first line, so evaluating here lands ahead of the worker's own code --
+    strictly more reliable than rewriting its source, and it reaches dedicated,
+    module, shared and service workers alike. Having exactly one mechanism
+    also matters for the canvas noise below: applying it twice would give a
+    classic worker a different fingerprint from a module one.
+    """
+    gpu = fingerprint.get("gpu") or {}
+    payload = {
+        "platform": fingerprint.get("platform") or "",
+        "cores": fingerprint.get("cores"),
+        "memory": fingerprint.get("memory"),
+        "language": fingerprint.get("language") or "",
+        "languages": list(fingerprint.get("languages") or []),
+        "gpuVendor": gpu.get("vendor") or "",
+        "gpuRenderer": gpu.get("renderer") or "",
+        "seed": int(fingerprint.get("seed") or 1),
+    }
+    cfg = json.dumps(payload, separators=(",", ":"))
+    return _WORKER_SCRIPT_TEMPLATE.replace("__MP_WORKER_CFG__", cfg)
+
+
+# The worker-side body. Kept as one string so the values it depends on come
+# from the fingerprint above and nowhere else.
+_WORKER_SCRIPT_TEMPLATE = r"""
+(() => { try {
+  const C = __MP_WORKER_CFG__;
+  const nav = self.navigator;
+  const proto = self.WorkerNavigator ? self.WorkerNavigator.prototype : null;
+  const native = (fn, name) => {
+    try {
+      Object.defineProperty(fn, 'name', {value: name, configurable: true});
+      const s = 'function ' + name + '() { [native code] }';
+      fn.toString = function toString() { return s; };
+    } catch (e) {}
+    return fn;
+  };
+  const put = (key, value) => {
+    if (value === null || value === undefined) return;
+    const get = native(function () { return value; }, 'get ' + key);
+    for (const target of [proto, nav]) {
+      if (!target) continue;
+      try { Object.defineProperty(target, key, {get: get, configurable: true, enumerable: true}); }
+      catch (e) {}
+    }
+  };
+  if (nav) {
+    put('platform', C.platform);
+    put('hardwareConcurrency', C.cores);
+    put('deviceMemory', C.memory);
+    put('language', C.language);
+    put('languages', Object.freeze(C.languages.slice()));
+  }
+
+  // Canvas and WebGL noise, identical to the page's, because a worker can
+  // render through OffscreenCanvas and a probe can compare the two.
+  const SEED = C.seed | 0;
+  function pixelHash(x, y) {
+    let h = Math.imul(SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+    return (h ^ (h >>> 15)) >>> 0;
+  }
+  function addNoise(data, ox, oy, w, h) {
+    if (w * h > 4000000) return;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        if (data[i + 3] === 0) continue;
+        const r = pixelHash(ox + x, oy + y);
+        if ((r & 15) !== 0) continue;
+        const up = ((r >>> 8) & 1) === 1;
+        const a = data[i + 3];
+        if (a === 255) {
+          const c = i + ((r >>> 4) % 3);
+          const v = data[c];
+          data[c] = up ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
+        } else {
+          data[i + 3] = (up || a === 1) ? a + 1 : a - 1;
+        }
+      }
+    }
+  }
+  try {
+    if (self.OffscreenCanvasRenderingContext2D) {
+      const orig = self.OffscreenCanvasRenderingContext2D.prototype.getImageData;
+      self.OffscreenCanvasRenderingContext2D.prototype.getImageData = native(
+        function getImageData(sx, sy, sw, sh) {
+          const img = orig.apply(this, arguments);
+          try { addNoise(img.data, 0, 0, img.width, img.height); } catch (e) {}
+          return img;
+        }, 'getImageData');
+    }
+  } catch (e) {}
+  try {
+    const hookGL = function (p) {
+      if (!p || !p.getParameter) return;
+      const origGP = p.getParameter;
+      p.getParameter = native(function getParameter(param) {
+        if (param === 37445 && C.gpuVendor) return C.gpuVendor;
+        if (param === 37446 && C.gpuRenderer) return C.gpuRenderer;
+        return origGP.apply(this, arguments);
+      }, 'getParameter');
+      if (p.readPixels) {
+        const origRP = p.readPixels;
+        p.readPixels = native(function readPixels(x, y, w, h, format, type, pixels) {
+          const ret = origRP.apply(this, arguments);
+          try {
+            if (pixels && pixels.length && w > 0 && h > 0) {
+              const len = Math.min(pixels.length, w * h * 4);
+              for (let i = 0; i < len; i += 4) {
+                const px = (i / 4) | 0;
+                const r = pixelHash(px % w, (px / w) | 0);
+                if ((r & 15) !== 0) continue;
+                if (pixels[i + 3] === 0) continue;
+                const c = i + ((r >>> 4) % 3);
+                const v = pixels[c];
+                pixels[c] = ((r >>> 8) & 1) ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
+              }
+            }
+          } catch (e) {}
+          return ret;
+        }, 'readPixels');
+      }
+    };
+    if (self.WebGLRenderingContext) hookGL(self.WebGLRenderingContext.prototype);
+    if (self.WebGL2RenderingContext) hookGL(self.WebGL2RenderingContext.prototype);
+  } catch (e) {}
+} catch (e) {} })()
+"""
+
+
 def build_identity_script(
     fingerprint: dict[str, Any],
     evasion_source: str,
@@ -139,7 +311,10 @@ class InjectionStatus:
     cookies_applied: int = 0
     ua_override_applied: bool = False
     timezone_applied: bool = False
+    locale_applied: bool = False
+    geolocation_applied: bool = False
     targets_seen: int = 0
+    workers_identified: int = 0
     error: str | None = None
     detail: list[str] = field(default_factory=list)
 
@@ -151,7 +326,10 @@ class InjectionStatus:
             "cookiesApplied": self.cookies_applied,
             "uaOverrideApplied": self.ua_override_applied,
             "timezoneApplied": self.timezone_applied,
+            "localeApplied": self.locale_applied,
+            "geolocationApplied": self.geolocation_applied,
             "targetsSeen": self.targets_seen,
+            "workersIdentified": self.workers_identified,
             "error": self.error,
             "detail": list(self.detail),
         }
@@ -188,11 +366,17 @@ class IdentityInjector:
         cookies: list[dict[str, Any]] | None = None,
         ua_override: dict[str, Any] | None = None,
         timezone_id: str | None = None,
+        worker_script: str | None = None,
+        locale: str | None = None,
+        geolocation: dict[str, Any] | None = None,
         profile_id: str = "",
     ):
         self.port = int(port)
         self.timezone_id = (timezone_id or "").strip() or None
         self.script = script or ""
+        self.worker_script = worker_script or ""
+        self.locale = (locale or "").strip() or None
+        self.geolocation = geolocation or None
         self.proxy_auth = proxy_auth
         self.cookies = cookies or []
         self.ua_override = ua_override or None
@@ -464,11 +648,68 @@ class IdentityInjector:
 
         self._send("Fetch.continueRequest", override, session_id=session_id)
 
+    def _identify_worker(self, session_id: str, target: dict[str, Any],
+                         params: dict[str, Any]) -> None:
+        """Give a worker realm the same identity as the page that owns it.
+
+        A service worker is registered by URL and fetched by the browser, so
+        the ``new Worker()`` wrapper in ``evasion.js`` cannot reach it. It was
+        therefore the one realm still reporting the host: measured here,
+        ``platform: Linux x86_64`` and ``hardwareConcurrency: 16`` inside a
+        service worker whose page said ``Win32`` and ``8``.
+
+        Because ``waitForDebuggerOnStart`` freezes the worker before its first
+        line, evaluating here lands ahead of the worker's own code.
+        """
+        # The same dedupe the page path needs, and for a sharper reason: the
+        # canvas noise is applied by this script, so evaluating it twice
+        # noises an already-noised buffer. Measured while building this, a
+        # dedicated worker attached twice and hashed 2367204759 where the page
+        # and the shared and service workers all hashed 414750390 -- the
+        # realms disagreeing again, in the surface meant to make them agree.
+        target_id = target.get("targetId") or ""
+        # The decision is made under the lock; the send happens outside it.
+        # _send takes the same lock, and threading.Lock is not re-entrant, so
+        # releasing a duplicate from inside this block deadlocked the receive
+        # loop -- every launch after the first one hung.
+        with self._lock:
+            duplicate = bool(target_id) and target_id in self._attached
+            if target_id and not duplicate:
+                self._attached.add(target_id)
+        if duplicate:
+            if params.get("waitingForDebugger"):
+                self._send("Runtime.runIfWaitingForDebugger", session_id=session_id)
+            return
+
+        try:
+            if self.worker_script:
+                self._send("Runtime.enable", session_id=session_id)
+                self._send("Runtime.evaluate",
+                           {"expression": self.worker_script,
+                            "awaitPromise": False, "returnByValue": True},
+                           session_id=session_id)
+                self.status.workers_identified += 1
+            if self.timezone_id:
+                # Cheap and harmless: the worker inherits TZ from the process,
+                # but a worker started after a timezone change would not.
+                self._send("Emulation.setTimezoneOverride",
+                           {"timezoneId": self.timezone_id}, session_id=session_id)
+        except Exception as e:  # never leave a worker frozen
+            log.warning("worker identity failed for %s: %s", self.profile_id, e)
+            self.status.detail.append(f"worker identity failed: {e}")
+        finally:
+            if params.get("waitingForDebugger"):
+                self._send("Runtime.runIfWaitingForDebugger", session_id=session_id)
+
     def _on_attached(self, params: dict[str, Any]) -> None:
         session_id = params.get("sessionId")
         target = params.get("targetInfo") or {}
-        if not session_id or target.get("type") not in ("page", "iframe"):
-            # Still release it, or a frozen worker blocks the browser.
+        target_type = target.get("type")
+        if session_id and target_type in _WORKER_TARGET_TYPES:
+            self._identify_worker(session_id, target, params)
+            return
+        if not session_id or target_type not in ("page", "iframe"):
+            # Still release it, or a frozen target blocks the browser.
             if session_id and params.get("waitingForDebugger"):
                 self._send("Runtime.runIfWaitingForDebugger", session_id=session_id)
             return
@@ -478,10 +719,21 @@ class IdentityInjector:
         # the exact bug loader.js used to cause.
         target_id = target.get("targetId") or ""
         with self._lock:
-            if target_id and target_id in self._attached:
-                return
-            if target_id:
+            duplicate = bool(target_id) and target_id in self._attached
+            if target_id and not duplicate:
                 self._attached.add(target_id)
+        if duplicate:
+            # Skipping the install is right; skipping the release is not. A
+            # target auto-attached from two sessions arrives twice, and
+            # returning without unfreezing it leaves the second one paused
+            # forever -- measured as a page that never finished loading once
+            # auto-attach was armed on page sessions too.
+            #
+            # The send is outside the lock on purpose: _send takes it too and
+            # threading.Lock is not re-entrant.
+            if params.get("waitingForDebugger"):
+                self._send("Runtime.runIfWaitingForDebugger", session_id=session_id)
+            return
 
         self.status.targets_seen += 1
 
@@ -512,6 +764,52 @@ class IdentityInjector:
             self._send("Emulation.setTimezoneOverride",
                        {"timezoneId": self.timezone_id}, session_id=session_id)
             self.status.timezone_applied = True
+
+        if self.locale:
+            # The same argument as the timezone, for the same reason. The
+            # profile's language reached navigator.language through the
+            # injected script and Accept-Language through the UA override, but
+            # nothing told the engine, so Intl collation, date and number
+            # formatting still followed the host: a profile claiming de-DE
+            # formatted 1.234,56 as 1,234.56. Setting the locale makes every
+            # Intl surface agree, including the ones no script patches.
+            self._send("Emulation.setLocaleOverride",
+                       {"locale": self.locale}, session_id=session_id)
+            self.status.locale_applied = True
+
+        if self.geolocation:
+            # Unset, getCurrentPosition resolved against the host -- the
+            # operator's real surroundings, identical for every profile on the
+            # machine. This is the only surface in the identity that leaks a
+            # physical fact about the person rather than the computer, so it
+            # is set even when the site will probably never ask.
+            self._send("Emulation.setGeolocationOverride", {
+                "latitude": self.geolocation["latitude"],
+                "longitude": self.geolocation["longitude"],
+                "accuracy": self.geolocation.get("accuracy", 1200.0),
+            }, session_id=session_id)
+            self.status.geolocation_applied = True
+
+        # Dedicated workers are children of a page target, so the browser
+        # session's auto-attach never sees them -- measured here, only
+        # shared_worker and service_worker ever arrived. Arming auto-attach on
+        # the page's own session is what brings `new Worker(...)` into the
+        # same path as every other realm, including workers loaded from a URL
+        # rather than a blob.
+        if self.worker_script:
+            # Filtered to dedicated workers only. Shared and service workers
+            # already arrive on the browser session, and attaching them from
+            # here as well paused them twice: a target held by two sessions
+            # has to be released on both, and the service worker that was
+            # working a moment earlier stopped activating at all. Dedicated
+            # workers are the only type the browser session cannot see, so
+            # they are the only type this asks for.
+            self._send("Target.setAutoAttach", {
+                "autoAttach": True,
+                "waitForDebuggerOnStart": True,
+                "flatten": True,
+                "filter": [{"type": "worker", "exclude": False}, {"exclude": True}],
+            }, session_id=session_id)
 
         if self.script:
             # Page must be enabled on this session before the page machinery
@@ -582,6 +880,9 @@ def start_injection(
     cookies: list[dict[str, Any]] | None = None,
     ua_override: dict[str, Any] | None = None,
     timezone_id: str | None = None,
+    worker_script: str | None = None,
+    locale: str | None = None,
+    geolocation: dict[str, Any] | None = None,
 ) -> InjectionStatus:
     """Start (and register) injection for a profile, replacing any previous one."""
     stop_injection(profile_id)
@@ -592,6 +893,9 @@ def start_injection(
         cookies=cookies,
         ua_override=ua_override,
         timezone_id=timezone_id,
+        worker_script=worker_script,
+        locale=locale,
+        geolocation=geolocation,
         profile_id=profile_id,
     )
     status = injector.start()

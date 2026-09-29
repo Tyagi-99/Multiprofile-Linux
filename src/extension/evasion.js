@@ -511,102 +511,30 @@
 
   } catch(e) {}
 
-  // CreepJS and similar probes fingerprint canvas inside Worker/OffscreenCanvas.
-  // Content scripts do not run in workers, so wrap Worker to prepend the same seed.
-  try {
-    if (typeof Worker !== "undefined") {
-      const NativeWorker = Worker;
-      const prelude =
-        "self.__MP_SEED=" + String(PROFILE_SEED | 0) + ";" +
-        "self.__MP_GPU_V=" + JSON.stringify(TARGET_GPU_VENDOR) + ";" +
-        "self.__MP_GPU_R=" + JSON.stringify(TARGET_GPU_RENDERER) + ";" +
-        "(" + function () {
-          const PROFILE_SEED = self.__MP_SEED || 1;
-          function pixelHash(x, y) {
-            let h = Math.imul(PROFILE_SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
-            h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
-            h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
-            return (h ^ (h >>> 15)) >>> 0;
-          }
-          function addNoise(data, ox, oy, w, h) {
-            if (w * h > 4000000) return;
-            for (let y = 0; y < h; y++) {
-              for (let x = 0; x < w; x++) {
-                const i = (y * w + x) * 4;
-                if (data[i + 3] === 0) continue;
-                const r = pixelHash(ox + x, oy + y);
-                if ((r & 15) !== 0) continue;
-                const up = ((r >>> 8) & 1) === 1;
-                const a = data[i + 3];
-                if (a === 255) {
-                  const c = i + ((r >>> 4) % 3);
-                  const v = data[c];
-                  data[c] = up ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
-                } else {
-                  data[i + 3] = (up || a === 1) ? a + 1 : a - 1;
-                }
-              }
-            }
-          }
-          try {
-            if (self.OffscreenCanvasRenderingContext2D) {
-              const orig = self.OffscreenCanvasRenderingContext2D.prototype.getImageData;
-              self.OffscreenCanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
-                const img = orig.apply(this, arguments);
-                try { addNoise(img.data, 0, 0, img.width, img.height); } catch (e) {}
-                return img;
-              };
-            }
-          } catch (e) {}
-          try {
-            const hookGL = function (proto) {
-              if (!proto || !proto.getParameter) return;
-              const origGP = proto.getParameter;
-              proto.getParameter = function (param) {
-                if (param === 37445) return self.__MP_GPU_V;
-                if (param === 37446) return self.__MP_GPU_R;
-                return origGP.call(this, param);
-              };
-              if (proto.readPixels) {
-                const origRP = proto.readPixels;
-                proto.readPixels = function (x, y, w, h, format, type, pixels) {
-                  const ret = origRP.apply(this, arguments);
-                  try {
-                    if (pixels && pixels.length && w > 0 && h > 0) {
-                      const len = Math.min(pixels.length, w * h * 4);
-                      for (let i = 0; i < len; i += 4) {
-                        const px = (i / 4) | 0;
-                        const r = pixelHash(px % w, (px / w) | 0);
-                        if ((r & 15) !== 0) continue;
-                        if (pixels[i + 3] === 0) continue;
-                        const c = i + ((r >>> 4) % 3);
-                        const v = pixels[c];
-                        pixels[c] = ((r >>> 8) & 1) ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
-                      }
-                    }
-                  } catch (e) {}
-                  return ret;
-                };
-              }
-            };
-            if (self.WebGLRenderingContext) hookGL(self.WebGLRenderingContext.prototype);
-            if (self.WebGL2RenderingContext) hookGL(self.WebGL2RenderingContext.prototype);
-          } catch (e) {}
-        }.toString() + ")();";
-      function wrapWorkerScript(scriptURL) {
-        const blob = new Blob(
-          [prelude, "\ntry{importScripts(", JSON.stringify(String(scriptURL)), ");}catch(e){}"],
-          { type: "text/javascript" }
-        );
-        return URL.createObjectURL(blob);
-      }
-      const WrappedWorker = function Worker(scriptURL, options) {
-        return new NativeWorker(wrapWorkerScript(scriptURL), options);
-      };
-      WrappedWorker.prototype = NativeWorker.prototype;
-      window.Worker = makeNative(WrappedWorker, "Worker");
-    }
-  } catch (e) {}
+  // Worker realms are handled over CDP, not by rewriting worker source.
+  //
+  // This block used to wrap the Worker constructor and hand the real script
+  // to a new blob that ran a prelude and then importScripts()'d it. That
+  // reached dedicated workers only, and it broke one kind of them outright:
+  // a module worker has no importScripts(), the call sat inside a
+  // try/catch, so the prelude loaded, the real script silently never did,
+  // and the worker answered nothing. Measured against stock Chromium 151 on
+  // the same page:
+  //
+  //   bare Chromium     classic: "Linux x86_64/16"   module: "Linux x86_64/16"
+  //   profile (wrapper) classic: "Win32/12"          module: TIMEOUT
+  //
+  // It also could not reach a service worker at all, since those are fetched
+  // by the browser from a URL rather than constructed here -- which left the
+  // one realm that outlives the page reporting the host.
+  //
+  // The injector now evaluates a worker identity script over CDP while the
+  // worker is still frozen by waitForDebuggerOnStart, which lands ahead of
+  // the worker's own first line and reaches dedicated, module, shared and
+  // service workers alike. See build_worker_identity_script in
+  // browser/cdp_inject.py. Having exactly one mechanism is also what keeps
+  // the canvas noise consistent: applying it here as well would give a
+  // classic worker a different fingerprint from a module one.
 
   // ==========================================
   // 6. CLIENT HINTS CONSISTENCY
@@ -687,56 +615,35 @@
   } catch(e) {}
 
   // ==========================================
-  // 7. WEB WORKER SPOOFING (CRITICAL FOR CREEPJS)
+  // 7. WEB WORKERS -- handled over CDP, not by rewriting blobs
   // ==========================================
-  try {
-    const workerPreamble = `
-      try {
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${TARGET_CORES}, configurable: true });
-        ${TARGET_MEMORY !== undefined ? `Object.defineProperty(navigator, 'deviceMemory', { get: () => ${TARGET_MEMORY}, configurable: true });` : 'delete navigator.deviceMemory;'}
-        Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(TARGET_PLATFORM)}, configurable: true });
-        if (self.OffscreenCanvas) {
-          const origGetContext = OffscreenCanvas.prototype.getContext;
-          OffscreenCanvas.prototype.getContext = function(type, ...args) {
-            const ctx = origGetContext.call(this, type, ...args);
-            if (ctx && (type === 'webgl' || type === 'webgl2')) {
-              const origGetParam = ctx.getParameter;
-              ctx.getParameter = function(p) {
-                if (p === 37445) return ${JSON.stringify(TARGET_GPU_VENDOR)};
-                if (p === 37446) return ${JSON.stringify(TARGET_GPU_RENDERER)};
-                return origGetParam.call(this, p);
-              };
-            }
-            return ctx;
-          };
-        }
-        if (self.Intl && self.Intl.DateTimeFormat) {
-          const origRes = Intl.DateTimeFormat.prototype.resolvedOptions;
-          Intl.DateTimeFormat.prototype.resolvedOptions = function() {
-            const r = origRes.apply(this, arguments);
-            r.timeZone = ${JSON.stringify(TARGET_TIMEZONE)};
-            return r;
-          };
-        }
-        Date.prototype.getTimezoneOffset = function() {
-          const dUTC = new Date(this.toLocaleString('en-US', { timeZone: 'UTC' }));
-          const dTZ = new Date(this.toLocaleString('en-US', { timeZone: ${JSON.stringify(TARGET_TIMEZONE)} }));
-          return Math.round((dUTC - dTZ) / 60000);
-        };
-      } catch(e) {}
-    `;
-
-    const originalCreateObjectURL = URL.createObjectURL;
-    URL.createObjectURL = makeNative(function createObjectURL(object) {
-      if (object instanceof Blob && (object.type === 'application/javascript' || object.type === 'text/javascript' || object.type === '')) {
-        try {
-          const newBlob = new Blob([workerPreamble, object], { type: object.type || 'application/javascript' });
-          return originalCreateObjectURL.call(this, newBlob);
-        } catch(e) {}
-      }
-      return originalCreateObjectURL.call(this, object);
-    }, 'createObjectURL');
-  } catch(e) {}
+  // This section used to hook URL.createObjectURL and prepend a preamble to
+  // every JavaScript Blob, so that a worker constructed from a blob URL
+  // inherited part of the identity. It has been removed for three reasons.
+  //
+  // It reached only blob workers. A worker loaded from an ordinary URL --
+  // which is what a bundler emits -- got nothing from it at all.
+  //
+  // It was a *partial* copy of the page's spoofing, so the realms disagreed
+  // where it did apply. Measured on this host, a dedicated worker and its own
+  // page hashed the same OffscreenCanvas render differently, because the
+  // preamble spoofed the WebGL strings but never added the canvas noise:
+  //
+  //   page / shared worker / service worker   cv: 2097776059
+  //   dedicated worker                        cv: 2367204759
+  //
+  // And it set navigator.platform, hardwareConcurrency and deviceMemory but
+  // not language or languages, so a worker answered in a mix of the profile
+  // and the host.
+  //
+  // Hooking URL.createObjectURL is also a broad, observable change to an API
+  // that has nothing to do with workers: every blob URL in the document went
+  // through it.
+  //
+  // The injector now arms Target.setAutoAttach on each page session, so a
+  // dedicated worker is frozen before its first line and given the same
+  // identity script as every other realm. See build_worker_identity_script
+  // in browser/cdp_inject.py.
 
   // ==========================================
   // 8. IFRAME REALM SPOOFING
