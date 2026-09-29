@@ -18,6 +18,7 @@ import type {
   MetricsSummary,
   Profile,
   ProfilesPage,
+  ApiToken,
   PlanInfo,
   TrashPage,
   UsageSession,
@@ -149,6 +150,16 @@ export function usePlan() {
     queryKey: usageKeys.plan,
     queryFn: () => get<PlanInfo>("/api/plan"),
     staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+/** Named API tokens. Never their secrets — the API does not have them either. */
+export function useApiTokens() {
+  return useQuery({
+    queryKey: usageKeys.tokens,
+    queryFn: () => get<{ items: ApiToken[]; scopes: string[] }>("/api/tokens"),
+    staleTime: 15_000,
     retry: 1,
   });
 }

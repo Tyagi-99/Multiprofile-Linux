@@ -274,6 +274,24 @@ export interface PlanInfo {
   };
 }
 
+export interface ApiToken {
+  id: string;
+  name: string;
+  scopes: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface DeletionPreview {
+  profiles: number | null;
+  trashed: number | null;
+  usageSessions: number | null;
+  apiTokens: number | null;
+  browserDirectories: number;
+  confirmation: string;
+}
+
 export interface AuditPage {
   items: AuditItem[];
   next_cursor: string | null;

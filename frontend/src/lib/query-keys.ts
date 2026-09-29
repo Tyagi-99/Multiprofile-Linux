@@ -52,6 +52,7 @@ export const usageKeys = {
   summary: (period: string) => [...usageKeys.all, "summary", period] as const,
   sessions: (period: string) => [...usageKeys.all, "sessions", period] as const,
   plan: ["plan"] as const,
+  tokens: ["tokens"] as const,
 };
 
 export const systemKeys = {
