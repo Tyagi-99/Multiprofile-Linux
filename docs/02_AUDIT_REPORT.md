@@ -102,6 +102,7 @@ honest-reporting defects rather than deferring them.
 | **F38** | ✅ Medium | Commercial | Limits were **scattered, anonymous and partly fictional** — no way to ask what this install may do | done |
 | **F39** | ✅ **High** | Security | **One API token**: unscoped, unrevocable, cleartext — a cron job held the credential that deletes the fleet | done |
 | **F40** | ✅ Medium | Compliance | **No way to export or destroy your data** — GDPR/DPDP readiness had nothing behind it | done |
+| **F41** | ✅ **Critical** | Fingerprint | **`window.__MP_PROFILE__` handed every page the whole spoofing config, seed included** — found by measuring for `docs/04` | done |
 
 ---
 
@@ -964,6 +965,76 @@ asserts the count, which is the assertion that would have failed.
 
 23 tests added, plus 10 retargeted from the file to the database: permissions,
 secrets-at-rest and the resilience properties all still hold, of the new store.
+
+---
+
+### F41 — ✅ CRITICAL: every page could read the spoofing configuration — **FIXED**
+
+**Files:** [`browser/cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py)
+
+Found while building the measurement harness for
+[`04_FINGERPRINT_TEST_RESULTS`](04_FINGERPRINT_TEST_RESULTS.md) — a probe that
+listed globals matching `/^__MP|multiprofile|evasion/i` came back with two.
+
+`build_identity_script` emitted its configuration at top level:
+
+```js
+var __MP_INLINE_CFG__ = {...};
+window.__MP_PROFILE__ = __MP_INLINE_CFG__;
+(function(){ /* evasion.js */ })();
+```
+
+Both are properties of the global object. Measured on a live profile:
+
+```
+window.__MP_PROFILE__  ->  25 keys, 1977 bytes
+architecture, bitness, ch_brands, ch_full_version_list, ch_platform,
+clientHints, cores, engineVersion, gpu, isMobile, language, languages,
+mediaDeviceGroupIds, mediaDeviceIds, memory, model, platform,
+platformVersion, screen, seed, timezone, touch, userAgent, webrtcMode,
+webrtcPolicy
+
+seed: 1479877959
+```
+
+**Why this is critical rather than merely embarrassing.** Two separate
+failures, and the second is the serious one.
+
+*It names the product in one property read.* This is **F7**'s finding — the
+evasion script announcing itself — one layer down and far louder. F7 was a
+`console.log`; this is a structured object.
+
+*It hands over the seed.* The seed derives every noise value the script
+produces, so a site that reads it can undo the canvas, audio and ClientRects
+noise. Worse, the seed is itself a **stable, unique, cross-site identifier** —
+more reliable than any fingerprint, because it is an exact integer rather than
+a statistical signature, and it is constant for the life of the profile. A
+profile that leaks its seed is more trackable than one with no spoofing at
+all, which would at least be anonymous among every other Linux Chromium.
+`mediaDeviceIds` leaks alongside it, undoing part of **F23**.
+
+**The fix is one wrapper.** `evasion.js` is already an IIFE, so enclosing the
+pair in one more function makes the config a closure variable — reachable by
+the code that needs it, unreachable from the page. Nothing else consumed the
+globals; the only other references are inside `evasion.js` itself, which now
+resolves them through scope.
+
+Measured after: `window.__MP_PROFILE__` is `undefined`, `window.__MP_INLINE_CFG__`
+is `undefined`, no global matches the pattern, and the identity is unchanged
+(`navigator.platform === "Win32"`, Windows UA, worker realms still agreeing).
+
+**One existing test asserted the broken shape** — `test_cdp_inject.py` required
+the script to start with a top-level `var` and to set `window.__MP_PROFILE__`.
+It encoded the vulnerability as a requirement, so it was rewritten to assert
+the stronger invariant instead, and the reason is recorded in its docstring.
+
+7 tests: 3 in `test_cdp_inject.py` pinning the generated shape, 4 in the new
+`test_config_leak_live.py` asserting what a real page can actually see.
+
+**How it survived this long.** Every previous check asked whether a *spoofed
+value* was correct. None asked what else was lying around in the global scope
+next to it — which is the same blind spot that made F3 worth writing down:
+the spoofing itself is a surface.
 
 ---
 

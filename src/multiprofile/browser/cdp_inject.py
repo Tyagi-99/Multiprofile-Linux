@@ -11,7 +11,7 @@ flags that load it::
     --disable-extensions-except is not allowed in Google Chrome, ignoring.
 
 Verified on Chrome 151: zero of our extensions appear in the profile's
-``Preferences``, and ``window.__MP_PROFILE__`` is undefined on a real
+``Preferences``, and the extension's script never ran on a real
 ``http://`` page. Profiles were browsing with the host's own fingerprint
 while the console reported them healthy, and authenticated proxies could
 never complete a challenge.
@@ -280,14 +280,28 @@ def build_identity_script(
     survivable, but the caller should pass them.
     """
     cfg = json.dumps(fingerprint, separators=(",", ":"))
-    prelude = f"var __MP_INLINE_CFG__ = {cfg};\nwindow.__MP_PROFILE__ = __MP_INLINE_CFG__;\n"
     body = evasion_source
     for token, value in (replacements or {}).items():
         body = body.replace(token, value)
     if "__PROFILE_CONFIG_JSON__" in body:
         body = body.replace('"__PROFILE_CONFIG_JSON__"', "null")
         body = body.replace("'__PROFILE_CONFIG_JSON__'", "null")
-    return prelude + body
+
+    # The config is a closure variable, not a global.
+    #
+    # It used to be emitted as `var __MP_INLINE_CFG__ = {...};
+    # window.__MP_PROFILE__ = __MP_INLINE_CFG__;` at top level, which put the
+    # entire spoofing configuration on `window` where any page could read it:
+    # 25 keys, ~2 KB, including the per-profile `seed`. That is worse than
+    # doing no spoofing at all. A site reading the seed learns the product's
+    # name from one property, derives every noise value the script will
+    # produce, and gains a stable cross-site identifier more reliable than any
+    # fingerprint -- the profile hands over the thing it exists to protect.
+    #
+    # `evasion.js` is itself an IIFE, so wrapping the pair in one more
+    # function makes the config reachable by closure from the code that needs
+    # it and unreachable from the page. Nothing else consumed the globals.
+    return "(function(){\n" + f"var __MP_INLINE_CFG__ = {cfg};\n" + body + "\n})();\n"
 
 
 @dataclass

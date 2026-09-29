@@ -84,10 +84,42 @@ def _attach(inj, *, session="s1", target="t1", waiting=True, ttype="page"):
 
 def test_script_carries_the_profile_config_first():
     out = build_identity_script({"seed": 7, "platform": "Win32"}, "/* body */")
-    assert out.startswith("var __MP_INLINE_CFG__ =")
-    assert "window.__MP_PROFILE__" in out
-    assert out.index("__MP_PROFILE__") < out.index("/* body */")
+    assert "var __MP_INLINE_CFG__ =" in out
+    assert out.index("__MP_INLINE_CFG__") < out.index("/* body */")
     assert '"platform":"Win32"' in out
+
+
+def test_the_config_is_not_reachable_from_the_page():
+    """The config must be a closure variable, never a global.
+
+    This test previously asserted the opposite -- that the script starts with
+    a top-level ``var __MP_INLINE_CFG__`` and sets ``window.__MP_PROFILE__``.
+    That shape put the whole spoofing configuration on ``window``, where any
+    page could read it: 25 keys and roughly 2 KB, including the per-profile
+    ``seed``. Measured on a live profile before the fix, ``window.__MP_PROFILE__``
+    returned the complete object.
+
+    The seed is the part that makes this worse than no spoofing at all. It
+    derives every noise value the script produces, so a site that reads it can
+    undo the noise *and* keep the seed as a stable cross-site identifier that
+    is more reliable than the fingerprint it was meant to hide.
+    """
+    out = build_identity_script({"seed": 7, "platform": "Win32"}, "/* body */")
+    assert "window.__MP_PROFILE__" not in out
+    # A top-level `var` is a property of the global object, so the wrapper is
+    # what makes the difference -- assert the config sits inside it.
+    assert out.startswith("(function(){")
+    assert out.rstrip().endswith("})();")
+    assert out.index("(function(){") < out.index("__MP_INLINE_CFG__")
+
+
+def test_the_body_can_still_reach_the_config_by_closure():
+    """The fix must not cut the script off from its own configuration."""
+    out = build_identity_script(
+        {"seed": 7}, "(function(){ var x = __MP_INLINE_CFG__.seed; })();"
+    )
+    assert "__MP_INLINE_CFG__.seed" in out
+    assert out.index("var __MP_INLINE_CFG__") < out.index("__MP_INLINE_CFG__.seed")
 
 
 def test_script_neutralises_the_extension_placeholder():
