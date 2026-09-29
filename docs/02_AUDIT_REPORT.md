@@ -583,7 +583,12 @@ rewrite the UA/brands to match. **Fix (strategic):** ship a pinned engine.
 
 ---
 
-### F6 — ⚠️ HIGH: the profile store cannot reach 10,000 profiles
+### F6 (original) — ⚠️ HIGH: the profile store cannot reach 10,000 profiles
+
+> Superseded. Fixed below: the store moved to SQLite. Note that the headline
+> number here is the brief's 10,000; the product's confirmed design size is
+> 150 stored with at most 20 running, and the fix was driven by a lost-update
+> bug that was live at any size, not by the row count.
 
 **File:** [`storage/profiles.py:126`](../src/multiprofile/storage/profiles.py#L126) (`load_profiles`)
 
