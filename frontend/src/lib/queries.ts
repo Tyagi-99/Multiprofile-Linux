@@ -108,9 +108,12 @@ export function useProfileDetail(id: string) {
   return useQuery({
     queryKey: profilesKeys.detail(id),
     queryFn: async () => {
-      // No GET /api/profiles/<id> endpoint; find in the list like the old UI.
-      const page = await get<ProfilesPage>("/api/profiles", { limit: 500 });
-      return page.items.find((p) => p.id === id) ?? null;
+      // One profile, one request. This used to fetch /api/profiles?limit=500
+      // and search the page -- but the list clamps limit to 100, so with more
+      // than a hundred profiles the console could not open any of them past
+      // the first hundred: the request succeeded, the page rendered, and the
+      // answer was "not found" for a profile sitting in the store.
+      return get<Profile>(`/api/profiles/${encodeURIComponent(id)}`);
     },
     staleTime: 10_000,
     retry: 1,

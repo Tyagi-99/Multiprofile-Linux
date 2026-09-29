@@ -99,12 +99,21 @@ def test_profiles_pagination_all_30_exactly_once(client):
     assert seeded <= set(ids)  # all 30 seeded profiles returned
 
 
-def test_profiles_limit_clamped_to_100(client):
+def test_profiles_limit_clamped(client):
+    """The profile list caps higher than other collections.
+
+    A list row lost its fingerprint (2,795 bytes -> 663), so a full page is
+    about 320 KB rather than 1.4 MB. The cap bounds one response, not one
+    query, so it is set per endpoint rather than globally -- jobs and the
+    rest keep the conservative 100.
+    """
+    from multiprofile.api.server import PROFILE_LIST_MAX_LIMIT
+
     seeded = {p["id"] for p in _seed_profiles(3)}
-    resp = client.get("/api/profiles", query_string={"limit": 1000})
+    resp = client.get("/api/profiles", query_string={"limit": 10_000})
     body = resp.get_json()
     assert resp.status_code == 200
-    assert body["limit"] == 100
+    assert body["limit"] == PROFILE_LIST_MAX_LIMIT
     assert seeded <= {p["id"] for p in body["items"]}
     assert body["next_cursor"] is None  # everything fit in one page
 

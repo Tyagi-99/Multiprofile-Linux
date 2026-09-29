@@ -188,6 +188,24 @@ def _operator_state(launch_state: str | None) -> str | None:
     return _OPERATOR_STATE.get(str(launch_state).upper())
 
 
+#: Dropped from list rows. The generated fingerprint is 2,114 bytes of a
+#: 2,795-byte row -- 76% of everything the list endpoint sends -- and the
+#: console's table never reads it: the inspector fetches
+#: ``/api/profiles/<id>/fingerprint`` when an operator opens one. Sending it
+#: with every row is what made a larger page expensive, so a page of 500 cost
+#: 1.4 MB of which 1.1 MB was never looked at.
+_LIST_OMITTED_FIELDS = ("fingerprint",)
+
+
+def _list_rows(profiles: list) -> list:
+    """Project profiles for the operator table."""
+    rows = _with_launch_state(profiles)
+    return [
+        {k: v for k, v in row.items() if k not in _LIST_OMITTED_FIELDS}
+        for row in rows
+    ]
+
+
 def _with_launch_state(profiles: list) -> list:
     """Project runtime truth onto profile rows for the operator table.
 
@@ -251,6 +269,12 @@ def _with_launch_state(profiles: list) -> list:
 #: in motion: launching ten thousand browsers because someone cleared a filter
 #: is not a thing the operator meant.
 SELECT_ALL_CAP = 5000
+
+#: The largest page the profile list will serve. Higher than the default cap
+#: because a list row lost its fingerprint (2,795 bytes -> 663), so a full page
+#: is about 320 KB rather than 1.4 MB, and the database returns it in roughly a
+#: millisecond. It bounds one response, not one query.
+PROFILE_LIST_MAX_LIMIT = 500
 
 
 def _read_all_audit() -> list:
@@ -413,7 +437,7 @@ def create_app() -> Flask:
         client_id = request.args.get("clientId")
         status = request.args.get("status")
         tag = request.args.get("tag")
-        limit = parse_limit(request.args.get("limit"))
+        limit = parse_limit(request.args.get("limit"), maximum=PROFILE_LIST_MAX_LIMIT)
 
         # The database orders, filters and cuts the page. This used to collect
         # every match into Python first -- in chunks of 500, each of which
@@ -432,7 +456,7 @@ def create_app() -> Flask:
             last_id = str(items[-1].get("id") or "")
             next_cursor = encode_cursor(last_id, last_id)
         return jsonify({
-            "items": _with_launch_state(items),
+            "items": _list_rows(items),
             "next_cursor": next_cursor,
             "limit": result["limit"],
             "total": result["total"],
@@ -475,6 +499,29 @@ def create_app() -> Flask:
                 ),
             }), 413
         return jsonify({"ids": ids, "total": result["total"], "cap": SELECT_ALL_CAP})
+
+    @app.get("/api/profiles/<profile_id>")
+    def profiles_detail(profile_id: str):
+        """One profile, in full.
+
+        There was no such route. The console's detail page fetched
+        ``/api/profiles?limit=500`` and searched the page for the id it
+        wanted -- but the list clamps ``limit`` to 100, so with more than a
+        hundred profiles the console could not open any of them past the
+        first hundred. Measured with 150 profiles: asking for 500 returned
+        100, and the detail page for #149 rendered "not found" while the
+        profile was sitting in the store.
+
+        Nothing reported the truncation, which is why it survived: the
+        request succeeded, the page rendered, and the answer was wrong.
+
+        Unlike a list row this keeps the fingerprint, because the thing
+        asking for one profile is the thing that wants its detail.
+        """
+        profile = get_profile(profile_id)
+        if not profile:
+            return jsonify({"error": "not_found", "id": profile_id}), 404
+        return jsonify(_with_launch_state([profile])[0])
 
     @app.post("/api/profiles")
     def profiles_create():

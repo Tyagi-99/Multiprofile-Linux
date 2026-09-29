@@ -737,7 +737,7 @@ response already carries a `warnings` array that is currently unused here.
 
 ---
 
-### F9 — ✅ MEDIUM: listing profiles got quadratically slower — **API FIXED, UI REMAINS**
+### F9 — ✅ MEDIUM: listing profiles got quadratically slower — **FIXED**
 
 **Files:** [`storage/db.py`](../src/multiprofile/storage/db.py),
 [`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
@@ -797,15 +797,50 @@ than truncating — truncating is how a "delete all" quietly deletes some.
 `_all_filtered_profiles` was deleted rather than left unused, since it encoded
 the pattern being fixed.
 
-**Not done — the UI half.** The console still renders a 25-row page with
-Next/Prev and a "select all profiles on this page" checkbox. The API can now
-serve a much larger page and resolve a whole filter, but the frontend has not
-been changed to use either, so the operator-visible gaps the original finding
-named — no jump-to-row, no select-all-across-pages, bulk actions bounded by
-the page — remain. That work needs a frontend change and an `npm run publish`
-rebuild of `src/static`, and is tracked as the remaining half of F9.
+**The UI half, re-scoped.** The product's stated design size is **150
+profiles**. At that size most of what this finding asked for solves a problem
+that does not exist, so it was not built:
 
-24 tests added.
+- **No virtualization.** 150 rows of a plain table is not a rendering problem;
+  the original measurement found no jank at 25 and the cost is linear. A
+  windowed list would be machinery with no user benefit until the target moves.
+- **No cross-page selection.** The page now holds 200, so the whole fleet is
+  one page: "select all" already means all of them, and no bulk action is
+  bounded by a page boundary that no longer exists.
+
+What was built instead:
+
+- The page size is 200, which it could not have been while every row carried
+  its fingerprint.
+- **A list row no longer carries its generated fingerprint** — 2,114 bytes of
+  a 2,795-byte row, which the table never read. A row is 663 bytes now. At 150
+  profiles the whole fleet is **one page, 85 KB, 3.9 ms**, with no pagination
+  control in sight.
+- The bulk bar states the scope of a selection (`N selected of M matching —
+  this page only`) whenever a second page does exist. At 150 it never fires;
+  if the target moves, the operator sees the gap instead of assuming they
+  selected everything.
+
+**A bug this uncovered, which bites at exactly 150.** There was no
+`GET /api/profiles/<id>`. The console's detail page fetched
+`/api/profiles?limit=500` and searched the page — but the list clamped `limit`
+to 100, so **the console could not open any profile past the first hundred**:
+
+```
+asked for 500, got 100 of total 150
+profile #10  findable: True
+profile #149 findable: False
+```
+
+Nothing reported the truncation, which is why it survived: the request
+succeeded, the page rendered, and the answer was "not found" for a profile
+sitting in the store. There is now a real detail endpoint — one indexed row,
+0.6 ms, fingerprint included — and the console uses it.
+
+The `/api/profiles/ids` endpoint and the SQL paging remain in place. They cost
+nothing at 150 and are the part that would have been hard if the target moves.
+
+33 tests added.
 
 ---
 

@@ -51,7 +51,21 @@ import { Select } from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 import { Table, TBody, TD, TH, THead, TR } from "../ui/table";
 
-const PAGE_SIZE = 25;
+// One page holds the whole fleet at the size this product is designed for
+// (150 profiles), so the operator scrolls rather than pages, "select all"
+// really does mean all of them, and bulk actions are not bounded by a page
+// boundary that no longer exists.
+//
+// 25 was chosen when a list row carried its generated fingerprint -- 2,795
+// bytes, of which the table read none. A row is 663 bytes now, so a full
+// page is about 130 KB and the database returns it in roughly a millisecond.
+//
+// Deliberately NOT virtualized. 200 rows of a plain table is not a rendering
+// problem, and a windowed list is machinery with no benefit until the design
+// target moves. If it does, the API is already the part that would have been
+// hard: it pages, filters and sorts in SQL, and /api/profiles/ids resolves a
+// whole filter for select-all.
+const PAGE_SIZE = 200;
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -547,6 +561,16 @@ export function ProfilesPage() {
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-brand-500/30 bg-brand-500/10 px-3 py-2">
           <span className="text-[13px] font-medium text-ink-1">
             {selectedProfiles.length} selected
+            {/* Selection is per page. At the size this is designed for the
+                page holds everything, so the two numbers agree -- but if a
+                filter ever matches more than one page, saying so is the
+                difference between an operator acting on all of it and
+                believing they did. */}
+            {nextCursor && total != null && total > selectedProfiles.length && (
+              <span className="ml-1 font-normal text-ink-3">
+                of {total} matching — this page only
+              </span>
+            )}
           </span>
           <Button variant="ghost" size="sm" onClick={() => setRowSelection({})}>
             Clear
