@@ -963,6 +963,58 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F40 — ✅ MEDIUM: no way to take your data out, or to destroy it — **FIXED**
+
+**Files:** [`account.py`](../src/multiprofile/account.py) (new),
+[`api/server.py`](../src/multiprofile/api/server.py)
+
+The brief asks for "data deletion and export" under GDPR / India DPDP
+readiness. `backup.py` exported **one profile**; nothing could answer "give me
+everything you hold" or "delete everything you hold", and nothing could say
+what either answer would contain.
+
+Both matter locally before a regulator is involved. An export is how an
+operator moves to a new machine or keeps a copy that outlives a disk; a
+deletion is how they hand a laptop back.
+
+**`GET /api/account/export`** returns one document: profiles, trash,
+workspaces, templates, measured usage, token names, the plan, the audit log
+and the cookie jars. Sections are collected independently — one unreadable
+section must not cost the operator the other eight — and a failure is recorded
+**in** the document rather than raised, because an export that silently omits
+a section is the thing to avoid and one that says "audit: could not be read"
+is useful.
+
+**It documents its own gaps.** Proxy passwords are not in it, and the field
+names are in the document rather than only in the source: an export whose
+omissions are undocumented is worse than one with no omissions, because the
+hole is found at restore time. Decrypting credentials into a plain file that
+then gets emailed to a new laptop would undo **F4**, where exactly this class
+of secret was found world-readable. Token hashes do not travel either.
+Written to a file, the export is `0600`, because it carries cookie jars and
+those are live session credentials even with the passwords stripped.
+
+**`POST /api/account/delete`** removes the Chrome profile directories, the
+cookie jars, the database and its WAL sidecars, the audit log and the tokens —
+not merely the rows that make them visible. A delete that unlinks an index and
+leaves the data is the failure this audit kept finding, one layer down; a test
+asserts the proxy password appears in **no file** anywhere under the data
+directory afterwards. The database is closed before its files are unlinked,
+since removing a file from under an open SQLite handle leaves the next write
+recreating a partial database that looks like a working one — and the app is
+asserted to still function afterwards, as an empty install rather than a
+broken one.
+
+It requires the exact string `DELETE EVERYTHING` rather than a boolean: a flag
+is too easy to send by accident from a script that meant something else, and
+there is nothing behind this one. **`GET /api/account/deletion-preview`** says
+what would go without doing it, because nobody should have to run an
+irreversible operation to learn what it covers.
+
+26 tests added.
+
+---
+
 ### F39 — ✅ HIGH: one API token, unscoped, unrevocable, in cleartext — **FIXED**
 
 **Files:** [`api_tokens.py`](../src/multiprofile/api_tokens.py) (new),

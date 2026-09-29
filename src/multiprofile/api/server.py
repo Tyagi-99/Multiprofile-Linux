@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from .. import __version__, api_tokens, plans, usage
+from .. import __version__, account, api_tokens, plans, usage
 from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
 from ..browser import identity_faults
@@ -561,6 +562,49 @@ def create_app() -> Flask:
         warnings = field_warnings + _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
+
+    @app.get("/api/account/export")
+    def account_export():
+        """Everything this installation holds, as one document.
+
+        The brief asks for "data deletion and export" under GDPR / DPDP
+        readiness, and the product could answer neither. Proxy passwords are
+        deliberately absent and the document says so, with the field names:
+        an export whose gaps are undocumented is worse than one with no gaps,
+        because the hole is discovered at restore time.
+        """
+        document = account.export_all()
+        response = Response(
+            json.dumps(document, indent=2, default=str),
+            mimetype="application/json",
+        )
+        response.headers["Content-Disposition"] = (
+            'attachment; filename="multiprofile-export.json"'
+        )
+        audit_log("account_export", ok=True, detail={"counts": document.get("counts")})
+        return response
+
+    @app.get("/api/account/deletion-preview")
+    def account_deletion_preview():
+        """What a deletion would remove. Nobody should have to run an
+        irreversible operation to find out what it covers."""
+        return jsonify({"ok": True, **account.deletion_preview()})
+
+    @app.post("/api/account/delete")
+    def account_delete():
+        """Remove everything. Irreversible.
+
+        Requires the exact confirmation string rather than a boolean: a flag
+        is too easy to send by accident from a script that meant something
+        else, and there is nothing behind this one.
+        """
+        payload = require_json()
+        try:
+            removed = account.delete_everything(payload.get("confirm"))
+        except ValueError as e:
+            raise ValidationError("confirm", str(e)) from e
+        audit_log("account_delete", ok=True, detail=removed)
+        return jsonify({"ok": True, "removed": removed})
 
     @app.get("/api/tokens")
     def tokens_list():
