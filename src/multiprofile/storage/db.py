@@ -24,10 +24,12 @@ Design notes:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -42,12 +44,13 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
 _lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
+_conn_path: str | None = None
 _schema_ready = False
 
 
@@ -84,9 +87,43 @@ def db_path() -> str:
     return str(control_db_path())
 
 
+def _harden(path: str) -> None:
+    """Make the database owner-only, including its WAL sidecars.
+
+    SQLite creates these files itself, so the process umask decides and they
+    land 0644 on a normal install. ``harden_data_dir()`` already fixes that,
+    but only at startup -- which left a window where the file existed
+    world-readable, and once the profile store moved in here that window
+    covered every profile's proxy host, username, client and notes. Setting
+    the mode at creation closes it; the startup pass stays as the repair for
+    files written by older versions.
+    """
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(path + suffix, 0o600)
+        except OSError:
+            # Missing sidecar, or a filesystem with no permission bits. The
+            # startup hardening pass reports what it could not fix.
+            pass
+
+
 def _connect() -> sqlite3.Connection:
-    global _conn, _schema_ready
+    global _conn, _conn_path, _schema_ready
     with _lock:
+        # Reopen when the resolved location has moved. The connection used to
+        # be cached for the life of the process regardless of where db_path()
+        # now pointed, which was survivable while this database held only
+        # runtime rows and jobs. Once the profile store moved in, a caller
+        # that repointed XDG_DATA_HOME -- every test that isolates itself that
+        # way, and any future multi-data-dir use -- kept silently reading and
+        # writing the previous directory's profiles.
+        if _conn is not None and _conn_path != db_path():
+            try:
+                _conn.close()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+            _conn = None
+            _schema_ready = False
         if _conn is None:
             path = db_path()
             # control_db_path() creates parent dirs; the env override may not.
@@ -97,7 +134,10 @@ def _connect() -> sqlite3.Connection:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA busy_timeout=5000;")
             conn.execute("PRAGMA foreign_keys=ON;")
+            # After the WAL pragma, so the -wal and -shm files exist to chmod.
+            _harden(path)
             _conn = conn
+            _conn_path = path
         if not _schema_ready:
             _ensure_schema(_conn)
             _schema_ready = True
@@ -136,6 +176,27 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_profile ON jobs(profile_id);
+
+-- Profiles. The fields worth querying are columns; everything else stays in
+-- data_json.
+--
+-- A profile has ~40 fields and gains more with each feature, so a column per
+-- field would mean a migration per feature and a schema that is always one
+-- release behind the product. The four extracted here are the ones something
+-- other than the profile itself needs: `client_id` because billing has to
+-- aggregate by it, `name` and `created_at` because the console sorts on them,
+-- and `updated_at` because sync needs to know what moved. Those get indexes;
+-- the rest is read as a document, which is what it is.
+CREATE TABLE IF NOT EXISTS profiles (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    client_id  TEXT,
+    created_at TEXT,
+    updated_at TEXT NOT NULL,
+    data_json  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_profiles_client ON profiles(client_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
 """
 
 
@@ -157,9 +218,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
-    """Apply schema migrations. v1 is the base schema; future versions go here."""
+    """Apply schema migrations. v1 is the base schema."""
     log.info("control db schema migration %s -> %s", from_v, to_v)
     # v1: base tables created by _SCHEMA_SQL; nothing incremental yet.
+    # v2: the `profiles` table, created by _SCHEMA_SQL above. Importing the
+    #     old profiles.json into it is NOT done here: it needs the
+    #     normalisation and secret-wrapping that live in storage/profiles.py,
+    #     and a schema migration that imports application data would run
+    #     before that module is ready. See profiles.import_legacy_json.
 
 
 def journal_mode() -> str:
@@ -530,3 +596,141 @@ __all__ = [
     "upsert_profile_runtime",
     "update_job_record",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+#
+# Every function here writes one row in one statement. That is the whole point
+# of the move: the JSON store rewrote the entire list on every change, and
+# because the lock was released between reading and writing, concurrent
+# updates overwrote each other. Measured on the JSON store with 20 threads
+# each updating a different profile, under the same threaded Flask server the
+# product ships:
+#
+#     writes that survived: 3/20
+#
+# and all 20 returned success to their callers. A per-row UPDATE cannot lose a
+# write to a different row, so the fix is structural rather than a lock.
+
+
+def _profile_row(profile: dict[str, Any]) -> tuple[str, str, str | None, str | None, str, str]:
+    return (
+        str(profile.get("id") or ""),
+        str(profile.get("name") or ""),
+        profile.get("clientId") or None,
+        profile.get("createdAt") or None,
+        _utcnow(),
+        json.dumps(profile, separators=(",", ":"), default=str),
+    )
+
+
+def list_profiles() -> list[dict[str, Any]]:
+    """Every stored profile, in insertion order."""
+    conn = _connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT data_json FROM profiles ORDER BY rowid"
+        ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            out.append(json.loads(row["data_json"]))
+        except (ValueError, TypeError):
+            log.warning("skipping a profile row whose JSON will not parse")
+    return out
+
+
+def get_profile_row(profile_id: str) -> dict[str, Any] | None:
+    conn = _connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT data_json FROM profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["data_json"])
+    except (ValueError, TypeError):
+        log.warning("profile %s has unparseable JSON", profile_id)
+        return None
+
+
+def put_profile(profile: dict[str, Any]) -> None:
+    """Insert or replace one profile."""
+    conn = _connect()
+    with _lock, conn:
+        conn.execute(
+            "INSERT INTO profiles (id, name, client_id, created_at, updated_at,"
+            " data_json) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
+            " client_id=excluded.client_id, created_at=excluded.created_at,"
+            " updated_at=excluded.updated_at, data_json=excluded.data_json",
+            _profile_row(profile),
+        )
+
+
+def mutate_profile(
+    profile_id: str, apply: Callable[[dict[str, Any]], dict[str, Any] | None]
+) -> dict[str, Any] | None:
+    """Read, transform and write one profile inside a single transaction.
+
+    ``apply`` receives the stored profile and returns the replacement, or
+    ``None`` to leave it alone. The read and the write are in one
+    ``BEGIN IMMEDIATE`` transaction, so a concurrent mutation of the same
+    profile waits rather than overwriting -- which is the difference between
+    this and the read-modify-write the JSON store did.
+    """
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT data_json FROM profiles WHERE id = ?", (profile_id,)
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            current = json.loads(row["data_json"])
+        except (ValueError, TypeError):
+            return None
+        updated = apply(current)
+        if updated is None:
+            return current
+        conn.execute(
+            "UPDATE profiles SET name=?, client_id=?, created_at=?, updated_at=?,"
+            " data_json=? WHERE id=?",
+            (*_profile_row(updated)[1:], profile_id),
+        )
+        return updated
+
+
+def delete_profile_row(profile_id: str) -> bool:
+    conn = _connect()
+    with _lock, conn:
+        cur = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        return cur.rowcount > 0
+
+
+def replace_all_profiles(profiles: list[dict[str, Any]]) -> None:
+    """Replace the whole set in one transaction.
+
+    Only for the operations whose meaning really is "the set is now this":
+    a restore from backup, or an import. Ordinary edits go through
+    :func:`mutate_profile`, which cannot lose a neighbouring write.
+    """
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM profiles")
+        conn.executemany(
+            "INSERT INTO profiles (id, name, client_id, created_at, updated_at,"
+            " data_json) VALUES (?, ?, ?, ?, ?, ?)",
+            [_profile_row(p) for p in profiles],
+        )
+
+
+def count_profiles() -> int:
+    conn = _connect()
+    with _lock:
+        return int(conn.execute("SELECT COUNT(*) AS n FROM profiles").fetchone()["n"])

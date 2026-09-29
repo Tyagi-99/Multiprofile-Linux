@@ -18,7 +18,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .profiles import get_profile, load_profiles, save_profiles
+from . import db
+from .profiles import get_profile
 
 MAX_ENTRY_LEN = 4096
 MAX_ENTRIES = 200
@@ -49,38 +50,43 @@ def add_note(profile_id: str, text: str, *, kind: str = "note") -> dict[str, Any
     if len(text) > MAX_ENTRY_LEN:
         raise ValueError(f"note is longer than {MAX_ENTRY_LEN} characters")
 
-    items = load_profiles()
-    for i, p in enumerate(items):
-        if p.get("id") != profile_id:
-            continue
-        entry = {
-            "id": "note_" + uuid.uuid4().hex[:8],
-            "text": text,
-            "kind": (kind or "note").strip() or "note",
-            "at": _now(),
-        }
-        # Newest first on disk too, and bounded: a note log is a record, not
-        # a place for a runaway writer to grow profiles.json without limit.
-        entries = [entry, *_entries(p)][:MAX_ENTRIES]
-        items[i] = {**p, "noteEntries": entries}
-        save_profiles(items)
-        return entry
-    return None
+    entry = {
+        "id": "note_" + uuid.uuid4().hex[:8],
+        "text": text,
+        "kind": (kind or "note").strip() or "note",
+        "at": _now(),
+    }
+
+    # Newest first in the store too, and bounded: a note log is a record, not
+    # a place for a runaway writer to grow without limit.
+    #
+    # Written through mutate_profile rather than save_profiles. Rewriting the
+    # whole set to append one note meant the note raced with any other edit in
+    # flight and the loser's change vanished -- and a note is exactly the kind
+    # of thing an operator writes while something else is running. It also
+    # removes the scan: the lookup is the primary key now.
+    def _apply(current: dict[str, Any]) -> dict[str, Any]:
+        return {**current, "noteEntries": [entry, *_entries(current)][:MAX_ENTRIES]}
+
+    if db.mutate_profile(profile_id, _apply) is None:
+        return None
+    return entry
 
 
 def delete_note(profile_id: str, note_id: str) -> bool:
-    items = load_profiles()
-    for i, p in enumerate(items):
-        if p.get("id") != profile_id:
-            continue
-        entries = _entries(p)
+    removed = False
+
+    def _apply(current):
+        nonlocal removed
+        entries = _entries(current)
         remaining = [e for e in entries if e.get("id") != note_id]
         if len(remaining) == len(entries):
-            return False
-        items[i] = {**p, "noteEntries": remaining}
-        save_profiles(items)
-        return True
-    return False
+            return None
+        removed = True
+        return {**current, "noteEntries": remaining}
+
+    db.mutate_profile(profile_id, _apply)
+    return removed
 
 
 def set_summary(profile_id: str, text: str) -> dict[str, Any] | None:

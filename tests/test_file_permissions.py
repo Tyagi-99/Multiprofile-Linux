@@ -88,19 +88,43 @@ def test_harden_existing_is_quiet_about_missing_files(xdg):
     assert harden_existing(data_dir() / "nope.json") is False
 
 
+def _db_file():
+    """The main database file, created if it does not exist yet."""
+    import pathlib
+
+    from multiprofile.storage.db import db_path
+    from multiprofile.storage.profiles import load_profiles
+
+    load_profiles()  # forces the store into existence
+    return pathlib.Path(db_path())
+
+
 # ---------------------------------------------------------------------------
 # the real stores
 # ---------------------------------------------------------------------------
 
 
-def test_profiles_json_is_not_world_readable(xdg):
-    """The regression that mattered: this file can carry proxyPass."""
+def test_the_profile_store_is_not_world_readable(xdg):
+    """The regression that mattered, now asserted where profiles live.
+
+    When the store moved from profiles.json into SQLite it landed 0644,
+    because SQLite creates the file itself and the process umask decided --
+    so every profile's proxy host, username, client and notes became
+    world-readable on a normal install. The sidecars count: a row lives in
+    control.db-wal before it is checkpointed.
+    """
+    import pathlib
+
+    from multiprofile.storage.db import db_path
     from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import profiles_path
 
     create_profile({"name": "perm test", "proxyPass": "secret"})
 
-    assert _is_private(profiles_path()), f"profiles.json is {oct(_mode(profiles_path()))}"
+    root = pathlib.Path(db_path())
+    files = [f for f in sorted(root.parent.glob(root.name + "*")) if f.is_file()]
+    assert files, "the database was never created"
+    for f in files:
+        assert _is_private(f), f"{f.name} is {oct(_mode(f))}"
 
 
 def test_cookie_jars_are_not_world_readable(xdg):
@@ -154,15 +178,16 @@ def test_the_audit_log_is_not_world_readable(xdg):
 
 def test_harden_data_dir_fixes_files_written_before_this_rule(xdg):
     from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import harden_data_dir, profiles_path
+    from multiprofile.storage.xdg import harden_data_dir
 
     create_profile({"name": "x"})
-    os.chmod(profiles_path(), 0o664)  # simulate a pre-existing install
+    target = _db_file()
+    os.chmod(target, 0o664)  # simulate a pre-existing install
 
     changed = harden_data_dir()
 
-    assert profiles_path().name in changed
-    assert _is_private(profiles_path())
+    assert target.name in changed
+    assert _is_private(target)
 
 
 def test_harden_data_dir_is_idempotent(xdg):
@@ -184,29 +209,27 @@ def test_the_server_entrypoint_hardens_existing_data(xdg, monkeypatch):
     monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
     from multiprofile.app import prepare_data_dir
     from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import profiles_path
-
     create_profile({"name": "x"})
-    os.chmod(profiles_path(), 0o664)
+    target = _db_file()
+    os.chmod(target, 0o664)
 
     prepare_data_dir()
 
-    assert _is_private(profiles_path())
+    assert _is_private(target)
 
 
 def test_create_app_does_not_change_permissions(xdg, monkeypatch):
     """The factory stays free of side effects on operator data."""
     monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
     from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import profiles_path
-
     create_profile({"name": "x"})
-    os.chmod(profiles_path(), 0o664)
+    target = _db_file()
+    os.chmod(target, 0o664)
 
     from multiprofile.api.server import create_app
     create_app()
 
-    assert _mode(profiles_path()) == 0o664, "create_app touched operator data"
+    assert _mode(target) == 0o664, "create_app touched operator data"
 
 
 # ---------------------------------------------------------------------------

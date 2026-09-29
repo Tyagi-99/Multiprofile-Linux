@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from . import db
 from .xdg import profiles_path, runtime_state_path, secure_write_json
 
 log = logging.getLogger("multiprofile.storage.profiles")
@@ -140,55 +141,127 @@ def _write_json(path: Path, data) -> None:
     secure_write_json(path, data)
 
 
-def load_profiles() -> list[dict[str, Any]]:
-    with _lock:
-        items = _read_json(profiles_path(), None)
-        if items is not None and not isinstance(items, list):
-            # A corrupted store that happens to hold a JSON object used to be
-            # iterated as a dict, handing its KEYS to _normalize_fields.
-            log.warning("profiles.json is not a list (%s); treating as empty",
-                        type(items).__name__)
-            items = []
-        if items is None:
-            for p in DEFAULT_PROFILES:
-                _normalize_fields(p)
-                if not p.get("fingerprint"):
-                    _attach_fingerprint(p)
-            _write_json(profiles_path(), DEFAULT_PROFILES)
-            items = list(DEFAULT_PROFILES)
-        runtime = _read_json(runtime_state_path(), {})
-        bad = [p for p in items if not isinstance(p, dict)]
-        if bad:
-            log.warning("dropping %d malformed profile record(s)", len(bad))
-            items = [p for p in items if isinstance(p, dict)]
-        if not isinstance(runtime, dict):
-            runtime = {}
-        for p in items:
-            _normalize_fields(p)
-            st = runtime.get(p.get("id"), {})
-            p["status"] = st.get("status", p.get("status", "idle"))
-            p["pid"] = st.get("pid")
-            # SPA compatibility: isRunning
-            p["isRunning"] = p.get("status") == "running" and bool(p.get("pid"))
-            p["isQueued"] = p.get("status") == "queued"
-            p["isFailed"] = p.get("status") == "failed"
-            # Runtime registry (in-memory) — no DB migration
-            try:
-                from ..browser.runtime_state import get_runtime
+def _seed_defaults_if_empty() -> None:
+    """First run: give a new install the demo profile the JSON store did."""
+    if db.count_profiles():
+        return
+    for p in DEFAULT_PROFILES:
+        seeded = dict(p)
+        _normalize_fields(seeded)
+        if not seeded.get("fingerprint"):
+            _attach_fingerprint(seeded)
+        db.put_profile(seeded)
 
-                rt = get_runtime(p.get("id") or "")
-                if rt:
-                    p["launchState"] = (
-                        rt.launch_state.value if hasattr(rt.launch_state, "value") else rt.launch_state
-                    )
-                    p["cdpPort"] = rt.cdp_port
-                else:
-                    p.setdefault("launchState", None)
-                    p.setdefault("cdpPort", None)
-            except Exception:
+
+def import_legacy_json() -> int:
+    """Move a pre-SQLite ``profiles.json`` into the database, once.
+
+    Run before the first read. It imports only into an empty table, so it
+    cannot clobber rows written since, and it does **not** delete the JSON:
+    the file is renamed to ``profiles.json.migrated`` and left in place. That
+    is deliberate -- the file is the only copy of the operator's profiles at
+    the moment this runs, and a migration that removes its own input has no
+    way back if the import turns out to be wrong.
+
+    Returns the number of profiles imported.
+    """
+    path = profiles_path()
+    if not path.exists() or db.count_profiles():
+        return 0
+    items = _read_json(path, None)
+    if not isinstance(items, list):
+        log.warning("legacy profiles.json is not a list; not importing")
+        return 0
+    clean = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        record = dict(item)
+        record.pop("pid", None)
+        record.pop("isRunning", None)
+        record["status"] = "idle"
+        _normalize_fields(record)
+        _encrypt_profile_secrets(record)
+        clean.append(record)
+    if not clean:
+        return 0
+    db.replace_all_profiles(clean)
+    backup = path.with_suffix(path.suffix + ".migrated")
+    try:
+        path.rename(backup)
+        log.info("imported %d profiles into the database; kept %s",
+                 len(clean), backup.name)
+    except OSError as e:
+        log.warning("imported %d profiles but could not rename %s: %s",
+                    len(clean), path, e)
+    return len(clean)
+
+
+def _decorate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach the live runtime view the console expects."""
+    runtime = _read_json(runtime_state_path(), {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+    for p in items:
+        _normalize_fields(p)
+        st = runtime.get(p.get("id"), {})
+        p["status"] = st.get("status", p.get("status", "idle"))
+        p["pid"] = st.get("pid")
+        # SPA compatibility: isRunning
+        p["isRunning"] = p.get("status") == "running" and bool(p.get("pid"))
+        p["isQueued"] = p.get("status") == "queued"
+        p["isFailed"] = p.get("status") == "failed"
+        # Runtime registry (in-memory) — no DB migration
+        try:
+            from ..browser.runtime_state import get_runtime
+
+            rt = get_runtime(p.get("id") or "")
+            if rt:
+                p["launchState"] = (
+                    rt.launch_state.value if hasattr(rt.launch_state, "value")
+                    else rt.launch_state
+                )
+                p["cdpPort"] = rt.cdp_port
+            else:
                 p.setdefault("launchState", None)
                 p.setdefault("cdpPort", None)
-        return items
+        except Exception:
+            p.setdefault("launchState", None)
+            p.setdefault("cdpPort", None)
+    return items
+
+
+#: Which database the one-time migration and seeding have been done for.
+#: Keyed by path rather than a bare flag, because the resolved location can
+#: change within a process (tests repoint XDG_DATA_HOME, and db._connect
+#: reopens when it does).
+_prepared_for: str | None = None
+
+
+def _ensure_ready() -> None:
+    """Run the legacy import and the first-run seed once per database.
+
+    This used to be a call to ``load_profiles()`` at the top of every
+    accessor, which made ``get_profile`` read and decorate *every* row before
+    doing its indexed lookup -- an O(n) prelude to an O(1) query, which is
+    most of what the move to SQLite was supposed to remove.
+    """
+    global _prepared_for
+    path = db.db_path()
+    if _prepared_for == path:
+        return
+    with _lock:
+        if _prepared_for == path:
+            return
+        import_legacy_json()
+        _seed_defaults_if_empty()
+        _prepared_for = path
+
+
+def load_profiles() -> list[dict[str, Any]]:
+    _ensure_ready()
+    with _lock:
+        return _decorate(db.list_profiles())
 
 
 def _encrypt_profile_secrets(profile: dict[str, Any]) -> None:
@@ -206,6 +279,13 @@ def _encrypt_profile_secrets(profile: dict[str, Any]) -> None:
 
 
 def save_profiles(items: list[dict[str, Any]]) -> None:
+    """Replace the whole set.
+
+    Kept for the callers whose meaning really is "the set is now this" -- a
+    restore from backup, a secrets re-wrap, an import. Ordinary edits must go
+    through :func:`update_profile`, which writes one row and therefore cannot
+    lose a change to a neighbouring profile.
+    """
     with _lock:
         clean = []
         for p in items:
@@ -216,7 +296,7 @@ def save_profiles(items: list[dict[str, Any]]) -> None:
             _normalize_fields(q)
             _encrypt_profile_secrets(q)
             clean.append(q)
-        _write_json(profiles_path(), clean)
+        db.replace_all_profiles(clean)
 
 
 def set_runtime(profile_id: str, status: str, pid: int | None = None) -> None:
@@ -227,7 +307,7 @@ def set_runtime(profile_id: str, status: str, pid: int | None = None) -> None:
 
 
 def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
-    items = load_profiles()
+    _ensure_ready()
     profile = dict(payload)
     profile["id"] = "profile_" + uuid.uuid4().hex[:8]
     profile.setdefault("createdAt", date.today().isoformat())
@@ -248,38 +328,51 @@ def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
     profile["pid"] = None
     _normalize_fields(profile)
     _attach_fingerprint(profile)
-    items.append(profile)
-    save_profiles(items)
+    stored = dict(profile)
+    stored.pop("pid", None)
+    _encrypt_profile_secrets(stored)
+    db.put_profile(stored)
     return profile
 
 
 def update_profile(profile_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-    items = load_profiles()
-    for i, p in enumerate(items):
-        if p.get("id") == profile_id:
-            merged = {**p, **payload, "id": profile_id}
-            _normalize_fields(merged)
-            _attach_fingerprint(merged)
-            items[i] = merged
-            save_profiles(items)
-            return items[i]
-    return None
+    """Merge a change into one profile, atomically.
+
+    The read and the write happen inside one transaction, so a concurrent
+    update of a *different* profile cannot overwrite this one -- which is
+    exactly what the JSON store did, because it rewrote the entire list from
+    a snapshot taken before the change.
+    """
+    _ensure_ready()
+
+    def _apply(current: dict[str, Any]) -> dict[str, Any]:
+        merged = {**current, **payload, "id": profile_id}
+        _normalize_fields(merged)
+        _attach_fingerprint(merged)
+        merged.pop("pid", None)
+        merged.pop("isRunning", None)
+        _encrypt_profile_secrets(merged)
+        return merged
+
+    updated = db.mutate_profile(profile_id, _apply)
+    if updated is None:
+        return None
+    return _decorate([dict(updated)])[0]
 
 
 def get_profile(profile_id: str) -> dict[str, Any] | None:
-    for p in load_profiles():
-        if p.get("id") == profile_id:
-            return p
-    return None
+    _ensure_ready()
+    record = db.get_profile_row(profile_id)
+    if record is None:
+        return None
+    return _decorate([record])[0]
 
 
 def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
     """Remove profile metadata; optionally purge chrome-profiles/<id> and cookies."""
-    items = load_profiles()
-    new_items = [p for p in items if p.get("id") != profile_id]
-    if len(new_items) == len(items):
+    _ensure_ready()
+    if not db.delete_profile_row(profile_id):
         return False
-    save_profiles(new_items)
     with _lock:
         runtime = _read_json(runtime_state_path(), {})
         if profile_id in runtime:

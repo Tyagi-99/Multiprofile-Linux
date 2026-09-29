@@ -769,6 +769,91 @@ Uncommitted in the working tree.
 
 ---
 
+### F6 — ✅ HIGH: the profile store lost concurrent writes — **FIXED**
+
+**Files:** [`storage/db.py`](../src/multiprofile/storage/db.py),
+[`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
+[`storage/notes.py`](../src/multiprofile/storage/notes.py),
+[`storage/clients.py`](../src/multiprofile/storage/clients.py)
+
+Profiles lived in a single `profiles.json`. Every mutation read the whole
+list, changed one entry and wrote the whole list back — and the lock was
+released between the read and the write. Two requests editing **different**
+profiles therefore raced, and the later writer wrote back a snapshot taken
+before the earlier one's change.
+
+Measured under the threaded Flask server the product actually runs
+(`app.run(threaded=True)`), 20 threads each updating a different profile:
+
+```
+writes that survived: 3/20
+```
+
+All twenty returned success to their callers. Nothing logged, nothing failed,
+seventeen edits gone. A per-row `UPDATE` cannot lose a write to a different
+row, so the fix is structural rather than a bigger lock:
+
+```
+after: 20/20
+```
+
+`notes.py` and `clients.py` had the same pattern — appending one note rewrote
+every profile — and now write one row too.
+
+**Cost at scale.** The old store parsed the entire file on every read and
+rewrote it on every edit. At 2000 profiles (a 4.5 MB file):
+
+| operation | profiles.json | SQLite |
+|---|---|---|
+| `get_profile` | 24.1 ms | 0.074 ms |
+| `update_profile` | 46.1 ms | 0.154 ms |
+| `load_profiles` (all) | — | 40 ms |
+
+Every single-field edit wrote 4.5 MB to disk.
+
+**Schema.** `id`, `name`, `client_id`, `created_at`, `updated_at` are columns;
+the rest of the profile stays in `data_json`. A profile has ~40 fields and
+gains more each release, so a column per field would mean a migration per
+feature. The extracted five are the ones something *other than the profile*
+needs — billing aggregates by client, the console sorts by name and date.
+
+**Migration** imports an existing `profiles.json` on first read, into an empty
+table only, and **renames rather than deletes** it: at that moment the file is
+the only copy of the operator's profiles, and a migration that removes its own
+input has no way back if the import is wrong. Malformed entries are dropped,
+proxy passwords are wrapped, and a second run is a no-op.
+
+**Two regressions I introduced and the tests caught:**
+
+- **The database was world-readable.** `profiles.json` was 0600; SQLite creates
+  its own file, so the process umask decided and `control.db` landed **0644** —
+  along with `-wal` and `-shm`. The password stays encrypted, but every
+  profile's proxy host, username, client and notes became readable by any local
+  user. `harden_data_dir()` already knew about the file but only ran at
+  startup, which left a window that now spanned the whole profile store. The
+  mode is set at creation.
+- **`get_profile` became O(n).** Each accessor called `load_profiles()` just to
+  ensure migration had run, so every indexed lookup first read and decorated
+  every row — removing most of what the move was for. Replaced with a
+  one-time guard keyed by database path.
+
+A third issue was latent rather than introduced: the cached connection was
+kept for the life of the process regardless of where `db_path()` pointed, so
+any caller that repointed `XDG_DATA_HOME` silently kept using the previous
+directory. Survivable when this database held only runtime rows; not once it
+held the profiles. It now reopens when the path changes.
+
+**A test that existed and did not catch this.**
+`test_concurrent_writes_do_not_interleave_into_a_broken_file` ran 20
+concurrent creates and asserted the names it found were unique — but a lost
+create removes a name without duplicating one, so it passed throughout. It now
+asserts the count, which is the assertion that would have failed.
+
+23 tests added, plus 10 retargeted from the file to the database: permissions,
+secrets-at-rest and the resilience properties all still hold, of the new store.
+
+---
+
 ### F32 — ✅ MEDIUM: the consistency engine had no score — **FIXED**
 
 **File:** [`consistency.py`](../src/multiprofile/consistency.py)

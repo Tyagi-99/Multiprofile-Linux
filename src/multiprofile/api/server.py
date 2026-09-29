@@ -350,6 +350,8 @@ def create_app() -> Flask:
         except Exception:
             pass
 
+        from ..storage.db import db_path as _db_path
+
         profiles_writable = False
         try:
             p = profiles_path()
@@ -376,7 +378,12 @@ def create_app() -> Flask:
                 "chrome_ok": chrome_ok,
                 "static_ok": static_ok,
                 "extension_ok": extension_ok,
-                "profiles_path": str(profiles_path()),
+                # Where profiles actually live. Reporting profiles.json here
+                # after the move to SQLite would have pointed an operator
+                # debugging a missing profile at a file that no longer exists
+                # -- and on a migrated install, at one holding stale data.
+                "profiles_path": str(_db_path()),
+                "profiles_store": "sqlite",
                 "profiles_writable": profiles_writable,
                 "count": len(items),
                 "data_dir": str(data_dir()),

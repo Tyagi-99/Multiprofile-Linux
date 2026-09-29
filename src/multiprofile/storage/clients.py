@@ -8,7 +8,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .profiles import load_profiles, save_profiles
+from . import db
+from .profiles import load_profiles
 from .xdg import clients_path, secure_write_json
 
 _lock = threading.RLock()
@@ -126,12 +127,10 @@ def delete_client(client_id: str) -> bool:
     if len(new_items) == len(items):
         return False
     save_clients(new_items)
-    profiles = load_profiles()
-    changed = False
-    for p in profiles:
+    # One row per affected profile, rather than rewriting the whole set:
+    # unassigning a client must not discard an unrelated edit made while the
+    # deletion was in flight.
+    for p in load_profiles():
         if p.get("clientId") == client_id:
-            p["clientId"] = None
-            changed = True
-    if changed:
-        save_profiles(profiles)
+            db.mutate_profile(p["id"], lambda c: {**c, "clientId": None})
     return True

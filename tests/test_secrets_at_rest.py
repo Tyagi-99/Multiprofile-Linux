@@ -173,15 +173,27 @@ def test_a_pool_member_password_is_not_plaintext_on_disk():
 
 
 def test_a_profile_proxy_password_is_not_plaintext_on_disk():
+    """Now asserted of the database, which is where profiles live.
+
+    The store moved from profiles.json to SQLite; the property did not. A
+    password that survived the move in the clear would be the same leak in a
+    new file, so this reads the actual bytes rather than trusting the layer
+    that wrote them -- including the write-ahead log, where a row can sit
+    before it is checkpointed into the main file.
+    """
+    import pathlib
+
     from multiprofile.network import network_config_for_profile
+    from multiprofile.storage.db import db_path
     from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import profiles_path
 
     p = create_profile({"name": "P", "proxyType": "socks5", "proxyHost": "198.51.100.1",
                         "proxyPort": 1080, "proxyUser": "u", "proxyPass": "s3cret-profile"})
 
-    raw = profiles_path().read_text()
-    assert "s3cret-profile" not in raw
+    root = pathlib.Path(db_path())
+    raw = b"".join(f.read_bytes() for f in
+                   sorted(root.parent.glob(root.name + "*")) if f.is_file())
+    assert b"s3cret-profile" not in raw
 
     # The route built for launch still carries the real password.
     from multiprofile.storage.profiles import get_profile
@@ -190,15 +202,23 @@ def test_a_profile_proxy_password_is_not_plaintext_on_disk():
 
 
 def test_non_secret_profile_fields_stay_readable():
-    """Deliberate: the files must remain diffable."""
+    """Deliberate: the store must remain inspectable.
+
+    The scope of the encryption is the values that are actually secrets. A
+    name or a tag encrypted alongside the password would make the store
+    opaque to an operator debugging it, for no gain -- the threat this
+    defends against is a stolen disk reading a *password*, not a profile
+    being named.
+    """
+    from multiprofile.storage.db import _connect
     from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import profiles_path
 
     create_profile({"name": "Readable Name", "tags": ["shop"]})
-    raw = profiles_path().read_text()
+    rows = _connect().execute("SELECT name, data_json FROM profiles").fetchall()
+    blob = " ".join(f"{r['name']} {r['data_json']}" for r in rows)
 
-    assert "Readable Name" in raw
-    assert "shop" in raw
+    assert "Readable Name" in blob
+    assert "shop" in blob
 
 
 # ---------------------------------------------------------------------------
