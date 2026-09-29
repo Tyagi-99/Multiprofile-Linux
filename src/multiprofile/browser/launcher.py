@@ -868,18 +868,41 @@ def launch_profile(
     # ------------------------------------------------------------------
     # NETWORK CONFIG — build from structured field or migrate legacy proxy
     # ------------------------------------------------------------------
+    # Which route the *identity* should describe. Normally the same as the
+    # route the traffic takes, and different only under the caller override
+    # below -- where the two genuinely disagree and saying so is better than
+    # picking one silently.
+    identity_mode: NetworkMode = NetworkMode.DIRECT
+
     if direct:
         # Explicit override: user wants DIRECT regardless of profile config
         from ..network import NetworkConfig as _NC
         from ..network import NetworkMode as _NM
         net = _NC(mode=_NM.DIRECT)
         notes.append("Network: DIRECT (caller override)")
+        # The override says where the packets go. It does not say what the
+        # profile is configured to be, and the identity follows the
+        # configuration -- otherwise bypassing a proxy for one launch would
+        # silently rewrite the profile's timezone and position as a
+        # side-effect. `commit=False` keeps this a look, not a launch, so no
+        # pool assignment is recorded by asking.
+        try:
+            identity_mode = network_config_for_profile(profile, commit=False).mode
+        except Exception:  # noqa: BLE001 - an unreadable route is DIRECT for identity
+            identity_mode = NetworkMode.DIRECT
+        if identity_mode != NetworkMode.DIRECT:
+            notes.append(
+                "geo: route overridden to DIRECT, so the traffic leaves from "
+                "the host while the identity still describes the configured "
+                f"{identity_mode.value} route"
+            )
     else:
         # commit=True: this is the one call that is a launch rather than a
         # look, so it is the one allowed to record the pool's decision -- the
         # sticky assignment that keeps this profile's egress stable, or the
         # rotate cursor that moves the next one along.
         net = network_config_for_profile(profile, commit=True)
+        identity_mode = net.mode
 
     # GitHub proxy type is NOT a network route — block clearly
     if (profile.get("proxyType") or "").lower() == "github" and not direct:
@@ -1045,7 +1068,15 @@ def launch_profile(
     # disagreeing with itself in the surface meant to fix it.
     from ..geo import align_to_exit
 
-    geo_plan = align_to_exit(profile, fingerprint, profile.get("lastNetworkDiagnostics"))
+    # The route decides who the authority is. On DIRECT the host is the exit,
+    # so the host's own zone fills an unset timezone instead of the creation
+    # default announcing New York from this machine's address (F43).
+    geo_plan = align_to_exit(
+        profile,
+        fingerprint,
+        profile.get("lastNetworkDiagnostics"),
+        direct=(identity_mode == NetworkMode.DIRECT),
+    )
     if geo_plan["timezone"]:
         fingerprint = {**fingerprint, "timezone": geo_plan["timezone"]}
     if geo_plan["language"]:
@@ -1057,6 +1088,11 @@ def launch_profile(
         notes.append(
             "geo: timezone, language and position taken from the exit IP "
             f"country {geo_plan['country']}"
+        )
+    elif geo_plan["source"] == "host":
+        notes.append(
+            f"geo: no proxy, so the host's own timezone {geo_plan['timezone']} "
+            "is what this profile claims"
         )
     if geo_plan["geolocation"]:
         notes.append(f"geo: position claimed near {geo_plan['geolocation']['city']}")

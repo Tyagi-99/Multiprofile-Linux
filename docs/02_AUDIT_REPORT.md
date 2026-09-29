@@ -122,6 +122,7 @@ engineering draft rather than legal advice.
 | **F40** | ✅ Medium | Compliance | **No way to export or destroy your data** — GDPR/DPDP readiness had nothing behind it | done |
 | **F41** | ✅ **Critical** | Fingerprint | **`window.__MP_PROFILE__` handed every page the whole spoofing config, seed included** — found by measuring for `docs/04` | done |
 | **F42** | ✅ **High** | Fingerprint | **Every profile claimed Windows whatever you picked** — `userAgentId` reached nothing | done |
+| **F43** | ✅ **High** | Fingerprint | **A profile with no proxy announced New York from the host's own address** — F31 reached every route except the one with no proxy on it | done |
 
 ---
 
@@ -984,6 +985,100 @@ asserts the count, which is the assertion that would have failed.
 
 23 tests added, plus 10 retargeted from the file to the database: permissions,
 secrets-at-rest and the resilience properties all still hold, of the new store.
+
+---
+
+### F43 — ✅ HIGH: a profile with no proxy announced New York from your own address — **FIXED**
+
+**Files:** [`geo.py`](../src/multiprofile/geo.py),
+[`browser/launcher.py`](../src/multiprofile/browser/launcher.py),
+[`consistency.py`](../src/multiprofile/consistency.py)
+
+Found when the operator said their day-one workflow is the console GUI with
+**the proxy optional per profile** — launch with no proxy, add one when needed.
+Every fingerprint measurement in [`04`](04_FINGERPRINT_TEST_RESULTS.md) had
+been taken on a *proxied* profile, so the path they described as primary had
+never been measured.
+
+**F31** stopped every profile announcing `America/New_York` regardless of where
+its traffic left from, by filling an unset timezone from the exit IP's country.
+That reaches every route with a proxy on it. It reaches no route without one:
+
+| | |
+|---|---|
+| `storage/profiles.py:35` | every new profile is created `"timezone": "America/New_York"`, `geoAuto: True` |
+| `network.py:133` | `needs_proxy_check()` is False for `DIRECT` — no probe, so no exit country |
+| `geo.py align_to_exit` | `cc is None`, so the fill-in branch cannot fire |
+| `launcher.py` | only overrides when the plan has a timezone; it has none |
+| `fingerprint/_core.py:330,520` | `tz = profile.get("timezone") or "America/New_York"` |
+
+So a no-proxy profile told every page it was in New York while its packets left
+from the operator's real address. On this host — `/etc/localtime` →
+`Asia/Kolkata` — that is a **10.5-hour contradiction on the pair checked more
+routinely than any other**, `Intl.DateTimeFormat().resolvedOptions().timeZone`
+against IP geolocation.
+
+And nothing said so. `consistency.py _check_geo` saw no IP country, returned
+WARNING, and the geo domain is **excluded from the denominator** by design. The
+score did not move. That exclusion rule is honest as written — *"no proxy, so
+no IP country to compare a timezone against"* — but it conflates **"no proxy
+configured"** with **"no egress country knowable"**. On a direct route the
+egress country is perfectly knowable: it is this machine's.
+
+This is F31's shape in the one place F31 did not reach, and F17's lesson
+restated — *a silent DIRECT is the one answer that must never be given* — this
+time about identity rather than routing.
+
+**The fix.** `host_timezone()` resolves the host's IANA zone from `TZ`, then
+`/etc/localtime`, then `/etc/timezone`, and returns `None` rather than fall
+back to UTC or to an abbreviation like `IST`, which is not a zone. On DIRECT
+the host *is* the exit, so it fills an unset timezone — not a claim about
+somewhere else but a measurement of here. Everything downstream follows from
+the existing design: the position follows the timezone, so `getCurrentPosition`
+answers with a seeded point near the country's principal city instead of
+resolving against the operator's real surroundings — **more private than what
+it replaced, not merely more coherent**.
+
+The **language is deliberately left alone**. This host's locale is
+`en_US.UTF-8`, so `en-US` is genuinely what a real browser here sends;
+rewriting it to the zone country's majority language would invent a claim
+rather than correct one.
+
+Three things the fix had to keep straight:
+
+- **A timezone the operator chose still wins.** `geoAuto` is exactly the flag
+  that tells a chosen value from a creation default, and a US persona on a
+  direct connection is reported as a conflict, not silently rewritten.
+- **Stale diagnostics do not speak.** `lastNetworkDiagnostics` records the last
+  route that was *probed*. A profile that had a proxy and had it removed keeps
+  that record — the operator's own "add a proxy when needed" flow, in reverse —
+  and it describes a route no longer in use, so on DIRECT it is ignored.
+- **The identity route is not the traffic route.** `launch_profile(direct=True)`
+  is a caller override meaning "send the packets straight out". It does not mean
+  the profile is configured without a proxy, and conflating the two would make
+  bypassing a proxy for one launch silently rewrite the profile's timezone and
+  position. They are now separate, and when they disagree the launch note says
+  so.
+
+**The score stops staying silent.** `_check_geo` now scores the geo domain for
+a direct-route profile against the host country, judging **what the launch will
+claim** rather than what is stored — a profile still carrying the creation
+default would otherwise be reported as conflicting with a conflict the launch
+itself resolves, and a false alarm teaches an operator to ignore the score. The
+language is compared against the **host's locale** rather than the country's
+majority language: `en-US` from an Indian connection is what a great many real
+browsers there send and flagging it would be noise, while `pt-BR` from an
+`en-US` host is a real disagreement and is caught.
+
+20 tests in [`test_direct_route_geo.py`](../tests/test_direct_route_geo.py).
+Two existing tests changed **setup only, no assertion**:
+`test_geo_live.py` created its profile with `proxyType: "none"` and then wrote
+the diagnostics "a real proxy check would have written" — a direct route
+carrying a measured exit country, which is precisely the impossible state F43
+had to stop trusting; it now configures the proxy its diagnostics imply.
+`test_consistency.py::test_missing_data_warns_not_errors` asserted one of two
+now-legitimate WARNING messages, which would have made it pass or fail on
+*where it was run* — the trap `test_work_area.py` fell into.
 
 ---
 

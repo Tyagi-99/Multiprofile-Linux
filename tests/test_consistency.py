@@ -85,7 +85,18 @@ def test_missing_data_warns_not_errors():
     assert result["status"] == "WARNING"
     geo = _check(result, "geo")
     assert geo["status"] == "WARNING"
-    assert "insufficient data" in geo["message"]
+    # Since F43 the geo domain has two honest WARNINGs to choose between here,
+    # and which one appears depends on the machine running the test rather
+    # than on the profile. With no diagnostics the route is DIRECT, so the
+    # host is the exit: if this host's IANA zone resolves, the profile's
+    # America/New_York is a real conflict with it and is reported as one; if
+    # it does not resolve, there is genuinely nothing to compare and the
+    # original "insufficient data" stands. Asserting only one of them would
+    # make this test pass or fail on where it is run, which is the trap
+    # test_work_area.py fell into. What this test is actually about -- that
+    # absent inputs warn rather than error -- is the status above.
+    assert ("insufficient data" in geo["message"]
+            or "leaves from this machine" in geo["message"]), geo["message"]
     device = _check(result, "device")
     assert device["status"] == "WARNING"
     assert "device preset unavailable" in device["message"]

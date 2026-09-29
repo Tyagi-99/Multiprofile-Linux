@@ -139,6 +139,7 @@ moving the target later is configuration rather than rework.
 | Proxy checker (IP, geo, latency) | ✅ | ✅ | ✅ | ✅ | P1 | — |
 | Blacklist status | ❌ | ✅ | 🟡 | ✅ | P2 | M |
 | Auto-align TZ/geo/language to exit | ✅ F31 | ✅ | ✅ | ✅ | P0 | — |
+| Same alignment with **no proxy** | ✅ **F43** — the host is the exit | ? | ? | ? | P0 | — |
 | Fail-closed on unresolvable route | ✅ **F17** | ? | ? | ? | P0 | — |
 | Proxy marketplace | ❌ | ✅ | ✅ | ✅ | P2 | L |
 | WireGuard / cloud gateways | ✅ Azure, WireGuard, custom | ❌ | ❌ | 🟡 | P2 | — |
@@ -183,7 +184,7 @@ product exists to avoid.
 | **No-code RPA builder** | ❌ | ✅ | ✅ | ✅ | P2 | XL |
 | Synchronizer (mirror actions) | ❌ | ✅ | 🟡 | ✅ | P2 | L |
 | Scheduler | ❌ | ✅ | ✅ | ✅ | P2 | M |
-| Window tiling | ✅ F13 — X11-bound | ✅ | 🟡 | ✅ | P1 | — |
+| Window tiling | ✅ F13 — X11 **and** Wayland | ✅ | 🟡 | ✅ | P1 | — |
 | Webhooks / events | 🟡 SSE locally, no webhooks | ✅ | 🟡 | ✅ | P2 | M |
 | CLI | ✅ | 🟡 | ❌ | 🟡 | P2 | — |
 

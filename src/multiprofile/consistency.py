@@ -30,6 +30,7 @@ something four passes elsewhere should be able to average away.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 PASS = "PASS"
@@ -211,6 +212,23 @@ def _ch_of(fp: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _host_locale_language() -> str | None:
+    """The language a real browser on this machine would send, or None.
+
+    Used only on a DIRECT route, where the host is the exit and so the host's
+    own locale is the honest reference. ``C`` and ``POSIX`` are not languages
+    and produce no answer.
+    """
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        raw = (os.environ.get(var) or "").strip()
+        if not raw or raw.split(".")[0] in ("C", "POSIX", ""):
+            continue
+        tag = raw.split(".")[0].split("@")[0].replace("_", "-")
+        if tag:
+            return tag
+    return None
+
+
 def _diag_value(diagnostics: Any, key: str) -> Any:
     if diagnostics is None:
         return None
@@ -292,6 +310,13 @@ class ProfileConsistencyEngine:
 
         comparators = [v for v in (tz_cc, lang_cc) if v]
         if cc is None:
+            # "No proxy" is not "nothing knowable". On a DIRECT route the host
+            # is the exit, so there is a country to compare against after all,
+            # and excluding the domain let a no-proxy profile announce New
+            # York from this machine's address with a clean score (F43).
+            direct = self._check_geo_direct(profile)
+            if direct is not None:
+                return direct
             return {
                 "domain": domain, "status": WARNING,
                 "expected": "IP geolocation to compare against",
@@ -333,6 +358,100 @@ class ProfileConsistencyEngine:
                        "timezone_country": tz_cc, "language": profile.get("language"),
                        "language_country": lang_cc},
             "message": "IP country, timezone and language region are coherent",
+        }
+
+    def _check_geo_direct(self, profile: dict[str, Any]) -> dict[str, Any] | None:
+        """Score the geo domain for a profile with no proxy, or return None.
+
+        Returns None -- leaving the caller to report insufficient data -- when
+        the route is not DIRECT, when this host's own zone cannot be resolved,
+        or when the launch would claim no timezone at all. Those are the cases
+        where there genuinely is nothing to compare.
+
+        What is compared is the **effective** identity, taken from the same
+        :func:`geo.align_to_exit` the launch uses, not the stored fields. A
+        profile still carrying the creation default of ``America/New_York``
+        with ``geoAuto`` set will claim the host's zone when it launches, and
+        scoring the stored value would report a conflict that the launch
+        resolves -- a false alarm teaches an operator to ignore the score.
+
+        The language is compared against the **host's locale** rather than
+        against the country's majority language. ``en-US`` on an Indian
+        connection is what a great many real browsers there send; calling it a
+        conflict would be noise. Claiming ``pt-BR`` from an ``en-US`` host is
+        a different matter, and that is what this catches.
+        """
+        try:
+            from .geo import align_to_exit, host_timezone
+            from .network import NetworkMode, network_config_for_profile
+
+            if network_config_for_profile(profile).mode != NetworkMode.DIRECT:
+                return None
+        except Exception:  # noqa: BLE001 - the score must never break a page load
+            return None
+
+        host_cc = TZ_COUNTRY.get(host_timezone() or "")
+        if not host_cc:
+            return None
+
+        plan = align_to_exit(profile, None, None, direct=True)
+        eff_tz = (plan.get("timezone") or "").strip()
+        eff_tz_cc = TZ_COUNTRY.get(eff_tz)
+        if not eff_tz:
+            return None
+
+        eff_lang = plan.get("language") or profile.get("language") or None
+        host_lang = _host_locale_language()
+
+        actual = {
+            "country_code": host_cc, "timezone": eff_tz,
+            "timezone_country": eff_tz_cc, "language": eff_lang,
+            "language_country": _lang_region(eff_lang),
+            "source": "host (no proxy: this machine is the exit)",
+        }
+
+        conflicts: list[str] = []
+        if eff_tz_cc and eff_tz_cc != host_cc:
+            conflicts.append(
+                f"timezone {eff_tz} ({eff_tz_cc}) but with no proxy the traffic "
+                f"leaves from this machine, in {host_cc}"
+            )
+        elif not eff_tz_cc:
+            conflicts.append(
+                f"timezone {eff_tz} is not a zone this engine can place, so it "
+                f"cannot be checked against the host country {host_cc}"
+            )
+        if eff_lang and host_lang:
+            if eff_lang.split("-")[0].lower() != host_lang.split("-")[0].lower():
+                conflicts.append(
+                    f"language {eff_lang} but this host's locale is {host_lang}"
+                )
+
+        if conflicts:
+            # The stock warning is about the IP/timezone pair, so it only
+            # belongs here when the timezone is what disagrees. Appending it
+            # to a language-only conflict would describe the wrong problem.
+            tail = (
+                " A mismatched IP/timezone pair is a common detection signal."
+                if eff_tz_cc != host_cc else ""
+            )
+            return {
+                "domain": "geo", "status": WARNING,
+                "expected": f"claims coherent with a direct connection from {host_cc}",
+                "actual": actual,
+                "message": (
+                    "no proxy, so the exit IP is this machine's: "
+                    + "; ".join(conflicts) + "." + tail
+                ),
+            }
+        return {
+            "domain": "geo", "status": PASS,
+            "expected": host_cc,
+            "actual": actual,
+            "message": (
+                f"no proxy: timezone {eff_tz} and language {eff_lang or 'unset'} "
+                f"agree with a direct connection from {host_cc}"
+            ),
         }
 
     def _check_webgpu(self, fp: dict[str, Any] | None) -> dict[str, Any]:

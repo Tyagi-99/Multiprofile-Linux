@@ -23,6 +23,14 @@ IP is the authority**. Everything else is something we claim, and a claim that
 disagrees with the address the packets actually came from is the one that is
 wrong.
 
+A fourth case was missed until F43: a profile with **no proxy at all**. The
+rule above says the exit IP is the authority, and on a direct route the exit
+IP is the host's own -- but no proxy check runs on a direct route, so no exit
+country was ever learned, so the "unset" branch could not fire and the profile
+kept its creation default of ``America/New_York`` while its packets left from
+the operator's real address. "No proxy configured" is not the same as "nothing
+is knowable about egress", and :func:`host_timezone` is what tells them apart.
+
 Coordinates are the country's principal city with a deterministic per-profile
 offset of a few kilometres, not a fixed point. A fixed point would be a
 shared constant across every profile in the country -- the same linking
@@ -32,6 +40,8 @@ exact to the metre anyway, so the accuracy figure is honest about that.
 from __future__ import annotations
 
 import hashlib
+import os
+from pathlib import Path
 from typing import Any
 
 #: ISO country -> (timezone, language, latitude, longitude, city).
@@ -139,10 +149,64 @@ def country_for_timezone(timezone: str) -> str | None:
     return TZ_COUNTRY.get((timezone or "").strip())
 
 
+def host_timezone() -> str | None:
+    """The IANA zone this machine is actually in, or None.
+
+    Only meaningful for a profile on a DIRECT route, where the host *is* the
+    exit -- there it is not a claim at all but a measurement, which is why it
+    is allowed to fill in a value the exit IP would otherwise have supplied.
+
+    ``TZ`` is consulted first because a process that has it set is the zone
+    Chromium itself would report; then ``/etc/localtime``, which on systemd
+    hosts is a symlink into the zoneinfo tree and is the reliable answer; then
+    ``/etc/timezone``, which Debian keeps and Arch does not.
+
+    Returns None rather than falling back to UTC or to an abbreviation like
+    ``IST``. An abbreviation is not an IANA zone and would be a worse claim
+    than the wrong one it replaced, and the module's standing rule is that a
+    guess which is wrong in a plausible way is worse than declining to guess.
+    """
+    candidates: list[str] = []
+
+    env = (os.environ.get("TZ") or "").strip().lstrip(":")
+    if env:
+        candidates.append(env)
+
+    try:
+        link = Path("/etc/localtime")
+        if link.is_symlink() or link.exists():
+            resolved = str(link.resolve())
+            marker = "/zoneinfo/"
+            if marker in resolved:
+                candidates.append(resolved.split(marker, 1)[1])
+    except OSError:
+        pass
+
+    try:
+        candidates.append(Path("/etc/timezone").read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+
+    for name in candidates:
+        # "Region/City" at minimum: a bare abbreviation is not a zone.
+        if not name or "/" not in name:
+            continue
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(name)
+        except Exception:  # noqa: BLE001 - an unresolvable name is simply not an answer
+            continue
+        return name
+    return None
+
+
 def align_to_exit(
     profile: dict[str, Any],
     fingerprint: dict[str, Any] | None = None,
     diagnostics: Any = None,
+    *,
+    direct: bool = False,
 ) -> dict[str, Any]:
     """Decide the timezone, language and position this launch should claim.
 
@@ -159,6 +223,12 @@ def align_to_exit(
     value here is that the *unset* case stops defaulting to America/New_York
     regardless of where the traffic leaves from.
 
+    Pass ``direct=True`` when the route is DIRECT. There the host is the exit,
+    so an unset timezone is filled from :func:`host_timezone` -- a measurement
+    of this machine rather than a claim about somewhere else. Without it a
+    no-proxy profile announced ``America/New_York`` from whatever address the
+    host actually has, which is F43.
+
     Returns ``{"timezone", "language", "languages", "geolocation", "source",
     "conflicts"}``. ``source`` says which input decided it, so a launch note
     can explain the choice instead of presenting it as a fact from nowhere.
@@ -168,8 +238,12 @@ def align_to_exit(
         (fingerprint or {}).get("seed") or profile.get("seed") or profile.get("id") or ""
     )
 
+    # Diagnostics describe the last route that was *probed*. On a DIRECT route
+    # they describe a proxy that is no longer in use -- a profile that had one
+    # and had it removed keeps the record -- so they are not evidence about
+    # where this launch leaves from and must not be allowed to answer for it.
     cc = None
-    if diagnostics is not None:
+    if diagnostics is not None and not direct:
         cc = _diag_country(diagnostics)
     cc = (cc or "").upper() or None
 
@@ -203,6 +277,21 @@ def align_to_exit(
             conflicts.append(
                 f"language {lang} does not match the exit country {cc}"
             )
+
+    # No exit country, and the route is DIRECT. That is not missing
+    # information: the packets leave from this machine, so this machine's zone
+    # is the authority the rule at the top of the module already names. It is
+    # the one case where a value may be read off the host, and it is allowed
+    # precisely because it is not a guess.
+    #
+    # The language is deliberately left alone. The host's locale is what a
+    # real browser here would send, and rewriting en-US to the zone's country
+    # language would be inventing a claim rather than correcting one.
+    if not tz and direct:
+        host_tz = host_timezone()
+        if host_tz:
+            tz = host_tz
+            source = "host"
 
     # Position follows the **timezone the page will see**, not the exit IP.
     #

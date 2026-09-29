@@ -113,7 +113,19 @@ def _probe(country: str, tmp_path) -> dict:
     mp.setenv("MULTIPROFILE_PROXY_CHECK_ENABLED", "0")
 
     page = _Page()
-    pid = create_profile({"name": f"geo{country}", "proxyType": "none",
+    # The profile is configured for a proxy, because that is the only state in
+    # which a proxy check could have written the diagnostics below. It used to
+    # say proxyType "none", which made the setup describe a state production
+    # cannot produce -- a direct route carrying a measured exit country -- and
+    # that is exactly the state F43 had to stop trusting, since a profile whose
+    # proxy was removed keeps the record of the route it no longer uses.
+    #
+    # No proxy is ever dialed: the launch below passes direct=True, which sends
+    # the traffic straight out while the identity keeps describing the route
+    # the profile is configured for. That split is what lets this test inject a
+    # known exit country without standing up a real proxy in each country.
+    pid = create_profile({"name": f"geo{country}", "proxyType": "http",
+                          "proxyHost": "127.0.0.1", "proxyPort": 1,
                           "startUrl": page.url})["id"]
     # What a real proxy check would have written.
     update_profile(pid, {"lastNetworkDiagnostics": {"countryCode": country}})
