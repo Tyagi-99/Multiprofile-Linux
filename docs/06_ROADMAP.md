@@ -5,8 +5,8 @@ after §2 branches on it, so the roadmap is written as a fork rather than as a
 single line. Presenting one path as settled would be the same failure this
 audit spent its length fixing — an artefact that looks complete and is not.
 
-Where the product stands: **42 findings, 35 fixed, 7 open.** P0, P1, P2 and P3
-are complete. 1846 tests pass. The fingerprint vectors reachable from
+Where the product stands: **43 findings, 39 fixed, 4 open.** P0, P1, P2 and P3
+are complete. 1906 tests pass. The fingerprint vectors reachable from
 JavaScript are coherent and per-profile ([`04`](04_FINGERPRINT_TEST_RESULTS.md));
 the orchestration, storage, API and commercial substrate are production-shaped.
 
@@ -78,10 +78,12 @@ channel; a CI job that builds and installs it in a clean container.
 *Test plan:* install → update → verify signature → roll back.
 *Depends on:* nothing. This is the single highest-value item on the page.
 
-### 2.2 Two low-effort findings — S, 20 minutes total
+### 2.2 Two low-effort findings — ✅ done
 
-**F14** Next.js build telemetry (5 min) · **F15** `rewrites` ignored under
-`output: export` (15 min). Twenty minutes takes the open count from 7 to 5.
+**F14** Next.js build telemetry · **F15** `rewrites` ignored under
+`output: export`. Both fixed; the open count went 7 → 5, then to 4 with **F13**
+and the security half of **F11**, and stayed there when **F43** was found and
+fixed in the same stretch.
 
 ### 2.3 Official SDKs — M, 1–2 weeks
 
@@ -100,11 +102,16 @@ Pixelscan, BrowserLeaks and Iphey and record the scores. This is how the F3
 decision gets a number attached to it instead of an argument, and it should
 happen **before** §1 is decided, not after.
 
-### 2.5 F20, F13, F11 — M, 3–4 weeks combined
+### 2.5 F20 and the rest of F11 — M, 2–3 weeks combined
 
-The job queue has no producer (F20 — the durable queue is bypassed); tiling is
-X11-bound and fails opaquely on Wayland (F13); 137 failure-swallowing handlers
-remain outside the identity path (F11 — policy, not a bug hunt).
+The job queue has no producer (F20 — the durable queue is bypassed, and it is
+why idle parking never fires); 135 failure-swallowing handlers remain outside
+the identity and security paths (F11 — policy, not a bug hunt). **F13** is
+done: the work area is now read from the compositor that is actually running.
+
+F20 needs a product decision before it needs engineering — whether idle
+parking is on by default — plus a real migration, because the legacy job is a
+*batch* with shared progress and the durable queue has no batch concept.
 
 ---
 
@@ -216,7 +223,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 35 of 42 findings
+The product is in good shape below the fingerprint layer: 39 of 43 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

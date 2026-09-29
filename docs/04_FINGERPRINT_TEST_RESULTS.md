@@ -24,6 +24,11 @@ CreepJS trust score, and this document should not be read as one. Running the
 checkers is a half-day of work once a proxy is configured, and it belongs in
 the next pass.
 
+**Every run in §1–§10 used a profile with a proxy configured.** That was not
+a stated choice, it was an assumption, and it hid a defect for the whole of
+this document's first version: the no-proxy path had never been measured.
+**§10** measures it, and records what it found — see **F43**.
+
 The harness is committed as the `*_live.py` tests, so every number here is
 re-derivable rather than transcribed.
 
@@ -274,7 +279,7 @@ Stated so the gaps are not mistaken for passes:
 | **TLS / JA3 / JA4** | **No implementation.** A profile claiming Chrome-on-Windows presents Chromium-on-Linux's handshake. Unreachable from JavaScript. |
 | **HTTP/2 SETTINGS / frame order** | **No implementation.** Same category. |
 | CreepJS / Pixelscan / BrowserLeaks / Iphey scores | Not run — see the header |
-| Behaviour under a real proxy | Not run; geo alignment is tested against synthetic exits |
+| Behaviour under a real proxy | Not run; geo alignment is tested against synthetic exits. The **no-proxy** path is measured in §10 |
 | Mobile profiles under real conditions | Preset-level only |
 | Long-session drift | Not tested |
 
@@ -285,12 +290,110 @@ anti-bot vendor.
 
 ---
 
-## 10. Summary
+## 10. The direct-route profile — measured
+
+Added after the operator said their primary workflow is the console with **the
+proxy optional per profile**. §1–§10 measured proxied profiles only, so this
+section measures the one that had never been run.
+
+**Setup:** four profiles created through the same HTTP API the console uses,
+`proxyType: "none"`, no other configuration. Host zone `Asia/Kolkata`, host
+locale `en_US.UTF-8`. Launched together, probed over CDP.
+
+### What it found first
+
+The defect, before the fix:
+
+```
+Intl.DateTimeFormat().resolvedOptions().timeZone   America/New_York
+egress                                             this machine, in IN
+```
+
+Ten and a half hours of disagreement between the claimed zone and the address
+the packets came from, on every no-proxy profile, with a clean consistency
+score — the geo domain was excluded from the denominator because there was "no
+IP country to compare against". **F43.**
+
+### After the fix
+
+| | work-1 | work-2 | work-3 | work-4 |
+|---|---|---|---|---|
+| timezone | `Asia/Kolkata` | `Asia/Kolkata` | `Asia/Kolkata` | `Asia/Kolkata` |
+| language | `en-US` | `en-US` | `en-US` | `en-US` |
+| platform | `Win32` | `Win32` | `Win32` | `Win32` |
+| screen | 1920×1080 | 1920×1080 | 1920×1080 | 1536×864 |
+| cores / memory | 12 / 8 | 4 / 4 | 8 / 16 | 6 / 4 |
+| GPU | Intel UHD 630 | Radeon RX 6600 | Radeon RX 6600 | RTX 4060 |
+| canvas digest | distinct | distinct | distinct | distinct |
+| `window.__MP_PROFILE__` | `undefined` | `undefined` | `undefined` | `undefined` |
+| geo domain | PASS | PASS | PASS | PASS |
+
+All four now agree with the address they leave from, and the launch says so in
+a note rather than leaving the choice unexplained:
+
+```
+geo: no proxy, so the host's own timezone Asia/Kolkata is what this profile claims
+geo: position claimed near Mumbai
+```
+
+The position is the part worth noticing. Unset, `getCurrentPosition` resolved
+against the **host's real surroundings** — identical for every profile on the
+machine and the operator's actual location. It now answers with a seeded point
+near the country's principal city: **more private than what it replaced, not
+only more coherent.**
+
+### Cross-profile linkage
+
+| Vector | Distinct across 4 |
+|---|---|
+| canvas | **4 / 4** |
+| screen | 2 / 4 |
+| GPU | 3 / 4 |
+
+Canvas separates every profile, which is the one that matters — it is the
+vector F24 found linking them. Screen and GPU repeat because they are drawn
+from a small catalogue of plausible real hardware, and two machines sharing an
+RX 6600 is what the real world looks like; a *unique* GPU string per profile
+would be the more suspicious answer.
+
+### Identity stability across a restart
+
+Stopped all four, relaunched one, re-probed. Timezone, platform, screen, cores,
+memory, GPU and the canvas digest were **byte-identical**. That is the seed
+promise the product rests on, and it had not been checked on this path.
+
+### The proxy, added and removed
+
+The operator's stated flow, both directions, on one profile:
+
+| Step | Result |
+|---|---|
+| created with no proxy | geo PASS, claims `Asia/Kolkata` |
+| proxy added, launched | **refused** — `Proxy … failed pre-launch health check … Launch blocked to prevent host IP exposure` |
+| proxy removed, launched | geo PASS, claims `Asia/Kolkata` again |
+
+The refusal in the middle is **F17** working: a dead proxy does not fall back
+to the host address. The third row is the stale-diagnostics guard: the profile
+still carried the record of the route it no longer uses, and did not claim it.
+
+### The ceiling, recorded not argued
+
+```js
+Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)
+// -> hook source visible, on all four profiles
+```
+
+**F3 is present and unchanged on this path too.** Nothing in this section
+narrows it. Third-party checkers still have not been run — see the header.
+
+---
+
+## 11. Summary
 
 | Area | Verdict |
 |---|---|
 | UA / Client Hints / platform | ✅ coherent, wire and JS |
-| Timezone / geo / locale | ✅ engine-level, per-exit |
+| Timezone / geo / locale | ✅ engine-level, per-exit **and with no proxy** (F43) |
 | GPU / WebGL / WebGPU | ✅ mutually consistent |
 | Canvas / audio / rects noise | ✅ per-profile, plausible magnitude |
 | OS-shaped APIs | ✅ battery, voices, bluetooth, media |
@@ -298,6 +401,7 @@ anti-bot vendor.
 | Fonts | 🟡 documented residual, product reports it |
 | Config exposure | ✅ fixed this pass (F41) |
 | Identity selection | ✅ fixed this pass (F42) |
+| Direct route (no proxy) | ✅ measured in §11; fixed this pass (F43) |
 | **Hook detectability (F3)** | ❌ **open — architectural** |
 | **TLS / HTTP/2** | ❌ **absent** |
 
