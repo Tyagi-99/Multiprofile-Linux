@@ -92,7 +92,7 @@ engineering draft rather than legal advice.
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
 | **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint — **identity path done**, rest is policy | 1–2 wk |
 | **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
-| **F13** | 🟡 Medium | Reliability | Window tiling is X11-bound and fails when X tools are unreachable | 1 wk |
+| **F13** | ✅ Medium | Reliability | Window tiling was X11-bound; dead on the Wayland host it is developed on | done |
 | **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
 | **F15** | ✅ Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | done |
 | **F16** | ✅ **High** | UX / Correctness | The wizard's **network-mode and fingerprint-strategy steps reached nothing** — found by F8; routing fixed, strategy step removed | done |
@@ -2399,20 +2399,60 @@ security-sensitive, unsigned unverifiable binaries are a hard blocker.
 
 ---
 
-### F13 — 🟡 MEDIUM: tiling is X11-bound and fails opaquely
+### F13 — ✅ MEDIUM: tiling was X11-bound and failed opaquely — **FIXED**
 
 **File:** [`browser/work_area.py`](../src/multiprofile/browser/work_area.py)
 
-All three work-area detectors (`xrandr`, `_NET_WORKAREA`, `xdpyinfo`) can fail
-together; the code correctly **refuses a silent 1920×1080 fallback**, which is good
-engineering. But the result is that tiling — a genuinely good differentiator —
-silently stops working. Your audit log shows `work_area_unavailable` on every
-relaunch during the Sep 25 crash loop, while `/api/health` reported the same today
-under this session's environment.
+All three work-area detectors were X11 tools — `xrandr`, `_NET_WORKAREA` via
+`xprop`, and `xdpyinfo`. The code correctly **refused a silent 1920×1080
+fallback**, which was good engineering, but the consequence was that tiling —
+a genuinely good differentiator — simply stopped working with no explanation
+beyond "set an environment variable".
 
-It is environment-dependent (Wayland/XWayland, missing `XAUTHORITY`), not
-deterministic. Chromium is launched with `--ozone-platform=x11`, so Wayland-native
-window management is not used at all. Cross-platform is new development, not a port.
+**Reproduced on this project's own development host** (Arch, Hyprland,
+Wayland):
+
+```
+xrandr_primary: unavailable
+_NET_WORKAREA:  unavailable
+xdpyinfo:       unavailable
+no reliable work area (set MULTIPROFILE_WORKAREA=x,y,w,h)
+```
+
+`xrandr` and `xdpyinfo` were **not installed at all**, so XWayland was never
+going to help. Tiling was dead on the machine the product is developed on.
+
+**Three Wayland detectors**, tried before the X11 chain when the session is
+Wayland — the compositor's own answer beats XWayland's view of it, and on a
+host with no X11 utilities it is the only answer there is:
+
+| Detector | Reports |
+|---|---|
+| `hyprctl monitors -j` | geometry, `scale`, and `reserved` as [left, top, right, bottom] |
+| `swaymsg -t get_outputs` | a logical `rect`; sway does not expose reserved edges |
+| `wlr-randr --json` | geometry and scale for generic wlroots compositors |
+
+Two details that would otherwise be wrong. **`reserved` is subtracted** — the
+Wayland equivalent of `_NET_WORKAREA`, without which every tiled window sits
+under the status bar. And **scale is converted to logical pixels**, because
+windows are positioned in logical coordinates and ignoring a 2× display would
+place every window in the top-left quadrant.
+
+Measured after, on the same host: `{x: 0, y: 26, w: 2560, h: 1574,
+source: "hyprctl"}` — the full panel minus its 26-pixel top bar.
+
+**The failure now explains itself.** A Wayland session with none of the three
+tools installed says so, and names them, instead of only naming the remedy:
+"set this variable" does not tell a Wayland user that the three things that
+failed were X11 utilities they do not have and do not want. Nothing invents a
+size — a wrong work area tiles windows off-screen, which is worse than not
+tiling.
+
+26 tests added. Three existing tests in `test_work_area.py` began failing on a
+Wayland host, because they patch the X11 detectors and assume nothing else can
+answer. They were **environment-dependent all along** and passed only by
+accident of where they ran; they now pin `XDG_SESSION_TYPE=x11` so they test
+the chain they were always about. No assertion changed.
 
 ---
 
