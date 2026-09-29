@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from ..config import max_profiles
 from . import db
 from .xdg import profiles_path, runtime_state_path, secure_write_json
 
@@ -306,8 +307,13 @@ def set_runtime(profile_id: str, status: str, pid: int | None = None) -> None:
         _write_json(runtime_state_path(), runtime)
 
 
-def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
-    _ensure_ready()
+def _new_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a complete profile from a create payload, without storing it.
+
+    Split out of :func:`create_profile` so bulk creation can build the whole
+    batch first and then write it in one transaction, rather than interleaving
+    a fingerprint derivation with a database write N times over.
+    """
     profile = dict(payload)
     profile["id"] = "profile_" + uuid.uuid4().hex[:8]
     profile.setdefault("createdAt", date.today().isoformat())
@@ -328,11 +334,50 @@ def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
     profile["pid"] = None
     _normalize_fields(profile)
     _attach_fingerprint(profile)
+    return profile
+
+
+def _for_storage(profile: dict[str, Any]) -> dict[str, Any]:
     stored = dict(profile)
     stored.pop("pid", None)
     _encrypt_profile_secrets(stored)
-    db.put_profile(stored)
+    return stored
+
+
+def fleet_capacity() -> dict[str, int]:
+    """How much room is left in the fleet.
+
+    ``capacity`` is the configured maximum number of *stored* profiles, which
+    is a different limit from how many may run at once.
+    """
+    _ensure_ready()
+    cap = max_profiles()
+    stored = db.count_profiles()
+    return {"stored": stored, "capacity": cap, "free": max(0, cap - stored)}
+
+
+def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_ready()
+    profile = _new_profile(payload)
+    # Capacity is enforced here, not only in the bulk endpoint: a cap that a
+    # loop of single creates can walk straight past is not a cap.
+    db.insert_profiles([_for_storage(profile)], capacity=max_profiles())
     return profile
+
+
+def create_profiles(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create a batch of profiles atomically.
+
+    Either every profile in the batch is stored or none is, and the fleet
+    capacity is checked inside the same transaction. Raises
+    :class:`~multiprofile.storage.db.FleetFull` if the batch would not fit.
+    """
+    _ensure_ready()
+    if not payloads:
+        return []
+    built = [_new_profile(p) for p in payloads]
+    db.insert_profiles([_for_storage(p) for p in built], capacity=max_profiles())
+    return built
 
 
 def update_profile(profile_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:

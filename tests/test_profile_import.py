@@ -133,7 +133,11 @@ def test_a_proxy_an_existing_profile_uses_is_warned_about_not_refused():
     assert second["warnings"][0]["warning"] == "proxy_already_used"
 
 
-def test_one_request_is_bounded():
+def test_one_request_is_bounded(monkeypatch):
+    # MAX_ROWS bounds one *request*; the fleet capacity bounds the store, and
+    # at its default of 150 it would be the binding limit here and this test
+    # would be measuring the wrong one. Raised so the row bound is what fails.
+    monkeypatch.setenv("MAX_PROFILES", "2000")
     lines = "\n".join(f"10.0.{i // 256}.{i % 256}:8080" for i in range(MAX_ROWS + 25))
     report = import_profiles(lines)
     assert report["counts"]["created"] == MAX_ROWS

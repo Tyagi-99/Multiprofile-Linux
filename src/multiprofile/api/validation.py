@@ -185,11 +185,34 @@ def error_response(exc: ValidationError):
 
 def register_error_handlers(app) -> None:
     """Map ValidationError to the 400 envelope on the given Flask app."""
+    from ..storage.db import FleetFull
 
     @app.errorhandler(ValidationError)
     def _handle_validation_error(exc: ValidationError):
         log.info("invalid input: %s: %s", exc.field, exc.message)
         return error_response(exc)
+
+    @app.errorhandler(FleetFull)
+    def _handle_fleet_full(exc: FleetFull):
+        # 409, not 400: the request is well-formed, the fleet is the problem.
+        # The numbers are returned so the console can say "room for 12 more"
+        # instead of making the operator count.
+        log.info("fleet full: %s", exc)
+        return (
+            jsonify(
+                {
+                    "error": {
+                        "code": "fleet_full",
+                        "message": str(exc),
+                        "stored": exc.stored,
+                        "capacity": exc.capacity,
+                        "free": exc.free,
+                        "requested": exc.requested,
+                    }
+                }
+            ),
+            409,
+        )
 
 
 def require_json() -> dict[str, Any]:

@@ -182,7 +182,7 @@ def import_profiles(
     Returns a report: what was created, what failed to parse, and what was
     skipped, each keyed by the input line it came from.
     """
-    from .storage.profiles import create_profile, load_profiles
+    from .storage.profiles import create_profile, fleet_capacity, load_profiles
 
     parsed = parse_proxy_list(raw, proxy_type)
     rows = parsed["rows"]
@@ -205,8 +205,27 @@ def import_profiles(
     failed: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
 
+    # How many will actually fit. Without this, a paste larger than the space
+    # left runs the whole list and fails every row past the limit with its own
+    # rejected transaction -- the same report, arrived at expensively. Rows
+    # beyond the free space are reported as not created, by line, so the
+    # operator knows exactly which part of their paste to keep.
+    try:
+        free = int(fleet_capacity()["free"])
+    except Exception as e:  # noqa: BLE001 - fall back to letting the store decide
+        log.debug("could not read fleet capacity: %s", e)
+        free = len(rows)
+
     for ordinal, row in enumerate(rows, start=1):
         proxy = row["proxy"]
+        if len(created) >= free:
+            failed.append({
+                "line": row["line"],
+                "input": row["input"],
+                "error": "fleet_full",
+                "message": "no room left in the fleet for this profile",
+            })
+            continue
         seen_as = existing.get((str(proxy["host"]).lower(), int(proxy["port"])))
         if seen_as:
             warnings.append({
@@ -248,4 +267,5 @@ def import_profiles(
             "warnings": len(warnings),
         },
         "limit": MAX_ROWS,
+        "fleet": fleet_capacity(),
     }

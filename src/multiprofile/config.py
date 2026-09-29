@@ -32,6 +32,11 @@ class Settings:
     """Process-wide settings (immutable snapshot)."""
 
     max_concurrent_profiles: int = 20
+    # How many profiles may be *stored*. Distinct from the concurrency
+    # limit above: the fleet is the address book, concurrency is how many
+    # of them are running. 150 is the size this product is built and
+    # measured for; raise MAX_PROFILES to grow it.
+    max_profiles: int = 150
     # DEFAULT FALSE — AdsPower-class anti-detect exclusivity.
     allow_webstore_extensions: bool = False
     force_no_sandbox: bool = False
@@ -103,6 +108,7 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         max_concurrent_profiles=_env_int("MAX_CONCURRENT_PROFILES", 20, minimum=1, maximum=64),
+        max_profiles=_env_int("MAX_PROFILES", 150, minimum=1, maximum=10_000),
         allow_webstore_extensions=_env_bool("MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", False),
         force_no_sandbox=_env_bool("MULTIPROFILE_FORCE_NO_SANDBOX", False),
         prefer_sandbox=_env_bool("MULTIPROFILE_PREFER_SANDBOX", True),
@@ -149,3 +155,7 @@ def get_settings() -> Settings:
 
 def max_concurrent_profiles() -> int:
     return get_settings().max_concurrent_profiles
+
+
+def max_profiles() -> int:
+    return get_settings().max_profiles

@@ -111,7 +111,7 @@ def test_a_failed_write_leaves_the_previous_store_intact(xdg):
     def disk_full(*a, **k):
         raise sqlite3.OperationalError("database or disk is full")
 
-    with mock.patch.object(db, "put_profile", disk_full), \
+    with mock.patch.object(db, "insert_profiles", disk_full), \
             pytest.raises(sqlite3.OperationalError, match="disk is full"):
         create_profile({"name": "Doomed"})
 
@@ -136,7 +136,7 @@ def test_a_failed_write_leaves_no_debris_that_reads_as_data(xdg):
     def disk_full(*a, **k):
         raise sqlite3.OperationalError("database or disk is full")
 
-    with mock.patch.object(db, "put_profile", disk_full), \
+    with mock.patch.object(db, "insert_profiles", disk_full), \
             pytest.raises(sqlite3.OperationalError, match="disk is full"):
         create_profile({"name": "Two"})
 

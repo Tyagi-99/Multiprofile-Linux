@@ -65,8 +65,10 @@ from ..storage.github_accounts import (
 from ..storage.profiles import (
     clone_profile,
     create_profile,
+    create_profiles,
     delete_profile,
     duplicate_profile,
+    fleet_capacity,
     get_profile,
     load_profiles,
     query_page,
@@ -95,6 +97,7 @@ from .validation import (
     ValidationError,
     register_error_handlers,
     require_json,
+    v_int,
     v_str,
     validate_clone_payload,
     validate_job_payload,
@@ -270,6 +273,12 @@ def _with_launch_state(profiles: list) -> list:
 #: in motion: launching ten thousand browsers because someone cleared a filter
 #: is not a thing the operator meant.
 SELECT_ALL_CAP = 5000
+
+#: Sanity bound on a requested bulk-create `count`, so `count: 1e9` is
+#: rejected as input rather than attempted. The limit that actually
+#: governs is the fleet capacity (config.max_profiles), which is checked
+#: inside the insert transaction and answers 409 with the real numbers.
+MAX_PROFILES_HARD_CAP = 10_000
 
 #: The largest page the profile list will serve. Higher than the default cap
 #: because a list row lost its fingerprint (2,795 bytes -> 663), so a full page
@@ -546,6 +555,16 @@ def create_app() -> Flask:
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
 
+    @app.get("/api/profiles/capacity")
+    def profiles_capacity():
+        """How many profiles are stored and how many more will fit.
+
+        The console needs this before it offers "create 50", so the operator
+        is told the fleet is nearly full while they are choosing a number
+        rather than after they have submitted one.
+        """
+        return jsonify({"ok": True, "fleet": fleet_capacity()})
+
     @app.put("/api/profiles/<profile_id>")
     def profiles_update(profile_id: str):
         payload = require_json()
@@ -701,22 +720,41 @@ def create_app() -> Flask:
         tpl = get_template(tid)
         if not tpl:
             return jsonify({"error": "template not found"}), 404
-        try:
-            count = max(1, min(int(payload.get("count") or 1), 50))
-        except (TypeError, ValueError):
-            count = 1
-        created = []
+        # `count` used to be clamped to 50 with max(1, min(...)): asking for
+        # 150 returned `ok: true` with 50 profiles and no mention of the other
+        # hundred, and a non-integer silently became 1. Filling a fleet from a
+        # template is the flow this endpoint exists for, so silently doing a
+        # third of it is the worst available answer. It is validated now, and
+        # the ceiling is the fleet's own capacity rather than an unrelated 50.
+        count = 1
+        if payload.get("count") is not None:
+            count = v_int(payload["count"], "count", min=1, max=MAX_PROFILES_HARD_CAP)
+
+        overrides_common = {}
+        if "clientId" in payload:
+            overrides_common["clientId"] = payload.get("clientId")
+        base_name = payload.get("name") or tpl.get("name") or "Profile"
+        bodies = []
         for i in range(count):
-            overrides = {}
+            overrides = dict(overrides_common)
             if payload.get("name"):
-                overrides["name"] = payload["name"] if count == 1 else f"{payload['name']} {i+1}"
+                overrides["name"] = payload["name"] if count == 1 else f"{base_name} {i+1}"
             elif count > 1:
-                overrides["name"] = f"{tpl.get('name') or 'Profile'} {i+1}"
-            if "clientId" in payload:
-                overrides["clientId"] = payload.get("clientId")
-            body = template_to_profile_payload(tpl, overrides)
-            created.append(create_profile(body))
-        return jsonify({"ok": True, "profiles": created, "count": len(created)})
+                overrides["name"] = f"{base_name} {i+1}"
+            bodies.append(template_to_profile_payload(tpl, overrides))
+
+        # Raises FleetFull -> 409 if the batch will not fit. All or nothing:
+        # a half-created fleet is worse than a refusal, because the operator
+        # cannot tell which half they got.
+        created = create_profiles(bodies)
+        audit_log("profiles_from_template", ok=True,
+                  detail={"templateId": tid, "count": len(created)})
+        return jsonify({
+            "ok": True,
+            "profiles": created,
+            "count": len(created),
+            "fleet": fleet_capacity(),
+        })
 
     @app.get("/api/profiles/<profile_id>/cookies")
     def cookies_get(profile_id: str):

@@ -730,6 +730,53 @@ def replace_all_profiles(profiles: list[dict[str, Any]]) -> None:
         )
 
 
+class FleetFull(RuntimeError):
+    """A write would push the stored fleet past its configured capacity.
+
+    Carries the numbers the caller has to report, because "fleet is full" on
+    its own does not tell an operator whether to delete two profiles or fifty.
+    """
+
+    def __init__(self, *, stored: int, requested: int, capacity: int) -> None:
+        self.stored = stored
+        self.requested = requested
+        self.capacity = capacity
+        self.free = max(0, capacity - stored)
+        super().__init__(
+            f"fleet is full: {stored} of {capacity} stored, room for {self.free} "
+            f"more, {requested} requested"
+        )
+
+
+def insert_profiles(profiles: list[dict[str, Any]], *, capacity: int | None = None) -> int:
+    """Insert a batch of new profiles in one transaction.
+
+    Bulk creation used to be a Python loop calling :func:`put_profile` once per
+    profile, so a failure part-way through left the fleet half-created with no
+    indication of where it stopped. One transaction makes the batch all-or-
+    nothing.
+
+    ``capacity`` is checked *inside* the transaction. Checking it in the caller
+    would be a time-of-check/time-of-use race: two concurrent batches could
+    each see room for 80 and both commit, leaving 160 in a fleet of 150.
+    """
+    if not profiles:
+        return 0
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if capacity is not None:
+            stored = int(conn.execute("SELECT COUNT(*) AS n FROM profiles").fetchone()["n"])
+            if stored + len(profiles) > capacity:
+                raise FleetFull(stored=stored, requested=len(profiles), capacity=capacity)
+        conn.executemany(
+            "INSERT INTO profiles (id, name, client_id, created_at, updated_at,"
+            " data_json) VALUES (?, ?, ?, ?, ?, ?)",
+            [_profile_row(p) for p in profiles],
+        )
+    return len(profiles)
+
+
 def count_profiles() -> int:
     conn = _connect()
     with _lock:

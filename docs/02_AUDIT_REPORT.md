@@ -951,6 +951,86 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F35 — ✅ HIGH: bulk create silently did a third of what was asked — **FIXED**
+
+**Files:** [`api/server.py`](../src/multiprofile/api/server.py),
+[`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
+[`storage/db.py`](../src/multiprofile/storage/db.py),
+[`config.py`](../src/multiprofile/config.py),
+[`profile_import.py`](../src/multiprofile/profile_import.py)
+
+`POST /api/profiles/from-template` clamped its `count`:
+
+```python
+count = max(1, min(int(payload.get("count") or 1), 50))
+```
+
+Measured against an empty store before the fix:
+
+```
+asked for 150 -> status=200 ok=True count=50
+count="abc"   -> status=200 count=1
+count=-5      -> status=200 count=1
+```
+
+Asking for a fleet of 150 returned HTTP 200, `ok: true`, and fifty profiles.
+Nothing in the response mentioned the other hundred. A `count` that was not a
+number silently became 1, which is the same failure in a smaller disguise: the
+operator gets a plausible answer to a question they did not ask.
+
+The number 50 corresponded to nothing — not the concurrency limit, not a
+storage limit, not a measured cost. Filling a fleet from a template is the one
+flow this endpoint exists for, so silently doing a third of it is the worst
+available answer; refusing would at least have been visible.
+
+**Three changes.**
+
+*A count is validated, not reinterpreted.* Non-integers, zero and negatives are
+400s naming the field. An absurd count (`1e9`) is rejected as input rather than
+attempted.
+
+*The ceiling is the fleet's own capacity.* `config.max_profiles` (default 150,
+`MAX_PROFILES` to change it) is the number of profiles that may be **stored** —
+a different limit from `max_concurrent_profiles`, which is how many may run.
+A batch that will not fit is refused with **409** and the numbers needed to act
+on it, because "fleet is full" alone does not tell an operator whether to
+delete two profiles or fifty:
+
+```json
+{"error": {"code": "fleet_full", "stored": 1, "capacity": 150,
+           "free": 149, "requested": 150,
+           "message": "fleet is full: 1 of 150 stored, room for 149 more, 150 requested"}}
+```
+
+*The batch is one transaction.* The old loop called `create_profile` once per
+profile, so a failure at row 80 of 150 left 79 stored with no indication of
+where it stopped. `db.insert_profiles` builds the batch and writes it in a
+single `BEGIN IMMEDIATE`, checking capacity **inside** the transaction — a
+check in the caller would let two concurrent batches each see room for 80 and
+both commit. Measured after: 149 profiles created in 0.01 s, and a refused
+batch stores nothing.
+
+The cap is enforced in the store rather than in the endpoint, because a limit
+that a loop of single `POST /api/profiles` calls can walk past is not a limit.
+`GET /api/profiles/capacity` reports `{stored, capacity, free}` so the console
+can say "room for 12 more" while a number is being chosen rather than after it
+has been submitted. Import (F34) shares the ceiling: rows beyond the free space
+are reported by line as `fleet_full` instead of each one costing its own
+rejected transaction.
+
+**Scope note.** 150 is this product's measured operating size, not the brief's
+10,000 — see the design target recorded with F33. It is one environment
+variable, and the paging, the SQL predicates and the id-resolution endpoint
+built for F9 are all size-independent, so moving it is configuration rather
+than rework.
+
+18 tests added. Two existing tests were retargeted, neither weakened:
+`test_resilience` patched `db.put_profile`, which creation no longer calls, and
+`test_profile_import::test_one_request_is_bounded` measured the `MAX_ROWS`
+bound, which the default fleet cap would otherwise have shadowed.
+
+---
+
 ### F34 — ✅ MEDIUM: no way to fill a fleet — **FIXED**
 
 **Files:** [`profile_import.py`](../src/multiprofile/profile_import.py) (new),
