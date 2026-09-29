@@ -1011,7 +1011,11 @@ refused for ever.
 
 *A running profile cannot be trashed* (409, "stop the profile before deleting
 it"): Chrome is writing into the directory the trash is supposed to preserve,
-so trashing it would capture a torn copy.
+so trashing it would capture a torn copy. The guard checks the **process**,
+not the record — `isRunning` is derived from a status and pid that nothing
+updates when Chrome dies unexpectedly, so trusting it would leave a crashed
+profile undeletable until something reaped it, which is a worse failure than
+the one the guard prevents.
 
 *Retention is reconciled on access, not on a timer.* Trashed profiles are
 purged after `MULTIPROFILE_TRASH_RETENTION_DAYS` (default 30, `0` disables it),
@@ -1043,7 +1047,7 @@ so the size is measured once, when it is trashed, and stored in
 that already has the v3 table). Measured after: the listing no longer touches
 the disk at all.
 
-21 tests added.
+23 tests added.
 
 ---
 

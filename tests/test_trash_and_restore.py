@@ -348,3 +348,39 @@ def test_a_database_that_predates_disk_bytes_gains_the_column(tmp_path, monkeypa
     assert [r["id"] for r in rows] == ["profile_old"], "the existing row survived"
     assert rows[0]["diskBytes"] == 0, "unmeasured old rows read as zero, not a crash"
     dbmod.close()
+
+
+# --------------------------------------------------------------------------
+# 8. The running-profile guard
+# --------------------------------------------------------------------------
+
+def test_a_running_profile_cannot_be_trashed(client):
+    """Chrome is writing into the directory the trash is meant to preserve."""
+    import os
+
+    from multiprofile.storage.profiles import set_runtime
+
+    pid, root = _warm_profile(client)
+    set_runtime(pid, "running", os.getpid())  # a pid that is certainly alive
+    r = client.delete(f"/api/profiles/{pid}")
+    assert r.status_code == 409
+    assert r.get_json()["error"]["code"] == "profile_running"
+    assert root.exists()
+    assert client.get(f"/api/profiles/{pid}").status_code == 200
+
+
+def test_a_profile_left_marked_running_by_a_crash_can_still_be_deleted(client):
+    """The guard must check the process, not the record.
+
+    `isRunning` is derived from the recorded status and pid, and neither is
+    updated when Chrome dies unexpectedly. A guard that trusted the record
+    would make a crashed profile undeletable until something reaped it --
+    worse than the problem the guard exists to prevent.
+    """
+    from multiprofile.storage.profiles import set_runtime
+
+    pid, _ = _warm_profile(client)
+    set_runtime(pid, "running", 2_147_483_600)  # recorded, long dead
+    r = client.delete(f"/api/profiles/{pid}")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["trashed"] is True

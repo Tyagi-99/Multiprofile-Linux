@@ -73,6 +73,7 @@ from ..storage.profiles import (
     get_profile,
     list_trash,
     load_profiles,
+    pid_alive,
     purge_expired_trash,
     purge_profile,
     query_page,
@@ -606,8 +607,14 @@ def create_app() -> Flask:
 
         # A running profile has Chrome writing into the directory the trash is
         # supposed to preserve, so trashing it would capture a torn copy.
-        running = get_profile(profile_id)
-        if running and running.get("isRunning"):
+        #
+        # `isRunning` alone is not enough: it is derived from the recorded
+        # status and pid, neither of which is updated when Chrome dies
+        # unexpectedly. A profile left marked running by a crash would be
+        # undeletable until something happened to reap it, which is a worse
+        # failure than the one this guard prevents. The pid is checked.
+        current = get_profile(profile_id)
+        if current and current.get("isRunning") and pid_alive(current.get("pid")):
             return jsonify({
                 "error": {
                     "code": "profile_running",
