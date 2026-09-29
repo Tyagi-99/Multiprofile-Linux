@@ -44,7 +44,7 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
@@ -247,6 +247,29 @@ CREATE INDEX IF NOT EXISTS idx_usage_client ON usage_sessions(client_id);
 CREATE INDEX IF NOT EXISTS idx_usage_started ON usage_sessions(started_at);
 -- Finding an open session is the hot path: it happens on every stop.
 CREATE INDEX IF NOT EXISTS idx_usage_open ON usage_sessions(profile_id, ended_at);
+
+-- API tokens. The product had exactly one, stored in cleartext in
+-- $XDG_CONFIG_HOME/multiprofile/api_token, unscoped and unrevocable: an
+-- automation script that only needed to start a profile held the same
+-- credential that can delete the fleet and read every cookie jar, and the
+-- only remedy for a leak was to change the one token and break every other
+-- integration at once.
+--
+-- Only the hash is stored. These are 256 bits of `secrets` output rather
+-- than human-chosen passwords, so SHA-256 is the right primitive -- a slow
+-- KDF defends against guessing a low-entropy secret, and there is nothing
+-- here to guess. What it buys is that a leaked database does not yield a
+-- usable token.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL,
+    scopes       TEXT NOT NULL DEFAULT 'read',
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON api_tokens(revoked_at);
 """
 
 
@@ -286,6 +309,10 @@ def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
     #     number. Nothing writes to a trashed profile, so the size is measured
     #     once, when it is trashed. CREATE TABLE above covers a new database;
     #     this adds the column to one that already has the table.
+    # v6: `api_tokens`, created by _SCHEMA_SQL. The legacy single token is not
+    #     migrated into it: it lives in a file the operator controls, it still
+    #     works, and silently copying a credential into a new store is not a
+    #     migration anyone asked for.
     # v5: `usage_sessions`, created by _SCHEMA_SQL. Nothing to backfill -- the
     #     product never recorded runtime before, and inventing history for a
     #     table a bill would be drawn from is the one thing metering must not
@@ -489,6 +516,91 @@ def record_heartbeat(profile_id: str) -> None:
                 "WHERE profile_id = ?",
                 (_utcnow(), _utcnow(), profile_id),
             )
+
+
+# ---------------------------------------------------------------------------
+# API tokens
+# ---------------------------------------------------------------------------
+
+
+def insert_api_token(
+    token_id: str, name: str, token_hash: str, scopes: str
+) -> dict[str, Any]:
+    conn = _connect()
+    now = _utcnow()
+    with _lock, conn:
+        conn.execute(
+            "INSERT INTO api_tokens (id, name, token_hash, scopes, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (token_id, name, token_hash, scopes, now),
+        )
+    return {"id": token_id, "name": name, "scopes": scopes, "createdAt": now}
+
+
+def get_api_token(token_id: str) -> dict[str, Any] | None:
+    conn = _connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT * FROM api_tokens WHERE id = ?", (token_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_api_tokens(include_revoked: bool = False) -> list[dict[str, Any]]:
+    """Every token, without its hash.
+
+    The hash never leaves this function's SELECT list. It is not a secret a
+    listing has any use for, and a value that is never sent cannot be logged
+    by something downstream that did not know what it was holding.
+    """
+    conn = _connect()
+    where = "" if include_revoked else " WHERE revoked_at IS NULL"
+    with _lock:
+        rows = conn.execute(
+            "SELECT id, name, scopes, created_at, last_used_at, revoked_at"
+            f" FROM api_tokens{where} ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def revoke_api_token(token_id: str) -> bool:
+    """Mark a token revoked. The row stays, so the audit trail stays."""
+    conn = _connect()
+    with _lock, conn:
+        cur = conn.execute(
+            "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (_utcnow(), token_id),
+        )
+        return cur.rowcount > 0
+
+
+def touch_api_token(token_id: str) -> None:
+    """Record that a token was just used.
+
+    Best-effort and deliberately outside any transaction: knowing a token is
+    still in use is worth having, and is never worth failing a request for.
+    """
+    conn = _connect()
+    with _lock, conn:
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
+            (_utcnow(), token_id),
+        )
+
+
+def count_api_tokens(include_revoked: bool = False) -> int:
+    conn = _connect()
+    where = "" if include_revoked else " WHERE revoked_at IS NULL"
+    with _lock:
+        return int(
+            conn.execute(f"SELECT COUNT(*) AS n FROM api_tokens{where}").fetchone()["n"]
+        )
+
+
+def delete_all_api_tokens() -> int:
+    conn = _connect()
+    with _lock, conn:
+        return conn.execute("DELETE FROM api_tokens").rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +999,13 @@ __all__ = [
     "recover",
     "record_heartbeat",
     "set_profile_state",
+    "insert_api_token",
+    "get_api_token",
+    "list_api_tokens",
+    "revoke_api_token",
+    "touch_api_token",
+    "count_api_tokens",
+    "delete_all_api_tokens",
     "open_usage_session",
     "close_usage_session",
     "close_abandoned_sessions",

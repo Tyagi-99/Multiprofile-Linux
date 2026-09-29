@@ -9,7 +9,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from .. import __version__, plans, usage
+from .. import __version__, api_tokens, plans, usage
 from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
 from ..browser import identity_faults
@@ -561,6 +561,46 @@ def create_app() -> Flask:
         warnings = field_warnings + _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
+
+    @app.get("/api/tokens")
+    def tokens_list():
+        """Named tokens, never their secrets.
+
+        The secret exists once, in the response to the call that created it.
+        A store that can show you a token later is a store that can leak one
+        later, so there is deliberately no way to recover it.
+        """
+        include_revoked = str(request.args.get("includeRevoked", "0")).lower() in ("1", "true", "yes")
+        return jsonify({
+            "ok": True,
+            "items": api_tokens.listing(include_revoked=include_revoked),
+            "scopes": list(api_tokens.SCOPES),
+        })
+
+    @app.post("/api/tokens")
+    def tokens_create():
+        payload = require_json()
+        name = payload.get("name")
+        try:
+            record = api_tokens.create_token(name, payload.get("scopes", "read"))
+        except api_tokens.TokenError as e:
+            raise ValidationError("token", str(e)) from e
+        # The id is logged, never the secret.
+        audit_log("api_token_create", ok=True,
+                  detail={"tokenId": record["id"], "scopes": record["scopes"]})
+        return jsonify({
+            "ok": True,
+            "token": record,
+            "warning": "This is the only time the token is shown. Store it now.",
+        }), 201
+
+    @app.delete("/api/tokens/<token_id>")
+    def tokens_revoke(token_id: str):
+        """Revoke a token. The row stays, so the audit trail stays."""
+        if not api_tokens.revoke(token_id):
+            return jsonify({"error": "not found"}), 404
+        audit_log("api_token_revoke", ok=True, detail={"tokenId": token_id})
+        return jsonify({"ok": True, "revoked": token_id})
 
     @app.get("/api/plan")
     def plan_describe():

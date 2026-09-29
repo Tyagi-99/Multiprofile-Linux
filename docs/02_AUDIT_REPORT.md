@@ -963,6 +963,78 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F39 — ✅ HIGH: one API token, unscoped, unrevocable, in cleartext — **FIXED**
+
+**Files:** [`api_tokens.py`](../src/multiprofile/api_tokens.py) (new),
+[`api/auth.py`](../src/multiprofile/api/auth.py),
+[`storage/db.py`](../src/multiprofile/storage/db.py),
+[`api/server.py`](../src/multiprofile/api/server.py)
+
+The product had exactly one API token, stored in cleartext in
+`$XDG_CONFIG_HOME/multiprofile/api_token`. `auth.py`'s own docstring already
+listed the weakness — "a single static bearer token, not per-user
+credentials" — and three consequences follow from it, all real rather than
+theoretical:
+
+*No least privilege.* A cron job that starts a profile each morning held the
+credential that can delete the fleet, read every cookie jar and rewrite every
+proxy. The blast radius of a leaked automation token was the entire product.
+
+*No revocation.* Rotating after a leak meant changing the one token and
+breaking every other integration at the same moment — which in practice means
+it does not get rotated.
+
+*Cleartext at rest.* Whoever could read the file had a working credential.
+
+**What replaced it.** An `api_tokens` table (schema v6) of named tokens, each
+with scopes, a creation time, a last-used time and a revocation time. Tokens
+are `mpt_<id>_<secret>`; the id is not secret and exists so verification is
+one indexed lookup rather than a comparison against every row, which would
+make request cost scale with how many tokens the operator has.
+
+**Only the hash is stored.** SHA-256, deliberately not bcrypt or argon2: these
+are 256 bits from `secrets`, not human-chosen passwords. A slow KDF exists to
+make guessing a low-entropy secret expensive and there is nothing low-entropy
+here to guess; it would cost every request measurable time and buy nothing.
+A test asserts the secret does not appear anywhere in `control.db` or its WAL
+sidecars.
+
+**Four scopes**, coarse on purpose: `read`, `launch`, `write`, `admin`. A
+permission model with thirty verbs reads as rigorous and gets chosen wrongly,
+because nobody can hold thirty verbs in their head while deciding what a cron
+job needs. `write` and `launch` imply `read` — a token that may change things
+may look at what it changed — and the implication is stored rather than
+resolved at check time, so reading a row answers what a token can do without
+also having to know the rules. Managing tokens needs `admin` **even to list
+them**: which integrations exist, when they last ran and what they may do is
+reconnaissance.
+
+**Two distinctions the responses are careful about.** Every authentication
+failure — malformed, unknown, revoked, wrong secret — answers 401 with an
+identical body, so the endpoint is not an oracle telling an attacker which
+part of a guess was right. A *scope* failure answers **403**, because the
+credential is good and the permission is not; a 401 there would send someone
+to replace a token that was never wrong.
+
+The secret is returned once, by the call that mints it, and there is
+deliberately no way to recover it: a store that can show you a token later is
+a store that can leak one later. Revocation keeps the row, so the trail
+survives the credential.
+
+**The legacy token still works**, carries every scope, and is *not* copied
+into the new store. It may already be wired into the operator's scripts;
+narrowing it would silently break a live integration, and silently duplicating
+a credential into a database is not a migration anyone asked for.
+
+Unchanged and deliberate: **loopback still needs no token**. The console must
+work, and code already running on this machine owns it anyway. Scopes
+therefore bite exactly where automation connects from, which is where they
+matter.
+
+49 tests added.
+
+---
+
 ### F38 — ✅ MEDIUM: the limits were scattered, anonymous and partly fictional — **FIXED**
 
 **Files:** [`plans.py`](../src/multiprofile/plans.py) (new),

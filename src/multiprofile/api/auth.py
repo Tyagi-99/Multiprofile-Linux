@@ -51,7 +51,9 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from flask import jsonify, request
+from flask import g, jsonify, request
+
+from .. import api_tokens
 
 log = logging.getLogger("multiprofile.api.auth")
 
@@ -212,14 +214,35 @@ def register_request_guard(app) -> None:
         return None
 
 
+def _forbidden_scope(needed: str, held: list[str]):
+    """403, not 401: the credential is good, the permission is not.
+
+    The distinction matters to whoever is debugging an integration. A 401
+    sends them to check their token; a 401 for a scope problem sends them to
+    replace a token that was never wrong.
+    """
+    return (
+        jsonify({
+            "error": {
+                "code": "insufficient_scope",
+                "message": f"this token may not perform this request; it needs {needed!r}",
+                "required": needed,
+                "granted": held,
+            }
+        }),
+        403,
+    )
+
+
 def register_auth(app) -> None:
     """Install the before_request auth gate on the Flask app."""
     token = get_configured_token()
     if token:
         log.info("API token configured; remote (non-localhost) /api/* requests require it")
     else:
-        log.warning(
-            "No API token configured: remote (non-localhost) /api/* requests will be rejected"
+        log.info(
+            "No legacy API token file; remote /api/* requests need a token from "
+            "POST /api/tokens"
         )
 
     @app.before_request
@@ -229,13 +252,39 @@ def register_auth(app) -> None:
             return None
         if is_localhost(request.remote_addr):
             return None
-        configured = get_configured_token()
-        if not configured:
-            return _unauthorized()
+
         auth = (request.headers.get("Authorization") or "").strip()
         if not auth.startswith("Bearer "):
             return _unauthorized()
         presented = auth[len("Bearer ") :].strip()
-        if not presented or not hmac.compare_digest(presented, configured):
+        if not presented:
             return _unauthorized()
+
+        # The single file/env token predates the store and may already be
+        # wired into the operator's scripts, so it keeps working and carries
+        # every scope. It is checked first and compared in constant time.
+        configured = get_configured_token()
+        if configured and hmac.compare_digest(presented, configured):
+            g.api_token = {
+                "id": api_tokens.LEGACY_TOKEN_ID,
+                "name": "legacy file token",
+                "scopes": list(api_tokens.SCOPES),
+            }
+            return None
+
+        record = api_tokens.verify(presented)
+        if record is None:
+            # Identical answer for malformed, unknown, revoked and wrong: the
+            # endpoint must not tell an attacker which part they got right.
+            return _unauthorized()
+
+        needed = api_tokens.required_scope(request.method, path)
+        if not api_tokens.allows(record, needed):
+            log.warning(
+                "token %s lacks scope %s for %s %s", record["id"], needed,
+                request.method, path,
+            )
+            return _forbidden_scope(needed, record["scopes"])
+
+        g.api_token = record
         return None
