@@ -1176,6 +1176,20 @@ than silently truncated.
 
 ---
 
+**Addendum — the console half.** Both fleet-filling paths were endpoints with
+no screen, so the only way to make a fleet from the console was still to click
+"New profile" once per profile. A **Bulk create** dialog on the Profiles page
+now covers both: N copies of a template, or a pasted proxy list. It shows the
+fleet's remaining room *before* a number is chosen rather than after it is
+submitted, disables the button when the batch will not fit, and keeps itself
+open to show the per-line report when anything failed or was skipped — a clean
+run has nothing to say and closes. Two shape bugs were caught building it:
+`GET /api/templates` answers with a bare array rather than an envelope, and
+`count` must be sent as a number, since the server validates the type now
+instead of reinterpreting it (F35).
+
+---
+
 ### F33 — ✅ HIGH: starting a fleet cost one launch after another — **FIXED**
 
 **Files:** [`jobs/legacy.py`](../src/multiprofile/jobs/legacy.py),

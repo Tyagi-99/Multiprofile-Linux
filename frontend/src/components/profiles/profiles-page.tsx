@@ -13,6 +13,7 @@ import {
   MoreHorizontal,
   Pause,
   Play,
+  Layers,
   Plus,
   RotateCcw,
   Search,
@@ -550,6 +551,9 @@ export function ProfilesPage() {
           title="Download the currently listed profiles as JSON (proxy passwords stripped)"
         >
           <Download size={14} aria-hidden /> Export
+        </Button>
+        <Button variant="secondary" size="sm" onClick={() => openDialog("bulkCreate")}>
+          <Layers size={14} aria-hidden /> Bulk create
         </Button>
         <Button variant="primary" size="sm" onClick={() => openDialog("wizard")}>
           <Plus size={14} aria-hidden /> New profile

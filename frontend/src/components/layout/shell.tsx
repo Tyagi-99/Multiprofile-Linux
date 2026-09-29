@@ -20,6 +20,7 @@ import { useUI } from "../../stores/ui";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
 import { CommandPalette } from "../palette/command-palette";
+import { BulkCreateDialog } from "../dialogs/bulk-create-dialog";
 import { NewProfileDialog } from "../dialogs/new-profile-dialog";
 import { ShortcutHelpDialog } from "../dialogs/shortcut-help";
 import { TokenDialog } from "../dialogs/token-dialog";
@@ -122,6 +123,7 @@ function ShellInner() {
       </div>
       <CommandPalette />
       <NewProfileDialog />
+      <BulkCreateDialog />
       <Suspense fallback={null}>
         <WizardDialog />
       </Suspense>

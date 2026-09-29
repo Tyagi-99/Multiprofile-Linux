@@ -38,7 +38,7 @@ export function applyTheme(mode: ThemeMode): void {
   document.documentElement.setAttribute("data-theme", resolveTheme(mode));
 }
 
-type DialogKind = "newProfile" | "wizard" | "shortcuts" | "token" | null;
+type DialogKind = "newProfile" | "bulkCreate" | "wizard" | "shortcuts" | "token" | null;
 
 interface UIState {
   sidebarCollapsed: boolean;
