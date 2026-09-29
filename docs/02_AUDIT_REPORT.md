@@ -98,6 +98,10 @@ honest-reporting defects rather than deferring them.
 | **F34** | ✅ Medium | UX | **No way to fill a fleet**: every create path made one profile | done |
 | **F35** | ✅ **High** | Correctness | **Bulk create silently did a third of what was asked** — `count` clamped to 50, reported as success | done |
 | **F36** | ✅ **High** | Data loss | **Deleting a profile destroyed its sessions irreversibly** — no trash, no restore | done |
+| **F37** | ✅ **High** | Commercial | **Nothing measured what the fleet did** — no runtime, no sessions, nothing for a bill or a cap to rest on | done |
+| **F38** | ✅ Medium | Commercial | Limits were **scattered, anonymous and partly fictional** — no way to ask what this install may do | done |
+| **F39** | ✅ **High** | Security | **One API token**: unscoped, unrevocable, cleartext — a cron job held the credential that deletes the fleet | done |
+| **F40** | ✅ Medium | Compliance | **No way to export or destroy your data** — GDPR/DPDP readiness had nothing behind it | done |
 
 ---
 
