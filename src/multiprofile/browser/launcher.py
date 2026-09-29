@@ -42,7 +42,7 @@ from ..storage.state import InvalidStateTransition, ProfileState
 from ..storage.xdg import chrome_profile_dir, purge_legacy_extension_staging
 from . import fontconfig, identity_faults
 from . import manager as browser_manager
-from .cdp_window import allocate_localhost_port, wait_for_cdp
+from .cdp_window import allocate_localhost_port, release_localhost_port, wait_for_cdp
 from .grid import Rect
 from .runtime_state import LaunchState, clear_runtime, set_launch_state, upsert_runtime
 from .sandbox import sandbox_chrome_args
@@ -488,6 +488,68 @@ def _resolve_wire_identity(
 _LAUNCHER_SCOPE = "browser.launcher"
 
 
+def _release_cdp_port(profile_id: str) -> None:
+    """Return this profile's debugging port to the pool.
+
+    Ports are remembered when handed out so two concurrent launches are never
+    given the same number. Nothing gave them back, so a long-running process
+    accumulated every port it had ever used -- and the only thing keeping that
+    bounded was a backstop that pruned by probing, which is a TCP connect this
+    module has no other reason to make.
+
+    Called at every teardown, so the set tracks what is actually in use.
+    """
+    try:
+        from .runtime_state import get_runtime
+
+        rt = get_runtime(profile_id)
+        release_localhost_port(getattr(rt, "cdp_port", None) if rt else None)
+    except Exception:  # noqa: BLE001 - never let bookkeeping block a stop
+        pass
+
+
+def _cdp_port_open(port: int) -> bool:
+    """Is something listening on the CDP port yet?
+
+    A bare TCP connect, not an HTTP request: this only needs to know that
+    Chrome got far enough to bind, and ``wait_for_cdp`` does the real
+    handshake a moment later.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.15):
+            return True
+    except OSError:
+        return False
+
+
+def _settle_after_spawn(proc: Any, port: int, timeout_s: float = 1.2) -> int | None:
+    """Wait only as long as it takes to learn whether Chrome survived.
+
+    Returns the exit code if it died, or None if it is up.
+
+    This used to be a flat ``time.sleep(1.2)`` before checking ``poll()``,
+    which meant every launch paid 1.2 s to answer a question that is usually
+    settled in a fraction of that -- a browser that is going to die on a bad
+    flag or a locked profile does so almost immediately, and one that is
+    going to live has bound its debugging port. Measured, launch was ~1.9 s
+    of which this was 1.2 s, and bulk launch is sequential, so starting 40
+    profiles spent about 48 seconds here doing nothing.
+
+    The timeout is unchanged, so a slow-but-healthy start is treated exactly
+    as before. What changes is that the common cases stop waiting for the
+    clock once the answer is known.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        rc = proc.poll()
+        if rc is not None:
+            return rc
+        if _cdp_port_open(port):
+            return None
+        time.sleep(0.02)
+    return proc.poll()
+
+
 def _fault(notes: list[str], code: str, detail: str, *, profile_id: str | None) -> None:
     """Record an identity fault and write it into this launch's notes (F11).
 
@@ -734,6 +796,7 @@ def _abort_launch(
         pass
     _wait_pid_gone(pid, timeout_s=5.0)
     set_runtime(profile_id, "idle", None)
+    _release_cdp_port(profile_id)
     clear_runtime(profile_id)
     set_launch_state(
         profile_id, LaunchState.VERIFY_FAILED, error=error, error_code=error_code
@@ -1145,11 +1208,11 @@ def launch_profile(
         _record_state(profile_id, ProfileState.ERROR, note="spawn_failed: could not spawn Chrome process")
         return {"ok": False, "error": f"Failed to spawn Chrome: {e}", "errors": ["spawn_failed"], "cmd": cmd}
 
-    time.sleep(1.2)
-    rc = proc.poll()
+    rc = _settle_after_spawn(proc, debug_port)
     if rc is not None:
         err = (proc.stderr.read() or b"").decode("utf-8", "ignore")[-2500:]
         set_runtime(profile_id, "idle", None)
+        release_localhost_port(debug_port)
         clear_runtime(profile_id)
         set_launch_state(profile_id, LaunchState.LAUNCH_FAILED, error=f"chrome exit {rc}", error_code="chrome_exit_immediate")
         _record_state(profile_id, ProfileState.ERROR, note=f"chrome exited immediately with code {rc}")
@@ -1443,6 +1506,7 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
     pid = (profile or {}).get("pid")
     if not pid:
         set_runtime(profile_id, "idle", None)
+        _release_cdp_port(profile_id)
         clear_runtime(profile_id)
         browser_manager.release_slot(profile_id)
         _record_state(profile_id, ProfileState.STOPPED, note="user stop (no pid recorded)")
@@ -1461,6 +1525,7 @@ def stop_profile(profile_id: str) -> dict[str, Any]:
         return {"error": f"Cannot stop pid {pid}: {e}", "errors": ["permission"]}
     gone = _wait_pid_gone(pid)
     set_runtime(profile_id, "idle", None)
+    _release_cdp_port(profile_id)
     clear_runtime(profile_id)
     browser_manager.release_slot(profile_id)
     if not gone:

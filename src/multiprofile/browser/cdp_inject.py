@@ -396,6 +396,7 @@ class IdentityInjector:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._cookies_done = False
+        self._locale_done = False
 
     # -- wire ------------------------------------------------------------
 
@@ -765,7 +766,7 @@ class IdentityInjector:
                        {"timezoneId": self.timezone_id}, session_id=session_id)
             self.status.timezone_applied = True
 
-        if self.locale:
+        if self.locale and not self._locale_done:
             # The same argument as the timezone, for the same reason. The
             # profile's language reached navigator.language through the
             # injected script and Accept-Language through the UA override, but
@@ -773,8 +774,18 @@ class IdentityInjector:
             # formatting still followed the host: a profile claiming de-DE
             # formatted 1.234,56 as 1,234.56. Setting the locale makes every
             # Intl surface agree, including the ones no script patches.
+            #
+            # Once per browser, not once per target. Unlike the timezone
+            # override this one is per browser context and refuses to be set
+            # twice -- "Another locale override is already in effect" -- so
+            # sending it for every attached target meant every target after
+            # the first got an error back and, on a failed re-apply, the
+            # profile's Intl would have fallen back to the host. The error was
+            # invisible until bulk launch started attaching several targets at
+            # once and it appeared in the log.
             self._send("Emulation.setLocaleOverride",
                        {"locale": self.locale}, session_id=session_id)
+            self._locale_done = True
             self.status.locale_applied = True
 
         if self.geolocation:

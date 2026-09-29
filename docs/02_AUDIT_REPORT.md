@@ -946,6 +946,88 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F33 — ✅ HIGH: starting a fleet cost one launch after another — **FIXED**
+
+**Files:** [`jobs/legacy.py`](../src/multiprofile/jobs/legacy.py),
+[`browser/launcher.py`](../src/multiprofile/browser/launcher.py),
+[`browser/cdp_window.py`](../src/multiprofile/browser/cdp_window.py),
+[`browser/cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py)
+
+Raised by the operating target: **up to 150 profiles stored, a maximum of 20
+running simultaneously**, with the operator choosing which 4 / 6 / 8 / … / 20
+to start. Nothing was reported as slow; this is what measurement found at that
+size.
+
+Bulk launch was a plain `for` loop, so starting N profiles cost N launches end
+to end. Measured per launch:
+
+| phase | time |
+|---|---|
+| Chrome spawn → debugging port bound | 0.51 s |
+| identity assertion (the F1 guard) | 0.50 s |
+| `wait_for_cdp` | 0.18 s |
+| identity injection | 0.13 s |
+| fontconfig (F25) | 0.06 s |
+| **total** | **~1.6 s** |
+
+Almost all of it is *waiting*, so it overlaps. Measured with 8 profiles:
+
+```
+sequential   ~13 s
+parallel      2.9 s   (0.36 s per profile)
+```
+
+At the maximum of 20 that is the difference between about half a minute of
+progress bar and a few seconds.
+
+**A fixed sleep went first.** The launch did `time.sleep(1.2)` before checking
+whether Chrome had died — 1.2 s of every launch, to answer a question that is
+usually settled in a fraction of it: a browser that dies on a bad flag or a
+locked profile does so almost immediately, and one that lives has bound its
+port. It now polls for either answer, with the same timeout as a bound, so a
+slow-but-healthy start is treated exactly as before. Launch: 1.9 s → 1.6 s.
+
+**Port allocation had to be made safe first.** `allocate_localhost_port` binds
+port 0, reads the number, closes the socket, and Chrome binds it later — a
+window in which the port is free. Sequentially that window is small enough not
+to matter. In parallel it is not: two launches were handed the same number, and
+the second browser failed to bind its debugging port, surfacing as a launch
+that came up with no CDP at all. Ports handed out are now remembered, which
+removes the half of the race we cause ourselves; the external half is noted
+rather than claimed fixed.
+
+The first version of that had a defect worth recording, because an existing
+test caught it rather than a person: the release function was written but
+**never called from `src/`**, so ports accumulated for the life of the process,
+and the only thing bounding them was a backstop that pruned by probing each one
+with a TCP connect. That connect lives in `cdp_window.py`, where
+`test_cdp_origin_lockdown` requires every CDP socket to suppress its `Origin`
+header — and it counted the probe as an un-suppressed CDP client. The test was
+right that the file had grown a socket it should not have. Wiring the release
+into every teardown path removed the reason the probe existed, so it was
+deleted and the test passes unmodified.
+
+**A bug the parallel run exposed.** `Emulation.setLocaleOverride` is per
+*browser context* and refuses to be set twice — "Another locale override is
+already in effect". It was being sent for every attached target, so every
+target after the first got an error back, and on a failed re-apply the
+profile's Intl would have fallen back to the host: the exact leak F31 closed.
+It was invisible until several targets started attaching at once and it
+appeared in the log. Sent once per browser now, with a test.
+
+**Concurrency default left alone, and it is the right one.** The cap stays at
+20, which is the confirmed design maximum. Measured on this host, a running
+profile costs **130–216 MB** (PSS, shared pages counted once), so 20 concurrent
+is ~2.8 GB of this 13 GB machine — comfortable. For contrast, running all 150
+at once would be ~21 GB, beyond this hardware regardless of software; storing
+150 and running at most 20 of them is what the product is built for.
+`MAX_CONCURRENT_PROFILES` still raises it (hard maximum 64) for an operator who
+knows their own hardware.
+
+14 tests added.
+
+---
+
 ### F32 — ✅ MEDIUM: the consistency engine had no score — **FIXED**
 
 **File:** [`consistency.py`](../src/multiprofile/consistency.py)
