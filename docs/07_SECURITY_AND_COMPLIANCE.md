@@ -169,9 +169,21 @@ identities. Those are real, large and legal markets.
 The same capability can be used for fraud, account-takeover, and evading bans
 imposed for illegal activity. An Acceptable Use Policy that prohibits these is
 a prerequisite for taking payment, for app-store distribution and for most
-payment processors' onboarding. **No AUP or Terms of Service exists in this
-repository.** Drafting them is a legal task, not an engineering one, and it
-blocks commercialisation rather than development — see `08` §6.
+payment processors' onboarding.
+
+An **engineering draft** of one is at
+[`ACCEPTABLE_USE.md`](ACCEPTABLE_USE.md). It is explicitly not legal advice
+and is not lawyer-reviewed; it exists so the policy questions are answered
+before they are answered badly under time pressure, and so counsel reviews
+something concrete rather than a blank page. It closes with the seven
+questions an engineering draft cannot settle. **No Terms of Service, privacy
+notice or refund policy exists.**
+
+The draft is also honest that it is currently **unenforceable**: the product
+is local, reports nothing, and has no account system, so there is nothing to
+suspend and no way to detect a violation. Publishing it beside the current
+build states an intention, not a capability. A hosted tier acquires both the
+ability to enforce and the duty to.
 
 **No abuse detection exists**, and on a local-only product there is little to
 detect from: nothing reports home. If a hosted tier is built, volume-based
