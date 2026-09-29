@@ -12,6 +12,21 @@ Domains:
     mobile    mobile category <-> viewport <-> touch
     browser   browser family <-> Client Hints brands
     gpu_webgl expected webgl policy <-> runtime capability (when provided)
+    webgpu    WebGL renderer <-> WebGPU adapter vendor
+
+Each report also carries a **score** out of 100. The score exists so the
+console can rank profiles and so an operator can see a profile getting worse
+without reading six messages, but it is deliberately not a confidence rating
+about being undetected: it says how internally coherent the signals *we can
+see* are, and nothing about the surfaces nobody has checked yet.
+
+Two rules keep it honest. A domain that could not be evaluated -- no proxy, so
+no IP country to compare a timezone against -- is **excluded from the
+denominator** rather than scored as a pass or a fail. Scoring it as a pass
+would let a profile with nothing configured outrank one with a real setup, and
+scoring it as a fail would punish an operator for a check they never asked
+for. And any ERROR caps the total, because a single flat contradiction is not
+something four passes elsewhere should be able to average away.
 """
 from __future__ import annotations
 
@@ -20,6 +35,86 @@ from typing import Any
 PASS = "PASS"
 WARNING = "WARNING"
 ERROR = "ERROR"
+
+#: Marker for a check that had nothing to compare. Messages already began with
+#: this prefix; the score needs it as data rather than prose.
+INSUFFICIENT_PREFIX = "insufficient data:"
+
+#: How much each domain is worth. Geo and platform carry the most because they
+#: are the contradictions a site checks first and the ones that are hardest to
+#: explain away: an IP in one country with a timezone in another, or a
+#: User-Agent that disagrees with its own Client Hints.
+_DOMAIN_WEIGHTS: dict[str, int] = {
+    "geo": 30,
+    "platform": 25,
+    "device": 15,
+    "mobile": 10,
+    "browser": 10,
+    "gpu_webgl": 5,
+    "webgpu": 5,
+}
+
+#: A profile with a flat contradiction cannot score above this, whatever else
+#: passes.
+_ERROR_CEILING = 40
+
+#: A WARNING keeps this fraction of its domain's weight: it is a real signal,
+#: not a pass, but it is not the same as a contradiction either.
+_WARNING_CREDIT = 0.4
+
+
+def _is_insufficient(check: dict[str, Any]) -> bool:
+    if check.get("insufficient") is True:
+        return True
+    return str(check.get("message") or "").startswith(INSUFFICIENT_PREFIX)
+
+
+def score_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Turn per-domain results into a 0-100 score and its explanation.
+
+    Returns the score, the domains that counted, and the ones that were
+    skipped for want of anything to compare -- so a low score can always be
+    traced to a specific check rather than appearing as a bare number.
+    """
+    earned = 0.0
+    possible = 0
+    skipped: list[str] = []
+    penalised: list[str] = []
+    for check in checks:
+        domain = str(check.get("domain") or "")
+        weight = _DOMAIN_WEIGHTS.get(domain, 0)
+        if not weight:
+            continue
+        if _is_insufficient(check):
+            skipped.append(domain)
+            continue
+        possible += weight
+        status = check.get("status")
+        if status == PASS:
+            earned += weight
+        elif status == WARNING:
+            earned += weight * _WARNING_CREDIT
+            penalised.append(domain)
+        else:
+            penalised.append(domain)
+
+    if not possible:
+        # Nothing could be evaluated. A score of 100 would be a lie and a 0
+        # would be a different one, so the report says so instead.
+        return {"score": None, "evaluated": [], "skipped": skipped,
+                "penalised": [], "reason": "nothing could be evaluated"}
+
+    score = round(100 * earned / possible)
+    if any(c.get("status") == ERROR and not _is_insufficient(c) for c in checks):
+        score = min(score, _ERROR_CEILING)
+    return {
+        "score": score,
+        "evaluated": [d for d in _DOMAIN_WEIGHTS if d not in skipped
+                      and any(c.get("domain") == d for c in checks)],
+        "skipped": skipped,
+        "penalised": penalised,
+        "reason": None,
+    }
 
 # ---------------------------------------------------------------------------
 # IANA timezone -> ISO country code (common zones; unknown zones are reported
@@ -45,7 +140,8 @@ TZ_COUNTRY: dict[str, str] = {
     # Asia
     "Asia/Dubai": "AE", "Asia/Kolkata": "IN", "Asia/Karachi": "PK",
     "Asia/Dhaka": "BD", "Asia/Colombo": "LK", "Asia/Kathmandu": "NP",
-    "Asia/Bangkok": "TH", "Asia/Jakarta": "ID", "Asia/Singapore": "SG",
+    "Asia/Bangkok": "TH", "Asia/Ho_Chi_Minh": "VN",
+    "Asia/Jakarta": "ID", "Asia/Singapore": "SG",
     "Asia/Kuala_Lumpur": "MY", "Asia/Manila": "PH", "Asia/Hong_Kong": "HK",
     "Asia/Shanghai": "CN", "Asia/Taipei": "TW", "Asia/Seoul": "KR",
     "Asia/Tokyo": "JP", "Asia/Jerusalem": "IL", "Asia/Riyadh": "SA",
@@ -165,6 +261,7 @@ class ProfileConsistencyEngine:
             self._check_mobile(profile, device_preset, fp),
             self._check_browser(profile, fp),
             self._check_gpu_webgl(profile, fp),
+            self._check_webgpu(fp),
         ]
         status = PASS
         for c in checks:
@@ -176,9 +273,12 @@ class ProfileConsistencyEngine:
                 if c["status"] == WARNING:
                     status = WARNING
                     break
+        scored = score_checks(checks)
         return {
             "profile_id": profile.get("id"),
             "status": status,
+            "score": scored["score"],
+            "score_detail": scored,
             "checks": checks,
         }
 
@@ -233,6 +333,63 @@ class ProfileConsistencyEngine:
                        "timezone_country": tz_cc, "language": profile.get("language"),
                        "language_country": lang_cc},
             "message": "IP country, timezone and language region are coherent",
+        }
+
+    def _check_webgpu(self, fp: dict[str, Any] | None) -> dict[str, Any]:
+        """WebGL and WebGPU must name the same card.
+
+        A page can read both, and they use different vocabularies for the same
+        hardware. Measured before F26, a profile claimed an RTX 4060 in WebGL
+        while ``requestAdapter()`` returned null -- a combination no Windows
+        machine produces. This catches the same class of disagreement before
+        a launch rather than after.
+        """
+        domain = "webgpu"
+        gpu = (fp or {}).get("gpu") if isinstance(fp, dict) else None
+        if not isinstance(gpu, dict) or not gpu.get("renderer"):
+            return {
+                "domain": domain, "status": WARNING, "insufficient": True,
+                "expected": "a claimed WebGL renderer to compare against",
+                "actual": None,
+                "message": f"{INSUFFICIENT_PREFIX} no WebGL renderer claimed",
+            }
+        renderer = str(gpu.get("renderer") or "")
+        adapter = gpu.get("webgpu")
+        if not isinstance(adapter, dict) or not adapter.get("vendor"):
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "a WebGPU adapter identity for the claimed card",
+                "actual": {"renderer": renderer, "webgpu": adapter or None},
+                "message": (
+                    "the profile claims a GPU in WebGL but has no WebGPU adapter "
+                    "identity, so the two surfaces can disagree in the page"
+                ),
+            }
+        vendor = str(adapter.get("vendor") or "").lower()
+        expected = None
+        for needle, name in (("nvidia", "nvidia"), ("amd", "amd"), ("radeon", "amd"),
+                             ("intel", "intel"), ("apple", "apple"),
+                             ("qualcomm", "qualcomm"), ("adreno", "qualcomm"),
+                             ("mali", "arm"), ("arm", "arm")):
+            if needle in renderer.lower():
+                expected = name
+                break
+        if expected and vendor != expected:
+            return {
+                "domain": domain, "status": ERROR,
+                "expected": expected,
+                "actual": {"renderer": renderer, "webgpu_vendor": vendor},
+                "message": (
+                    f"WebGL names a {expected} card while the WebGPU adapter says "
+                    f"{vendor}. One page cannot have two different graphics cards."
+                ),
+            }
+        return {
+            "domain": domain, "status": PASS,
+            "expected": expected or vendor,
+            "actual": {"renderer": renderer, "webgpu_vendor": vendor,
+                       "architecture": adapter.get("architecture")},
+            "message": "WebGL and WebGPU describe the same card",
         }
 
     def _check_device(

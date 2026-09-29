@@ -210,11 +210,17 @@ def test_desktop_viewport_on_mobile_flag_errors_overall():
 def test_result_shape():
     profile = _android_profile()
     result = ENGINE.check(profile)
-    assert set(result.keys()) == {"profile_id", "status", "checks"}
+    assert set(result.keys()) == {"profile_id", "status", "score",
+                                  "score_detail", "checks"}
     assert result["status"] in ("PASS", "WARNING", "ERROR")
     domains = [c["domain"] for c in result["checks"]]
-    assert domains == ["geo", "device", "platform", "mobile", "browser", "gpu_webgl"]
+    assert domains == ["geo", "device", "platform", "mobile", "browser",
+                       "gpu_webgl", "webgpu"]
     for c in result["checks"]:
-        assert set(c.keys()) == {"domain", "status", "expected", "actual", "message"}
+        # `insufficient` is optional: it marks a check that had nothing to
+        # compare, so the score can exclude it instead of scoring it.
+        assert set(c.keys()) <= {"domain", "status", "expected", "actual",
+                                 "message", "insufficient"}
+        assert {"domain", "status", "message"} <= set(c.keys())
         assert c["status"] in ("PASS", "WARNING", "ERROR")
         assert isinstance(c["message"], str) and c["message"]

@@ -85,23 +85,18 @@ def test_the_fields_are_the_ones_chrome_reports():
 # 2. The launch flag that keeps an adapter at all
 # --------------------------------------------------------------------------
 
-def test_the_gpu_flags_keep_webgpu_alive(monkeypatch):
+def test_the_launch_keeps_webgpu_alive(monkeypatch):
+    """Vulkan lives in the composed --enable-features list rather than in the
+    GPU args, because Chrome honours only the last such flag and a second one
+    would drop it."""
     import multiprofile.browser.launcher as L
 
     monkeypatch.delenv("MULTIPROFILE_WEBGPU", raising=False)
-    assert "--enable-features=Vulkan" in L.chrome_gpu_args("angle")
+    assert "Vulkan" in L.chrome_enabled_features()
 
 
 def test_webgpu_can_be_turned_off_for_a_broken_vulkan_stack(monkeypatch):
     import multiprofile.browser.launcher as L
 
     monkeypatch.setenv("MULTIPROFILE_WEBGPU", "0")
-    assert "--enable-features=Vulkan" not in L.chrome_gpu_args("angle")
-
-
-def test_software_rendering_does_not_ask_for_vulkan(monkeypatch):
-    """There is no adapter to keep alive when the GPU is off."""
-    import multiprofile.browser.launcher as L
-
-    monkeypatch.delenv("MULTIPROFILE_WEBGPU", raising=False)
-    assert "--enable-features=Vulkan" not in L.chrome_gpu_args("software")
+    assert "Vulkan" not in L.chrome_enabled_features()

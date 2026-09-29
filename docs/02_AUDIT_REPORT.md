@@ -769,6 +769,332 @@ Uncommitted in the working tree.
 
 ---
 
+### F32 — ✅ MEDIUM: the consistency engine had no score — **FIXED**
+
+**File:** [`consistency.py`](../src/multiprofile/consistency.py)
+
+The engine already reported PASS/WARNING/ERROR per domain but gave no single
+number, so an operator could not rank profiles or notice one getting worse
+without reading six messages. A `score` out of 100 is now part of every report,
+along with a `score_detail` naming which domains counted, which were skipped
+and which were penalised — a low score is always traceable to a check rather
+than appearing as a bare number.
+
+Two rules keep it from being a false comfort, and both are asserted:
+
+- **A domain that could not be evaluated is excluded from the denominator**,
+  not scored as a pass or a fail. Scoring it as a pass would let a profile with
+  nothing configured outrank one with a real setup; scoring it as a fail would
+  punish an operator for a check they never asked for.
+- **Any ERROR caps the total at 40.** One flat contradiction is not something
+  four passes elsewhere should be able to average away.
+
+It is deliberately *not* a claim about being undetected — it says how coherent
+the signals we can see are, and nothing about surfaces nobody has checked. That
+distinction is written into the module docstring so the number is not read as
+something it is not.
+
+A `webgpu` domain was added at the same time, cross-checking the claimed WebGL
+renderer against the WebGPU adapter vendor, so the F26 contradiction is caught
+before a launch rather than after.
+
+16 tests added.
+
+---
+
+### F31 — ✅ HIGH: every profile claimed New York, from every proxy — **FIXED**
+
+**Files:** [`geo.py`](../src/multiprofile/geo.py) (new),
+[`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
+[`browser/launcher.py`](../src/multiprofile/browser/launcher.py),
+[`browser/cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py)
+
+Three surfaces that have to name one place were set by three different things,
+or not at all. Measured with a profile routed through a Brazilian exit:
+
+```
+navigator.language           en-US        Intl locale   en-US
+timezone                     America/New_York
+(1234.56).toLocaleString()   1,234.56
+getCurrentPosition()         the host's real surroundings
+Accept-Language on the wire  en-US,en;q=0.9
+```
+
+`create_profile` stamped `America/New_York` and `en-US` on **every** profile at
+creation, before anything knew where its traffic would leave from. So a fleet on
+Brazilian, German and Indian exits all claimed the same city — a contradiction
+inside each profile, and a value all of them shared.
+
+The geolocation half is the worst of the three: nothing set it, so
+`getCurrentPosition` resolved against the host. That is the only surface in the
+identity that leaks a physical fact about **the person** rather than the
+computer, and it was identical for every profile on the machine.
+
+**The rule** is that the exit IP is the authority — everything else is a claim,
+and the address the packets actually came from is not. But a value the operator
+*chose* is theirs, so only the creation default is replaced. A `geoAuto` flag
+records which it was; a deliberate US persona on a German exit is reported as a
+conflict rather than silently rewritten.
+
+Language and position are set at the engine where an anchor exists, the same
+move as F22: `--lang` / `--accept-lang` for the first request (before any CDP
+session exists), `Emulation.setLocaleOverride` for Intl, and
+`Emulation.setGeolocationOverride` for position. Coordinates are the country's
+principal city with a per-profile offset of a few kilometres — a fixed point
+would be a constant shared by every profile in the country, the same linking
+mistake F24 found — and the reported accuracy is wide, because a desktop
+answering with a metre-accurate position is claiming a GPS it does not have.
+
+Measured after:
+
+| exit | navigator.language | timezone | number | date | position |
+|---|---|---|---|---|---|
+| BR | `pt-BR,pt,en` | America/Sao_Paulo | `1.234,56` | `14/01/2024` | São Paulo |
+| DE | `de-DE,de,en` | Europe/Berlin | `1.234,56` | `15.1.2024` | Berlin |
+
+with `Accept-Language` on the wire matching in both.
+
+**An instructive intermediate failure.** A first version aligned only the CDP
+overrides and not the fingerprint `evasion.js` reads, so the page answered
+`pt-BR` to Intl and `en-US` to `navigator.language` **in the same document** —
+worse than the leak it replaced. The place is now decided once, before anything
+derived from it is built, and passed down rather than recomputed.
+
+A stale-data bug was also caught by a test asserting the two country tables
+agree: Vietnam was mapped to `Asia/Bangkok`, which the consistency engine reads
+as Thailand, so every Vietnamese exit would have aligned to a timezone the
+consistency check then flagged as a conflict.
+
+28 tests added (20 pure, 8 live).
+
+---
+
+### F30 — ✅ HIGH: worker realms disagreed with their own page — **FIXED**
+
+**Files:** [`browser/cdp_inject.py`](../src/multiprofile/browser/cdp_inject.py),
+[`extension/evasion.js`](../src/extension/evasion.js)
+
+Worker coverage was two partial mechanisms in `evasion.js`, and it leaked
+through the gaps in both.
+
+**A service worker got nothing.** It is registered by URL and fetched by the
+browser, so the `Worker` constructor wrapper could not reach it:
+
+```
+top document     platform: Win32          hardwareConcurrency: 8
+service worker   platform: Linux x86_64   hardwareConcurrency: 16
+```
+
+The User-Agent was right in both (a process-wide flag) and so was the timezone
+(set on the engine, F22). Only the JavaScript-spoofed values were missing — and
+they were missing in **the one realm that outlives the page**. A service worker
+persists across navigations and can be messaged by any page in scope, so a
+script reading the host's real platform and core count through one gets a
+stable cross-profile identifier for free.
+
+**A module worker hung.** It has no `importScripts()`; the wrapper called it
+anyway inside a `try/catch`, so the prelude loaded, the real script silently
+never did, and the worker answered nothing:
+
+```
+bare Chromium 151   classic: Linux x86_64/16   module: Linux x86_64/16
+profile (wrapper)   classic: Win32/12          module: TIMEOUT
+```
+
+That breaks any site whose bundler emits a module worker, and a browser where
+module workers hang is not the Chrome the User-Agent claims.
+
+**A worker loaded from a URL got nothing** from the second mechanism, which
+hooked `URL.createObjectURL` and only ever saw blobs — while also being a
+broad, observable change to an API that has nothing to do with workers.
+
+**And where that mechanism did apply, the realms still disagreed.** It spoofed
+the WebGL strings but never added the canvas noise:
+
+```
+page / shared / service   cv: 2097776059
+dedicated worker          cv: 2367204759
+```
+
+A page could compare its own OffscreenCanvas render against a worker's and see
+the difference — the surface meant to make realms agree was what made them
+differ.
+
+**The fix** is one mechanism: the injector evaluates a worker identity script
+over CDP while the worker is frozen by `waitForDebuggerOnStart`, which lands
+ahead of the worker's first line. Both `evasion.js` mechanisms were removed
+rather than extended, because having two is what made the canvas noise
+inconsistent in the first place.
+
+Dedicated workers are children of a page target and never reach the browser
+session's auto-attach, so auto-attach is also armed on each page session —
+filtered to `type: worker`, because attaching shared and service workers from
+both sessions paused them twice and stopped service workers activating at all.
+
+Measured after, all six realms agreeing on every field:
+
+| | platform | cores | tz | GPU | canvas |
+|---|---|---|---|---|---|
+| top document | Win32 | 4 | America/New_York | NVIDIA | 2825665054 |
+| worker (blob) | Win32 | 4 | America/New_York | NVIDIA | 2825665054 |
+| worker (URL) | Win32 | 4 | America/New_York | NVIDIA | 2825665054 |
+| worker (module) | Win32 | 4 | America/New_York | NVIDIA | 2825665054 |
+| shared worker | Win32 | 4 | America/New_York | NVIDIA | 2825665054 |
+| service worker | Win32 | 4 | America/New_York | NVIDIA | 2825665054 |
+
+Two bugs of my own were caught while building this and are worth recording,
+since both were the same shape as the finding: the page/iframe dedupe returned
+early **without releasing a target waiting for the debugger**, which froze
+pages once duplicates became common; and the worker path had no dedupe at all,
+so a twice-attached worker had the canvas noise applied twice and hashed
+differently from its page.
+
+31 live tests added.
+
+---
+
+### F29 — ✅ MEDIUM: a Windows profile with no speech voices — **FIXED**
+
+**File:** [`extension/evasion.js`](../src/extension/evasion.js)
+
+`speechSynthesis.getVoices()` returned an empty array, in a profile and in
+stock Chromium 151 alike — normal for a Linux box with no speech-dispatcher,
+impossible for the Windows machine the profile claims to be. Windows ships
+Microsoft David and Zira with the OS, so every Chrome on Windows enumerates at
+least those. An empty voice list on a `Win32` navigator is a platform
+contradiction and one of the cheapest checks a probe can run: one property
+access, no permission, no user gesture.
+
+Voices are built against the real `SpeechSynthesisVoice` prototype so
+`instanceof` holds. The core set is deliberately **not** randomised per
+profile — nearly every Windows install has exactly David and Zira, so identical
+lists are what real machines look like, and noise would make profiles less
+plausible rather than more. Only the optional language packs vary.
+
+Caught while verifying: the first version marked every local voice whose
+language matched as the default, so **three voices claimed to be the default at
+once** — a more specific anomaly than the empty list it replaced. Exactly one is
+now flagged, and a test holds it.
+
+8 live tests added.
+
+---
+
+### F28 — ✅ MEDIUM: Web Bluetooth missing on a Windows claim — **FIXED**
+
+**File:** [`browser/launcher.py`](../src/multiprofile/browser/launcher.py)
+
+This host's Chromium build ships Web Bluetooth disabled while upstream Chrome
+on Windows and macOS does not:
+
+```
+default                          navigator.bluetooth  undefined
+                                 Bluetooth            undefined
+                                 BluetoothDevice      undefined
+--enable-features=WebBluetooth   all three present
+```
+
+A profile whose User-Agent says Windows and whose navigator has no Bluetooth at
+all is describing a browser that does not exist. Turning the genuine interface
+family back on beats synthesising it: a fake `navigator.bluetooth` without the
+matching constructors trades one contradiction for a more detailed one.
+
+**A hazard this exposed:** Chrome honours the **last** `--enable-features` on
+the command line rather than the union of them. Appending a second one would
+have silently dropped the `Vulkan` flag F26 relies on — a failure that looks
+like it works. One place now composes the list, the GPU args no longer carry a
+feature flag of their own, and a test asserts the launch emits exactly one.
+
+6 tests added.
+
+---
+
+### F27 — ✅ HIGH: the Battery API reported the host's battery — **FIXED**
+
+**File:** [`extension/evasion.js`](../src/extension/evasion.js)
+
+`navigator.getBattery()` was untouched, so it answered with this machine's real
+state. Every profile returned:
+
+```
+charging=false  level=0.28  chargingTime=Infinity  dischargingTime=5545
+```
+
+Three things are wrong with that at once:
+
+- It is the host's state, so it is identical across profiles — and unlike a
+  static fingerprint it **moves, in lockstep**. Two "different computers" whose
+  batteries drain together are one computer, and a drifting shared value links
+  them more strongly than a shared constant would.
+- It contradicts the claimed machine: these profiles present as desktops with a
+  discrete GPU, and no desktop discharges.
+- `dischargingTime` is a live counter, so the value is close to unique at any
+  instant.
+
+A desktop without a battery reports exactly what the spec describes — charging
+true, level 1, chargingTime 0, dischargingTime Infinity — so for a desktop
+profile **the honest answer is also the constant one**, and the moving link
+disappears rather than being replaced by a different lie. Mobile profiles do
+have a battery, so those get a per-profile deterministic level instead.
+
+The real `BatteryManager`'s getters are shadowed rather than a stand-in
+returned, so `instanceof` and the change events keep working.
+
+5 live tests added.
+
+---
+
+### F26 — ✅ HIGH: WebGPU contradicted the GPU the profile claims — **FIXED**
+
+**Files:** [`fingerprint/_core.py`](../src/multiprofile/fingerprint/_core.py),
+[`browser/launcher.py`](../src/multiprofile/browser/launcher.py),
+[`extension/evasion.js`](../src/extension/evasion.js)
+
+WebGL and WebGPU describe the same card in different vocabularies and a page can
+read both. One profile said both of these at once:
+
+```
+WebGL   ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ...)
+WebGPU  requestAdapter() -> null
+```
+
+No Windows machine with an RTX 4060 has no WebGPU adapter. **The null was ours,
+not the host's.** Window placement needs `--ozone-platform=x11`, and that leaves
+Dawn without an adapter:
+
+```
+x11                            requestAdapter() -> null
+wayland                        {vendor: intel, architecture: gen-12lp}
+x11 --enable-features=Vulkan   {vendor: intel, architecture: gen-12lp}
+```
+
+Vulkan buys the adapter back without giving up the window control.
+`MULTIPROFILE_WEBGPU=0` opts out for a host whose Vulkan stack misbehaves.
+
+And where an adapter *was* returned it described the host truthfully and
+identically for every profile — `intel` / `gen-12lp` on this laptop — so the
+surface linked every profile on the machine to every other as well as
+contradicting the WebGL claim.
+
+The adapter identity is now derived from the renderer string the profile
+already claims, so the two vocabularies cannot drift apart: an RTX 4060 is
+`nvidia`/`ada`, a GTX 1660 is `nvidia`/`turing`. An unrecognised card claims
+nothing rather than inventing an identity that would disagree.
+
+Only the four identity fields are replaced; the adapter is the real one, so
+limits, features and `requestDevice()` keep working. A synthesised adapter that
+failed on first use would be a louder tell than the one it replaced, and a live
+test asserts a device can still be created.
+
+Also closed an iframe gap this found: `applyAudioSpoofs` and `applyRectSpoofs`
+were added after the iframe realm hook was written and were never wired into
+it, so an audio or rect fingerprint taken inside a frame returned the host's
+while the same read in the top document returned the profile's.
+
+18 tests added.
+
+---
+
 ### F25 — ✅ HIGH: a Windows profile enumerated this host's Linux fonts — **FIXED (residual documented)**
 
 **Files:** [`browser/fontconfig.py`](../src/multiprofile/browser/fontconfig.py) (new),
