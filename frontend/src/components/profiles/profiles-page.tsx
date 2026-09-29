@@ -662,7 +662,7 @@ export function ProfilesPage() {
         open={deleteTargets !== null}
         onClose={() => setDeleteTargets(null)}
         title={`Delete ${deleteTargets?.length ?? 0} profile${(deleteTargets?.length ?? 0) === 1 ? "" : "s"}?`}
-        description="Browser storage will be purged. This cannot be undone."
+        description="Moves them to the trash. Their browser storage is kept, so they can be restored."
         footer={
           <>
             <Button variant="secondary" onClick={() => setDeleteTargets(null)}>
@@ -814,7 +814,7 @@ function RowActions({
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         title={`Delete “${profile.name}”?`}
-        description="Browser storage will be purged. This cannot be undone."
+        description="Moves it to the trash. Its browser storage is kept, so you can restore it."
         footer={
           <>
             <Button variant="secondary" onClick={() => setDeleteOpen(false)}>
@@ -833,8 +833,11 @@ function RowActions({
         }
       >
         <p className="text-sm text-ink-2">
-          Profile <span className="font-medium text-ink-1">{profile.name}</span> and its browser
-          storage will be permanently removed.
+          Profile <span className="font-medium text-ink-1">{profile.name}</span> moves to the{" "}
+          <a href="#/trash" className="text-brand-600 hover:underline dark:text-brand-400">
+            trash
+          </a>
+          . Its cookies and logins stay on disk until the trash is emptied.
         </p>
       </Dialog>
     </>

@@ -37,6 +37,10 @@ class Settings:
     # of them are running. 150 is the size this product is built and
     # measured for; raise MAX_PROFILES to grow it.
     max_profiles: int = 150
+    # How long a trashed profile is kept before it is purged for good.
+    # 0 disables the automatic purge, so the trash only empties when the
+    # operator says so.
+    trash_retention_days: int = 30
     # DEFAULT FALSE — AdsPower-class anti-detect exclusivity.
     allow_webstore_extensions: bool = False
     force_no_sandbox: bool = False
@@ -109,6 +113,9 @@ def get_settings() -> Settings:
     return Settings(
         max_concurrent_profiles=_env_int("MAX_CONCURRENT_PROFILES", 20, minimum=1, maximum=64),
         max_profiles=_env_int("MAX_PROFILES", 150, minimum=1, maximum=10_000),
+        trash_retention_days=_env_int(
+            "MULTIPROFILE_TRASH_RETENTION_DAYS", 30, minimum=0, maximum=3650
+        ),
         allow_webstore_extensions=_env_bool("MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", False),
         force_no_sandbox=_env_bool("MULTIPROFILE_FORCE_NO_SANDBOX", False),
         prefer_sandbox=_env_bool("MULTIPROFILE_PREFER_SANDBOX", True),
@@ -159,3 +166,7 @@ def max_concurrent_profiles() -> int:
 
 def max_profiles() -> int:
     return get_settings().max_profiles
+
+
+def trash_retention_days() -> int:
+    return get_settings().trash_retention_days

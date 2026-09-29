@@ -44,7 +44,7 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
@@ -197,6 +197,27 @@ CREATE TABLE IF NOT EXISTS profiles (
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_client ON profiles(client_id);
 CREATE INDEX IF NOT EXISTS idx_profiles_name ON profiles(name);
+
+-- Trash. Deleting a profile used to be a DELETE plus an rmtree of its
+-- chrome-profiles/<id> directory, which is where the cookies, logins and
+-- warmed-up session state live -- in this product that directory *is* the
+-- asset, and a misclick destroyed it with no way back. A trashed profile
+-- keeps its whole document and its directory; only emptying the trash
+-- actually removes anything.
+--
+-- Same shape as `profiles` so a restore is a straight move, plus when it was
+-- trashed (for retention) and what it was called (so the trash list can be
+-- read without parsing every document).
+CREATE TABLE IF NOT EXISTS profiles_trash (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL DEFAULT '',
+    client_id  TEXT,
+    created_at TEXT,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    data_json  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trash_deleted ON profiles_trash(deleted_at);
 """
 
 
@@ -226,6 +247,9 @@ def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
     #     normalisation and secret-wrapping that live in storage/profiles.py,
     #     and a schema migration that imports application data would run
     #     before that module is ready. See profiles.import_legacy_json.
+    # v3: `profiles_trash`, also created by _SCHEMA_SQL. Nothing to backfill:
+    #     an existing database simply starts with an empty trash. Deletes made
+    #     before this version were permanent and cannot be recovered.
 
 
 def journal_mode() -> str:
@@ -746,6 +770,142 @@ class FleetFull(RuntimeError):
             f"fleet is full: {stored} of {capacity} stored, room for {self.free} "
             f"more, {requested} requested"
         )
+
+
+# ---------------------------------------------------------------------------
+# Trash
+# ---------------------------------------------------------------------------
+#
+# Every move between `profiles` and `profiles_trash` is a single transaction
+# containing both the insert and the delete. Doing it as two statements
+# outside a transaction is how a profile ends up in neither table, or in both.
+
+
+def trash_profile_row(profile_id: str) -> dict[str, Any] | None:
+    """Move one profile into the trash. Returns the profile, or None."""
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, name, client_id, created_at, updated_at, data_json"
+            " FROM profiles WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "INSERT INTO profiles_trash (id, name, client_id, created_at,"
+            " updated_at, deleted_at, data_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
+            " client_id=excluded.client_id, created_at=excluded.created_at,"
+            " updated_at=excluded.updated_at, deleted_at=excluded.deleted_at,"
+            " data_json=excluded.data_json",
+            (row["id"], row["name"], row["client_id"], row["created_at"],
+             row["updated_at"], _utcnow(), row["data_json"]),
+        )
+        conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        try:
+            return json.loads(row["data_json"])
+        except (ValueError, TypeError):
+            return {"id": profile_id, "name": row["name"]}
+
+
+def restore_profile_row(profile_id: str, *, capacity: int | None = None) -> dict[str, Any] | None:
+    """Move one profile back out of the trash.
+
+    ``capacity`` is checked in the same transaction, because restoring is a
+    create as far as the fleet is concerned: a fleet at its limit cannot take
+    another profile back, and finding that out *after* the row has moved would
+    leave the fleet over its own cap.
+    """
+    conn = _connect()
+    with _lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, name, client_id, created_at, updated_at, data_json"
+            " FROM profiles_trash WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if capacity is not None:
+            stored = int(conn.execute("SELECT COUNT(*) AS n FROM profiles").fetchone()["n"])
+            if stored + 1 > capacity:
+                raise FleetFull(stored=stored, requested=1, capacity=capacity)
+        conn.execute(
+            "INSERT INTO profiles (id, name, client_id, created_at, updated_at,"
+            " data_json) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
+            " client_id=excluded.client_id, created_at=excluded.created_at,"
+            " updated_at=excluded.updated_at, data_json=excluded.data_json",
+            (row["id"], row["name"], row["client_id"], row["created_at"],
+             _utcnow(), row["data_json"]),
+        )
+        conn.execute("DELETE FROM profiles_trash WHERE id = ?", (profile_id,))
+        try:
+            return json.loads(row["data_json"])
+        except (ValueError, TypeError):
+            return {"id": profile_id, "name": row["name"]}
+
+
+def list_trash_rows() -> list[dict[str, Any]]:
+    """Trashed profiles, most recently deleted first."""
+    conn = _connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT id, name, client_id, created_at, deleted_at, data_json"
+            " FROM profiles_trash ORDER BY deleted_at DESC, id"
+        ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            profile = json.loads(row["data_json"])
+        except (ValueError, TypeError):
+            profile = {"id": row["id"], "name": row["name"]}
+        profile["deletedAt"] = row["deleted_at"]
+        out.append(profile)
+    return out
+
+
+def get_trash_row(profile_id: str) -> dict[str, Any] | None:
+    conn = _connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT deleted_at, data_json FROM profiles_trash WHERE id = ?",
+            (profile_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        profile = json.loads(row["data_json"])
+    except (ValueError, TypeError):
+        return None
+    profile["deletedAt"] = row["deleted_at"]
+    return profile
+
+
+def purge_trash_row(profile_id: str) -> bool:
+    """Remove one row from the trash. Does not touch files on disk."""
+    conn = _connect()
+    with _lock, conn:
+        cur = conn.execute("DELETE FROM profiles_trash WHERE id = ?", (profile_id,))
+        return cur.rowcount > 0
+
+
+def trash_ids_older_than(cutoff_iso: str) -> list[str]:
+    conn = _connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT id FROM profiles_trash WHERE deleted_at < ?", (cutoff_iso,)
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def count_trash() -> int:
+    conn = _connect()
+    with _lock:
+        return int(conn.execute("SELECT COUNT(*) AS n FROM profiles_trash").fetchone()["n"])
 
 
 def insert_profiles(profiles: list[dict[str, Any]], *, capacity: int | None = None) -> int:

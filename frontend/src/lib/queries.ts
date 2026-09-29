@@ -8,15 +8,17 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { get } from "./api";
-import { auditKeys, devicesKeys, jobsKeys, profilesKeys, systemKeys } from "./query-keys";
+import { auditKeys, devicesKeys, jobsKeys, profilesKeys, systemKeys, trashKeys } from "./query-keys";
 import type {
   AuditPage,
   DeviceSummary,
   HealthResponse,
   JobsPage,
+  FleetCapacity,
   MetricsSummary,
   Profile,
   ProfilesPage,
+  TrashPage,
 } from "./types";
 
 export function useSystemHealth() {
@@ -88,6 +90,30 @@ export function useRecentAudit(limit = 8) {
   return useQuery({
     queryKey: auditKeys.list({ limit }),
     queryFn: () => get<AuditPage>("/api/audit", { limit }),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** Deleted profiles, still recoverable. Also drives the sidebar badge. */
+export function useTrash() {
+  return useQuery({
+    queryKey: trashKeys.list(),
+    queryFn: () => get<TrashPage>("/api/trash"),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/**
+ * How full the fleet is. Shown before a bulk create so the operator learns
+ * there is room for twelve more while choosing a number, not after
+ * submitting one.
+ */
+export function useFleetCapacity() {
+  return useQuery({
+    queryKey: profilesKeys.capacity(),
+    queryFn: () => get<{ fleet: FleetCapacity }>("/api/profiles/capacity"),
     staleTime: 15_000,
     retry: 1,
   });

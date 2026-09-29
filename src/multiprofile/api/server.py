@@ -68,11 +68,17 @@ from ..storage.profiles import (
     create_profiles,
     delete_profile,
     duplicate_profile,
+    empty_trash,
     fleet_capacity,
     get_profile,
+    list_trash,
     load_profiles,
+    purge_expired_trash,
+    purge_profile,
     query_page,
     reap_orphans,
+    restore_profile,
+    trash_profile,
     update_profile,
 )
 from ..storage.templates import (
@@ -580,13 +586,81 @@ def create_app() -> Flask:
 
     @app.delete("/api/profiles/<profile_id>")
     def profiles_delete(profile_id: str):
-        purge = request.args.get("purgeStorage", "1")
-        purge_storage = str(purge).lower() not in ("0", "false", "no")
-        ok = delete_profile(profile_id, purge_storage=purge_storage)
-        if not ok:
+        """Move a profile to the trash.
+
+        This used to remove the row and rmtree ``chrome-profiles/<id>`` in one
+        step, with a confirmation dialog as the only thing between a misclick
+        and the permanent loss of every logged-in session the profile held.
+        Deleting is reversible now; ``?permanent=1`` is the way to ask for the
+        old behaviour, and emptying the trash is the other.
+        """
+        permanent = str(request.args.get("permanent", "0")).lower() in ("1", "true", "yes")
+        if permanent:
+            purge = request.args.get("purgeStorage", "1")
+            purge_storage = str(purge).lower() not in ("0", "false", "no")
+            if not delete_profile(profile_id, purge_storage=purge_storage):
+                return jsonify({"error": "not found"}), 404
+            audit_log("delete", profile_id=profile_id, ok=True,
+                      detail={"permanent": True, "purgeStorage": purge_storage})
+            return jsonify({"ok": True, "permanent": True, "purgeStorage": purge_storage})
+
+        # A running profile has Chrome writing into the directory the trash is
+        # supposed to preserve, so trashing it would capture a torn copy.
+        running = get_profile(profile_id)
+        if running and running.get("isRunning"):
+            return jsonify({
+                "error": {
+                    "code": "profile_running",
+                    "message": "stop the profile before deleting it",
+                }
+            }), 409
+
+        trashed = trash_profile(profile_id)
+        if not trashed:
             return jsonify({"error": "not found"}), 404
-        audit_log("delete", profile_id=profile_id, ok=True, detail={"purgeStorage": purge_storage})
-        return jsonify({"ok": True, "purgeStorage": purge_storage})
+        audit_log("delete", profile_id=profile_id, ok=True, detail={"permanent": False})
+        return jsonify({"ok": True, "permanent": False, "trashed": True,
+                        "profile": {"id": trashed.get("id"), "name": trashed.get("name")}})
+
+    @app.get("/api/trash")
+    def trash_list():
+        purge_expired_trash()
+        items = list_trash()
+        return jsonify({
+            "ok": True,
+            "items": items,
+            "count": len(items),
+            "diskBytes": sum(int(p.get("diskBytes") or 0) for p in items),
+            "retentionDays": get_settings().trash_retention_days,
+        })
+
+    @app.post("/api/profiles/<profile_id>/restore")
+    def profiles_restore(profile_id: str):
+        """Take a profile back out of the trash.
+
+        May answer 409 if the fleet is full: a restore is a create as far as
+        capacity is concerned, and silently exceeding the cap to honour one
+        would make the cap meaningless.
+        """
+        restored = restore_profile(profile_id)
+        if not restored:
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_restore", profile_id=profile_id, ok=True)
+        return jsonify({"ok": True, "profile": restored, "fleet": fleet_capacity()})
+
+    @app.delete("/api/trash/<profile_id>")
+    def trash_purge(profile_id: str):
+        """Delete one trashed profile for good, files included."""
+        if not purge_profile(profile_id):
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_purge", profile_id=profile_id, ok=True)
+        return jsonify({"ok": True, "purged": profile_id})
+
+    @app.post("/api/trash/empty")
+    def trash_empty():
+        removed = empty_trash()
+        audit_log("trash_empty", ok=True, detail={"purged": removed})
+        return jsonify({"ok": True, "purged": removed})
 
     @app.post("/api/profiles/import")
     def profiles_import():

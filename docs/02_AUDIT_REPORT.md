@@ -951,6 +951,80 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F36 — ✅ HIGH: deleting a profile destroyed the asset, irreversibly — **FIXED**
+
+**Files:** [`storage/db.py`](../src/multiprofile/storage/db.py),
+[`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
+[`api/server.py`](../src/multiprofile/api/server.py),
+[`config.py`](../src/multiprofile/config.py),
+[`frontend/src/components/trash/trash-page.tsx`](../frontend/src/components/trash/trash-page.tsx) (new)
+
+`DELETE /api/profiles/<id>` removed the row and then `rmtree`'d
+`chrome-profiles/<id>`. That directory holds the cookies, the logins and
+whatever warmed-up session state the profile had accumulated. In an
+anti-detect browser it **is** the asset: it cannot be recreated by making a new
+profile with the same settings, because the value of the old one was that some
+site had come to trust it. A confirmation dialog was the only thing between a
+misclick and losing it — and the console offers the same button for a
+multi-select, so one misclick could take a fleet.
+
+Every comparable product (AdsPower, GoLogin, Multilogin) has a trash with
+restore. The audit brief asks for one under "Trash with restore".
+
+**What was built.** A `profiles_trash` table (schema v3) with the same shape as
+`profiles` plus `deleted_at`. Deleting moves the row between the two tables in
+a single transaction — as two statements outside one, a profile ends up in
+neither table or in both. The profile's directory and cookie jar are left
+exactly where they are, so a restore is a move of one row rather than a
+recovery.
+
+| Route | Does |
+|---|---|
+| `DELETE /api/profiles/<id>` | Moves to the trash. Keeps every file. |
+| `DELETE /api/profiles/<id>?permanent=1` | The old behaviour, when asked for by name. |
+| `GET /api/trash` | Trashed profiles, newest first, with retained bytes. |
+| `POST /api/profiles/<id>/restore` | Back into the fleet. |
+| `DELETE /api/trash/<id>` | Permanent, files included. |
+| `POST /api/trash/empty` | The same, for all of them. |
+
+**Four decisions worth stating.**
+
+*A restore is a create.* It is checked against the fleet capacity from F35 in
+the same transaction, and answers 409 if there is no room — silently exceeding
+the cap to honour a restore would make the cap meaningless.
+
+*Trashed profiles do not count against the cap.* If they did, a full fleet
+could never be trimmed: deleting would not free a slot and creating would stay
+refused for ever.
+
+*A running profile cannot be trashed* (409, "stop the profile before deleting
+it"): Chrome is writing into the directory the trash is supposed to preserve,
+so trashing it would capture a torn copy.
+
+*Retention is reconciled on access, not on a timer.* Trashed profiles are
+purged after `MULTIPROFILE_TRASH_RETENTION_DAYS` (default 30, `0` disables it),
+checked when the trash is read. A background thread performing irreversible
+deletions is a worse thing to own than a slightly late purge.
+
+**Console.** A Trash page under System: retained disk per row and in total,
+because the trash deliberately does *not* free space and an operator deciding
+whether to empty it should be told what they get back. Restore asks for
+nothing — it is reversible; the two permanent actions are the only ones styled
+destructive and both confirm with a modal naming the count and the bytes. The
+delete dialogs on the Profiles page said "Browser storage will be purged. This
+cannot be undone", which is no longer true, and now say where the profile is
+going; the toast carries an *Open trash* action.
+
+Verified against a running console with four trashed profiles (841 MB): restore
+returned one to the fleet with its directory intact, a permanent delete removed
+610 MB from disk, and the profile came back with its `seed` and `fingerprint`
+unchanged — a restored profile that gets a new identity is just a fresh create
+wearing the old name.
+
+18 tests added.
+
+---
+
 ### F35 — ✅ HIGH: bulk create silently did a third of what was asked — **FIXED**
 
 **Files:** [`api/server.py`](../src/multiprofile/api/server.py),

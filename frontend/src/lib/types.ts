@@ -199,6 +199,28 @@ export interface AuditItem {
   [key: string]: unknown;
 }
 
+/** A profile in the trash: the whole profile, plus what it is still holding. */
+export interface TrashItem extends Profile {
+  deletedAt: string;
+  /** Size of the retained chrome-profiles/<id> directory. */
+  diskBytes: number;
+}
+
+export interface TrashPage {
+  ok: boolean;
+  items: TrashItem[];
+  count: number;
+  diskBytes: number;
+  /** Days before a trashed profile is purged automatically; 0 = never. */
+  retentionDays: number;
+}
+
+export interface FleetCapacity {
+  stored: number;
+  capacity: number;
+  free: number;
+}
+
 export interface AuditPage {
   items: AuditItem[];
   next_cursor: string | null;

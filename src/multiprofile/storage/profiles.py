@@ -6,11 +6,11 @@ import random
 import shutil
 import threading
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from ..config import max_profiles
+from ..config import max_profiles, trash_retention_days
 from . import db
 from .xdg import profiles_path, runtime_state_path, secure_write_json
 
@@ -414,7 +414,12 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
 
 
 def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
-    """Remove profile metadata; optionally purge chrome-profiles/<id> and cookies."""
+    """Remove a profile permanently.
+
+    This is the irreversible one, and it is no longer what a delete from the
+    console reaches: that goes to :func:`trash_profile`. Permanent deletion is
+    what emptying the trash does, and what a caller asks for explicitly.
+    """
     _ensure_ready()
     if not db.delete_profile_row(profile_id):
         return False
@@ -439,6 +444,133 @@ def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
         except Exception:
             pass
     return True
+
+
+def _profile_files(profile_id: str) -> tuple[Path, Path | None]:
+    from ..cookies_store import cookies_path
+    from .xdg import data_dir
+
+    chrome_root = data_dir() / "chrome-profiles" / profile_id
+    try:
+        cookies = cookies_path(profile_id)
+    except Exception:  # noqa: BLE001 - a missing cookie jar is not a failure
+        cookies = None
+    return chrome_root, cookies
+
+
+def _dir_bytes(path: Path) -> int:
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            try:
+                if entry.is_file() and not entry.is_symlink():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return total
+    return total
+
+
+def trash_profile(profile_id: str) -> dict[str, Any] | None:
+    """Move a profile to the trash, keeping everything it owns.
+
+    The distinction that matters is on disk. A permanent delete removes
+    ``chrome-profiles/<id>``, which holds the cookies, logins and warmed-up
+    session state -- in an anti-detect browser that directory *is* the asset,
+    and it cannot be recreated by making a new profile with the same settings.
+    Trashing leaves it exactly where it is, so a restore is a move of one row
+    rather than a recovery.
+    """
+    _ensure_ready()
+    profile = db.trash_profile_row(profile_id)
+    if profile is None:
+        return None
+    with _lock:
+        runtime = _read_json(runtime_state_path(), {})
+        if profile_id in runtime:
+            runtime.pop(profile_id, None)
+            _write_json(runtime_state_path(), runtime)
+    return profile
+
+
+def restore_profile(profile_id: str) -> dict[str, Any] | None:
+    """Move a profile back out of the trash.
+
+    Raises :class:`~multiprofile.storage.db.FleetFull` if the fleet has no
+    room: restoring is a create as far as capacity is concerned.
+    """
+    _ensure_ready()
+    profile = db.restore_profile_row(profile_id, capacity=max_profiles())
+    if profile is None:
+        return None
+    return _decorate([dict(profile)])[0]
+
+
+def list_trash() -> list[dict[str, Any]]:
+    """Trashed profiles, newest first, each with what it is still holding.
+
+    ``diskBytes`` is reported because the trash's whole purpose is that it
+    does not free the disk. An operator deciding whether to empty it needs to
+    know what they would get back.
+    """
+    _ensure_ready()
+    out = []
+    for profile in db.list_trash_rows():
+        chrome_root, _ = _profile_files(str(profile.get("id") or ""))
+        profile["diskBytes"] = _dir_bytes(chrome_root) if chrome_root.exists() else 0
+        profile.pop("pid", None)
+        profile["status"] = "trashed"
+        out.append(profile)
+    return out
+
+
+def purge_profile(profile_id: str) -> bool:
+    """Delete a trashed profile for good, including its files."""
+    _ensure_ready()
+    if not db.purge_trash_row(profile_id):
+        return False
+    chrome_root, cookies = _profile_files(profile_id)
+    if chrome_root.exists():
+        try:
+            shutil.rmtree(chrome_root)
+        except OSError as e:
+            log.warning("could not remove %s: %s", chrome_root, e)
+    if cookies is not None and cookies.exists():
+        try:
+            cookies.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("could not remove %s: %s", cookies, e)
+    return True
+
+
+def empty_trash() -> int:
+    """Purge everything in the trash. Returns how many were removed."""
+    _ensure_ready()
+    ids = [str(p.get("id") or "") for p in db.list_trash_rows()]
+    return sum(1 for pid in ids if pid and purge_profile(pid))
+
+
+def purge_expired_trash(retention_days: int | None = None) -> int:
+    """Purge trashed profiles older than the retention window.
+
+    Called from the trash endpoints rather than from a timer: the trash is
+    only observable when someone looks at it, so that is when it is worth
+    reconciling, and a background thread doing irreversible deletions is a
+    worse thing to own than a slightly late purge.
+    """
+    _ensure_ready()
+    days = trash_retention_days() if retention_days is None else int(retention_days)
+    if days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    removed = 0
+    for pid in db.trash_ids_older_than(cutoff):
+        if purge_profile(pid):
+            removed += 1
+    if removed:
+        log.info("purged %d profile(s) from the trash after %d days", removed, days)
+    return removed
 
 
 def clone_profile(
