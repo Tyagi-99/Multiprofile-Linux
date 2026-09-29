@@ -1118,6 +1118,14 @@ has been submitted. Import (F34) shares the ceiling: rows beyond the free space
 are reported by line as `fleet_full` instead of each one costing its own
 rejected transaction.
 
+**What the cap deliberately does not block.** A restore from backup writes
+"the set is now this" and is *not* checked against the capacity. Refusing to
+restore someone's own backup because of a soft product limit would be the worse
+failure, so a restore of 200 profiles into a cap of 150 succeeds; the fleet is
+then over its limit and *creating* is refused until it is trimmed. Verified:
+`free` clamps at 0 rather than going negative, and the refusal names the real
+numbers ("20 of 5 stored").
+
 **Scope note.** 150 is this product's measured operating size, not the brief's
 10,000 — see the design target recorded with F33. It is one environment
 variable, and the paging, the SQL predicates and the id-resolution endpoint
