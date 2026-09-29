@@ -157,8 +157,11 @@ python3 -m multiprofile
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MAX_CONCURRENT_PROFILES` | `20` | Maximum simultaneous Chromium processes |
-| `MULTIPROFILE_API_TOKEN` | unset | If set, mandates `Authorization: Bearer <token>` on API endpoints |
+| `MULTIPROFILE_PLAN` | `self-hosted` | Named set of limits (`self-hosted`, `solo`, `team`). Sets the defaults for the two below. |
+| `MAX_PROFILES` | `150` | Maximum profiles **stored**. Creating past it answers `409 fleet_full`. Trashed profiles do not count. |
+| `MAX_CONCURRENT_PROFILES` | `20` | Maximum profiles **running** at once |
+| `MULTIPROFILE_TRASH_RETENTION_DAYS` | `30` | Days a deleted profile stays recoverable. `0` never purges automatically. |
+| `MULTIPROFILE_API_TOKEN` | unset | Legacy single bearer token for **non-loopback** callers; carries every scope. Loopback never needs a token. Prefer scoped tokens from `POST /api/tokens`. |
 | `MULTIPROFILE_PROXY_CHECK_TIMEOUT` | `8` | Timeout in seconds for pre-launch proxy reachability probes |
 | `MULTIPROFILE_PROXY_CHECK_ENABLED` | `true` | Set to `false` to disable pre-launch health gates |
 | `MULTIPROFILE_GPU_MODE` | `auto` | GPU mode: `auto` (probe `/dev/dri`), `angle` (force HW), or `software` (SwiftShader) |
