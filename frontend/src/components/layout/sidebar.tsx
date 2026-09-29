@@ -5,6 +5,7 @@ import {
   Globe,
   LayoutDashboard,
   Puzzle,
+  Gauge,
   ScrollText,
   Trash2,
   Server,
@@ -50,6 +51,7 @@ const GROUPS: Array<{ title: string; items: NavItem[] }> = [
     items: [
       { name: "gateways", label: "Gateways", icon: Server },
       { name: "extensions", label: "Extensions", icon: Puzzle },
+      { name: "usage", label: "Usage", icon: Gauge },
       { name: "trash", label: "Trash", icon: Trash2 },
       { name: "audit", label: "Audit", icon: ScrollText },
       { name: "settings", label: "Settings", icon: Settings },

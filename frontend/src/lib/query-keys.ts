@@ -47,6 +47,13 @@ export const trashKeys = {
   list: () => [...trashKeys.all, "list"] as const,
 };
 
+export const usageKeys = {
+  all: ["usage"] as const,
+  summary: (period: string) => [...usageKeys.all, "summary", period] as const,
+  sessions: (period: string) => [...usageKeys.all, "sessions", period] as const,
+  plan: ["plan"] as const,
+};
+
 export const systemKeys = {
   health: ["system", "health"] as const,
   settings: ["system", "settings"] as const,

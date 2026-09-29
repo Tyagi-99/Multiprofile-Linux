@@ -221,6 +221,59 @@ export interface FleetCapacity {
   free: number;
 }
 
+export interface UsageBucket {
+  sessions: number;
+  seconds: number;
+  open: number;
+  name?: string | null;
+  profileId?: string;
+  clientId?: string | null;
+}
+
+export interface UsageSummary {
+  ok: boolean;
+  period: string;
+  since: string | null;
+  total: { sessions: number; seconds: number; open: number };
+  byProfile: UsageBucket[];
+  byClient: UsageBucket[];
+}
+
+export interface UsageSession {
+  id: number;
+  profile_id: string;
+  profileName?: string | null;
+  client_id?: string | null;
+  started_at: string;
+  ended_at: string | null;
+  seconds: number;
+  end_reason: string | null;
+  open: boolean;
+}
+
+/** One limit, and whether anything actually enforces it. */
+export interface PlanLimit {
+  value: number | null;
+  planValue: number | null;
+  source: "plan" | "env";
+  enforced: boolean;
+}
+
+export interface PlanInfo {
+  ok: boolean;
+  plan: { id: string; name: string; [key: string]: unknown };
+  limits: Record<string, PlanLimit>;
+  recognised: boolean;
+  warning?: string;
+  usage: {
+    profiles: number | null;
+    profilesFree?: number | null;
+    running: number | null;
+    runtimeHoursThisMonth: number | null;
+    sessionsThisMonth?: number | null;
+  };
+}
+
 export interface AuditPage {
   items: AuditItem[];
   next_cursor: string | null;

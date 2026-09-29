@@ -5,6 +5,7 @@ import { useHashRoute, type Route } from "../../lib/router";
 import { DevicesPage } from "../devices/devices-page";
 import { AuditPageView } from "../audit/audit-page";
 import { TrashPageView } from "../trash/trash-page";
+import { UsagePageView } from "../usage/usage-page";
 import { FingerprintsPage } from "../fingerprint/fingerprints-page";
 import { JobsPage } from "../jobs/jobs-page";
 import { SettingsPage } from "../settings/settings-page";
@@ -69,6 +70,7 @@ const SECTION_PHASE: Record<Route["name"], { title: string; phase: string }> = {
   jobs: { title: "Jobs", phase: "Phase 10" },
   gateways: { title: "Gateways", phase: "Phase 9" },
   trash: { title: "Trash", phase: "Phase 11" },
+  usage: { title: "Usage", phase: "Phase 11" },
   extensions: { title: "Extensions", phase: "a later phase" },
   audit: { title: "Audit Log", phase: "Phase 11" },
   settings: { title: "Settings", phase: "Phase 12" },
@@ -84,6 +86,7 @@ function RoutedView({ route }: { route: Route }) {
   if (route.name === "network") return <NetworkPage />;
   if (route.name === "gateways") return <NetworkPage initialTab="gateways" />;
   if (route.name === "jobs") return <JobsPage />;
+  if (route.name === "usage") return <UsagePageView />;
   if (route.name === "trash") return <TrashPageView />;
   if (route.name === "audit") return <AuditPageView />;
   if (route.name === "settings") return <SettingsPage />;

@@ -8,7 +8,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { get } from "./api";
-import { auditKeys, devicesKeys, jobsKeys, profilesKeys, systemKeys, trashKeys } from "./query-keys";
+import { auditKeys, devicesKeys, jobsKeys, profilesKeys, systemKeys, trashKeys, usageKeys } from "./query-keys";
 import type {
   AuditPage,
   DeviceSummary,
@@ -18,7 +18,10 @@ import type {
   MetricsSummary,
   Profile,
   ProfilesPage,
+  PlanInfo,
   TrashPage,
+  UsageSession,
+  UsageSummary,
 } from "./types";
 
 export function useSystemHealth() {
@@ -115,6 +118,37 @@ export function useFleetCapacity() {
     queryKey: profilesKeys.capacity(),
     queryFn: () => get<{ fleet: FleetCapacity }>("/api/profiles/capacity"),
     staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** What the fleet actually ran. Measured, never estimated. */
+export function useUsage(period: string) {
+  return useQuery({
+    queryKey: usageKeys.summary(period),
+    queryFn: () => get<UsageSummary>("/api/usage", { period }),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** The sessions behind the totals: a number nobody can drill into is one
+ * that has to be taken on trust. */
+export function useUsageSessions(period: string) {
+  return useQuery({
+    queryKey: usageKeys.sessions(period),
+    queryFn: () => get<{ items: UsageSession[] }>("/api/usage/sessions", { period, limit: 500 }),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** The limits this installation runs under, and usage against them. */
+export function usePlan() {
+  return useQuery({
+    queryKey: usageKeys.plan,
+    queryFn: () => get<PlanInfo>("/api/plan"),
+    staleTime: 30_000,
     retry: 1,
   });
 }
