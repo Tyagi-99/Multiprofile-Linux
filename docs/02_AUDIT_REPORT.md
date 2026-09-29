@@ -103,6 +103,7 @@ honest-reporting defects rather than deferring them.
 | **F39** | ✅ **High** | Security | **One API token**: unscoped, unrevocable, cleartext — a cron job held the credential that deletes the fleet | done |
 | **F40** | ✅ Medium | Compliance | **No way to export or destroy your data** — GDPR/DPDP readiness had nothing behind it | done |
 | **F41** | ✅ **Critical** | Fingerprint | **`window.__MP_PROFILE__` handed every page the whole spoofing config, seed included** — found by measuring for `docs/04` | done |
+| **F42** | ✅ **High** | Fingerprint | **Every profile claimed Windows whatever you picked** — `userAgentId` reached nothing | done |
 
 ---
 
@@ -965,6 +966,66 @@ asserts the count, which is the assertion that would have failed.
 
 23 tests added, plus 10 retargeted from the file to the database: permissions,
 secrets-at-rest and the resilience properties all still hold, of the new store.
+
+---
+
+### F42 — ✅ HIGH: picking an identity did nothing; every profile claimed Windows — **FIXED**
+
+**Files:** [`storage/profiles.py`](../src/multiprofile/storage/profiles.py),
+[`api/user_agents.py`](../src/multiprofile/api/user_agents.py),
+[`api/validation.py`](../src/multiprofile/api/validation.py),
+[`api/server.py`](../src/multiprofile/api/server.py)
+
+Also found while measuring for `docs/04`: a macOS profile came back claiming
+Windows. Creating one profile per catalogue id:
+
+```
+win_chrome     -> fp.platform='Win32'   ch_platform='Windows'
+mac_chrome     -> fp.platform='Win32'   ch_platform='Windows'
+linux_chrome   -> fp.platform='Win32'   ch_platform='Windows'
+pixel_9        -> fp.platform='Win32'   ch_platform='Windows'
+iphone_15      -> fp.platform='Win32'   ch_platform='Windows'
+```
+
+`GET /api/user-agents` offers ten identities across Windows, macOS, Linux,
+Android, iOS and iPadOS. `userAgentId` was accepted by the API, validated,
+aliased from `uaId`, stored on the profile and carried by templates — and read
+by nothing that builds a fingerprint, which derives everything from
+`userAgent` and `isMobile`. **F16** and **F19** again: a control present in the
+vocabulary and absent from the path.
+
+**The fleet-level cost is worse than the per-profile one.** An operator who
+cannot make a macOS profile notices eventually. A fleet where *every* profile
+claims Windows regardless of selection shares a value across all of them,
+which is a linkage signal in its own right — the same failure as **F31**,
+where every profile announced New York from every exit.
+
+**Three fixes.**
+
+*The id resolves.* `_resolve_user_agent_id` turns a catalogue id into its
+engine-aligned UA and `isMobile`, which is all the fingerprint pools need.
+Measured after, a `mac_chrome` profile reports `MacIntel`, `macOS`,
+`ANGLE (Apple, Apple M3, OpenGL ES 3.0)` and macOS speech voices (Alex,
+Samantha, Daniel, Fred) — the per-OS machinery worked all along and was never
+told which OS to use.
+
+*An unknown id is refused.* It used to be stored and ignored, so a typo
+produced a profile claiming something nobody picked. Now a 400 naming the
+valid ids.
+
+*The alias is applied before validation, and on both paths.* `uaId` was copied
+into `userAgentId` **after** `validate_profile_payload` had run, so the alias
+was a way around every check the real field had; and it ran only on create, so
+`uaId` on an update was accepted and silently dropped — **F8** and **F21**'s
+shape. One `_apply_aliases` helper now runs first on create and update.
+
+**A rule the tests pin down.** A UA the operator *typed* wins over the picker:
+they may be matching a fingerprint bought elsewhere. A UA the *catalogue*
+produced does not, because otherwise the picker works exactly once per profile
+and then jams on its own previous answer — which is what the first version of
+this fix did, caught by the update-path test before it was committed.
+
+36 tests added.
 
 ---
 

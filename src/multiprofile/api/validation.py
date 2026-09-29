@@ -361,8 +361,18 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
         v_str(payload["name"], "name", min_len=1, max_len=120)
     if "userAgent" in payload:
         v_str(payload["userAgent"], "userAgent", min_len=1, max_len=4096)
-    if "userAgentId" in payload:
+    if "userAgentId" in payload and payload["userAgentId"] is not None:
         v_str(payload["userAgentId"], "userAgentId", min_len=1, max_len=128)
+        # Rejected rather than ignored. An unrecognised id used to be stored
+        # and silently do nothing, so a typo produced a profile claiming
+        # something the operator never picked.
+        from .user_agents import known_user_agent_ids, resolve_user_agent_id
+
+        if resolve_user_agent_id(payload["userAgentId"]) is None:
+            raise ValidationError(
+                "userAgentId",
+                f"unknown id; expected one of {', '.join(known_user_agent_ids())}",
+            )
     # null means "clear this", which is what the profile edit dialog sends for
     # an emptied field. Rejecting it made clearing a start URL or a note a hard
     # 400 ("must be a string") with no way to do it from the console at all

@@ -70,7 +70,53 @@ def _attach_fingerprint(profile: dict[str, Any]) -> None:
         pass
 
 
+def _resolve_user_agent_id(profile: dict[str, Any]) -> None:
+    """Turn a picked catalogue id into the identity it names.
+
+    ``userAgentId`` was accepted by the API, validated, aliased from ``uaId``,
+    stored on the profile and carried by templates -- and read by nothing that
+    builds a fingerprint, which derives everything from ``userAgent`` and
+    ``isMobile``. Picking "macOS Sonoma - Chrome 131" therefore produced a
+    profile claiming Windows, silently. That is F16 and F19's shape again: a
+    control present in the vocabulary and absent from the path.
+
+    A UA the operator typed still wins: they are matching a fingerprint they
+    got elsewhere, and overwriting it from a leftover id would break the
+    pairing they came for.
+
+    A UA this catalogue produced does *not* win, and the distinction matters
+    on update. Changing the picker from Windows to macOS leaves the previous
+    resolution sitting in ``userAgent``; treating that as "the operator chose
+    this" would make the picker work exactly once per profile and then jam.
+    A UA that matches a catalogue entry was derived, so a newer id replaces
+    it.
+    """
+    uaid = (profile.get("userAgentId") or "").strip()
+    if not uaid:
+        return
+    existing = (profile.get("userAgent") or "").strip()
+    try:
+        from ..api.user_agents import is_catalogue_user_agent, resolve_user_agent_id
+
+        if existing and not is_catalogue_user_agent(existing):
+            return
+        entry = resolve_user_agent_id(uaid)
+    except Exception as e:  # noqa: BLE001 - a catalogue failure must not block a create
+        log.warning("could not resolve userAgentId %r: %s", uaid, e)
+        return
+    if not entry:
+        # Unknown ids are refused at the API boundary; reaching here means a
+        # stored profile predates the catalogue entry it names. Leaving the UA
+        # empty lets the fingerprint pool default apply, which is the old
+        # behaviour -- wrong to invent an identity from a name we do not know.
+        log.warning("profile names an unknown userAgentId %r; leaving the UA unset", uaid)
+        return
+    profile["userAgent"] = entry.get("ua") or ""
+    profile["isMobile"] = bool(entry.get("isMobile"))
+
+
 def _normalize_fields(profile: dict[str, Any]) -> dict[str, Any]:
+    _resolve_user_agent_id(profile)
     profile.setdefault("language", "en-US")
     profile.setdefault("webrtcMode", "default")
     # Assigned, not setdefault: an explicit null from a cleared field is

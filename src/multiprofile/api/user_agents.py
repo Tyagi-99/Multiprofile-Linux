@@ -66,3 +66,38 @@ def user_agent_catalog() -> list[dict[str, Any]]:
             item["name"] = _CHROMIUM_NAME_RE.sub(rf"\1 {major}", str(item.get("name", "")))
         out.append(item)
     return out
+
+
+def resolve_user_agent_id(user_agent_id: str) -> dict[str, Any] | None:
+    """The catalogue entry for an id, realigned to the installed engine.
+
+    Returns ``None`` for an unknown id so the caller can decide: the API
+    rejects it, because silently ignoring a selection is how a profile ends up
+    claiming something the operator never chose.
+    """
+    if not user_agent_id:
+        return None
+    wanted = str(user_agent_id).strip().lower()
+    for entry in user_agent_catalog():
+        if str(entry.get("id", "")).lower() == wanted:
+            return entry
+    return None
+
+
+def known_user_agent_ids() -> list[str]:
+    return [str(e["id"]) for e in USER_AGENTS]
+
+
+def is_catalogue_user_agent(user_agent: str) -> bool:
+    """Whether this UA string is one this catalogue produced.
+
+    Lets a caller tell a UA it derived from a picked id apart from one the
+    operator pasted, which is the difference between "changing the picker may
+    replace this" and "leave it alone".
+    """
+    if not user_agent:
+        return False
+    wanted = str(user_agent).strip()
+    return any(str(e.get("ua", "")).strip() == wanted for e in user_agent_catalog()) or any(
+        str(e.get("ua", "")).strip() == wanted for e in USER_AGENTS
+    )

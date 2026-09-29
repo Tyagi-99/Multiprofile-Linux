@@ -541,12 +541,23 @@ def create_app() -> Flask:
             return jsonify({"error": "not_found", "id": profile_id}), 404
         return jsonify(_with_launch_state([profile])[0])
 
+    def _apply_aliases(payload: dict) -> dict:
+        """Fold legacy field names into their current ones, before validation.
+
+        Order matters and used to be wrong: `uaId` was copied into
+        `userAgentId` *after* `validate_profile_payload` had already run, so
+        the alias was a way around every check the real field had. It also ran
+        only on create, so `uaId` on an update was accepted and silently
+        dropped -- the same class of bug as F8 and F21.
+        """
+        if "userAgentId" not in payload and "uaId" in payload:
+            payload["userAgentId"] = payload.pop("uaId")
+        return payload
+
     @app.post("/api/profiles")
     def profiles_create():
-        payload = require_json()
+        payload = _apply_aliases(require_json())
         field_warnings = validate_profile_payload(payload, partial=False)
-        if "userAgentId" not in payload and "uaId" in payload:
-            payload["userAgentId"] = payload["uaId"]
         # A profile created in a workspace joins that workspace's proxy pool
         # unless it names one itself. This is the point of a workspace: the
         # operator sets the route once, not once per profile.
@@ -696,7 +707,7 @@ def create_app() -> Flask:
 
     @app.put("/api/profiles/<profile_id>")
     def profiles_update(profile_id: str):
-        payload = require_json()
+        payload = _apply_aliases(require_json())
         field_warnings = validate_profile_payload(payload, partial=True)
         updated = update_profile(profile_id, payload)
         if not updated:
