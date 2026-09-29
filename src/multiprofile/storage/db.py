@@ -44,7 +44,7 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
@@ -215,6 +215,7 @@ CREATE TABLE IF NOT EXISTS profiles_trash (
     created_at TEXT,
     updated_at TEXT NOT NULL,
     deleted_at TEXT NOT NULL,
+    disk_bytes INTEGER NOT NULL DEFAULT 0,
     data_json  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trash_deleted ON profiles_trash(deleted_at);
@@ -250,6 +251,19 @@ def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
     # v3: `profiles_trash`, also created by _SCHEMA_SQL. Nothing to backfill:
     #     an existing database simply starts with an empty trash. Deletes made
     #     before this version were permanent and cannot be recovered.
+    # v4: `profiles_trash.disk_bytes`. The first version measured the retained
+    #     directory while rendering the trash, which is a full tree walk per
+    #     row on every page load -- this host's own Chromium profile holds
+    #     3239 files, so 150 trashed profiles cost ~2 s of stat() to display a
+    #     number. Nothing writes to a trashed profile, so the size is measured
+    #     once, when it is trashed. CREATE TABLE above covers a new database;
+    #     this adds the column to one that already has the table.
+    if from_v == 3:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles_trash)")}
+        if "disk_bytes" not in cols:
+            conn.execute(
+                "ALTER TABLE profiles_trash ADD COLUMN disk_bytes INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def journal_mode() -> str:
@@ -781,8 +795,13 @@ class FleetFull(RuntimeError):
 # outside a transaction is how a profile ends up in neither table, or in both.
 
 
-def trash_profile_row(profile_id: str) -> dict[str, Any] | None:
-    """Move one profile into the trash. Returns the profile, or None."""
+def trash_profile_row(profile_id: str, *, disk_bytes: int = 0) -> dict[str, Any] | None:
+    """Move one profile into the trash. Returns the profile, or None.
+
+    ``disk_bytes`` is the size of the retained directory, measured by the
+    caller once and stored, rather than re-walked every time the trash is
+    listed.
+    """
     conn = _connect()
     with _lock, conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -795,14 +814,14 @@ def trash_profile_row(profile_id: str) -> dict[str, Any] | None:
             return None
         conn.execute(
             "INSERT INTO profiles_trash (id, name, client_id, created_at,"
-            " updated_at, deleted_at, data_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " updated_at, deleted_at, disk_bytes, data_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET name=excluded.name,"
             " client_id=excluded.client_id, created_at=excluded.created_at,"
             " updated_at=excluded.updated_at, deleted_at=excluded.deleted_at,"
-            " data_json=excluded.data_json",
+            " disk_bytes=excluded.disk_bytes, data_json=excluded.data_json",
             (row["id"], row["name"], row["client_id"], row["created_at"],
-             row["updated_at"], _utcnow(), row["data_json"]),
+             row["updated_at"], _utcnow(), int(disk_bytes), row["data_json"]),
         )
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         try:
@@ -854,8 +873,8 @@ def list_trash_rows() -> list[dict[str, Any]]:
     conn = _connect()
     with _lock:
         rows = conn.execute(
-            "SELECT id, name, client_id, created_at, deleted_at, data_json"
-            " FROM profiles_trash ORDER BY deleted_at DESC, id"
+            "SELECT id, name, client_id, created_at, deleted_at, disk_bytes,"
+            " data_json FROM profiles_trash ORDER BY deleted_at DESC, id"
         ).fetchall()
     out = []
     for row in rows:
@@ -864,6 +883,7 @@ def list_trash_rows() -> list[dict[str, Any]]:
         except (ValueError, TypeError):
             profile = {"id": row["id"], "name": row["name"]}
         profile["deletedAt"] = row["deleted_at"]
+        profile["diskBytes"] = int(row["disk_bytes"] or 0)
         out.append(profile)
     return out
 

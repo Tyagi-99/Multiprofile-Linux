@@ -274,3 +274,77 @@ def test_a_trashed_profiles_proxy_password_is_still_encrypted(client, tmp_path):
         if path.exists():
             blob += path.read_bytes()
     assert b"hunter2-secret" not in blob
+
+
+# --------------------------------------------------------------------------
+# 6. Listing the trash must not walk the disk
+# --------------------------------------------------------------------------
+
+def test_the_trash_list_does_not_stat_every_retained_file(client, monkeypatch):
+    """The size is measured once, when the profile is trashed.
+
+    The first version measured it while rendering the list, which is a full
+    tree walk per row on every page load. This host's own Chromium profile
+    holds 3239 files, so 150 trashed profiles cost about 2 s of stat() calls
+    to display a column. Nothing writes to a trashed profile, so there is
+    nothing to re-measure.
+    """
+    from multiprofile.storage import profiles as store
+
+    pid, root = _warm_profile(client)
+    (root / "Cache").mkdir(exist_ok=True)
+    for i in range(50):
+        (root / "Cache" / f"f{i}").write_bytes(b"x" * 32)
+    client.delete(f"/api/profiles/{pid}")
+
+    walks = []
+    real = store._dir_bytes
+    monkeypatch.setattr(store, "_dir_bytes", lambda p: (walks.append(p), real(p))[1])
+
+    body = client.get("/api/trash").get_json()
+    assert body["items"][0]["diskBytes"] > 0, "the number must still be right"
+    assert walks == [], f"listing walked the disk: {walks}"
+
+
+def test_a_restored_profile_does_not_keep_the_trash_only_fields(client):
+    pid, _ = _warm_profile(client)
+    client.delete(f"/api/profiles/{pid}")
+    back = client.post(f"/api/profiles/{pid}/restore").get_json()["profile"]
+    assert "deletedAt" not in back
+    assert "diskBytes" not in back
+    assert client.get(f"/api/profiles/{pid}").get_json().get("deletedAt") is None
+
+
+# --------------------------------------------------------------------------
+# 7. The schema migration
+# --------------------------------------------------------------------------
+
+def test_a_database_that_predates_disk_bytes_gains_the_column(tmp_path, monkeypatch):
+    """v3 shipped the trash table without disk_bytes; v4 adds it in place."""
+    import sqlite3
+
+    from multiprofile.storage import db as dbmod
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO schema_version VALUES (3, '2026-01-01')")
+        conn.execute(
+            "CREATE TABLE profiles_trash (id TEXT PRIMARY KEY, name TEXT NOT NULL"
+            " DEFAULT '', client_id TEXT, created_at TEXT, updated_at TEXT NOT NULL,"
+            " deleted_at TEXT NOT NULL, data_json TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO profiles_trash VALUES ('profile_old', 'Old', NULL, NULL,"
+            " '2026-01-01', '2026-01-01', '{\"id\": \"profile_old\", \"name\": \"Old\"}')"
+        )
+    conn.close()
+
+    dbmod.close()
+    monkeypatch.setenv("MULTIPROFILE_CONTROL_DB", str(path))
+    dbmod.configure(str(path))
+    rows = dbmod.list_trash_rows()
+    assert [r["id"] for r in rows] == ["profile_old"], "the existing row survived"
+    assert rows[0]["diskBytes"] == 0, "unmeasured old rows read as zero, not a crash"
+    dbmod.close()

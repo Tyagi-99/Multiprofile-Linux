@@ -1033,7 +1033,17 @@ returned one to the fleet with its directory intact, a permanent delete removed
 unchanged — a restored profile that gets a new identity is just a fresh create
 wearing the old name.
 
-18 tests added.
+**Correction made during the build.** The first version measured the retained
+directory while *rendering* the trash — a full tree walk per row on every page
+load. This host's own Chromium profile holds **3,239 files**, so 150 trashed
+profiles cost roughly **2 s of `stat()` calls to display a column**: the same
+shape as F9, introduced while fixing F36. Nothing writes to a trashed profile,
+so the size is measured once, when it is trashed, and stored in
+`profiles_trash.disk_bytes` (schema v4, with an in-place `ALTER` for a database
+that already has the v3 table). Measured after: the listing no longer touches
+the disk at all.
+
+21 tests added.
 
 ---
 

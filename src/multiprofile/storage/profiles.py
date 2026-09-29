@@ -483,7 +483,15 @@ def trash_profile(profile_id: str) -> dict[str, Any] | None:
     rather than a recovery.
     """
     _ensure_ready()
-    profile = db.trash_profile_row(profile_id)
+    # Measured here, once, and stored: nothing writes to a trashed profile, so
+    # the size taken now is the size for as long as it is in the trash. The
+    # first version measured it while rendering the list instead, which is a
+    # full tree walk per row on every page load -- a real Chromium profile
+    # holds a few thousand files, so at 150 trashed that was ~2 s of stat()
+    # calls to show a column.
+    chrome_root, _ = _profile_files(profile_id)
+    size = _dir_bytes(chrome_root) if chrome_root.exists() else 0
+    profile = db.trash_profile_row(profile_id, disk_bytes=size)
     if profile is None:
         return None
     with _lock:
@@ -504,7 +512,11 @@ def restore_profile(profile_id: str) -> dict[str, Any] | None:
     profile = db.restore_profile_row(profile_id, capacity=max_profiles())
     if profile is None:
         return None
-    return _decorate([dict(profile)])[0]
+    restored = dict(profile)
+    # Trash-only fields do not belong on a live profile.
+    restored.pop("deletedAt", None)
+    restored.pop("diskBytes", None)
+    return _decorate([restored])[0]
 
 
 def list_trash() -> list[dict[str, Any]]:
@@ -517,8 +529,6 @@ def list_trash() -> list[dict[str, Any]]:
     _ensure_ready()
     out = []
     for profile in db.list_trash_rows():
-        chrome_root, _ = _profile_files(str(profile.get("id") or ""))
-        profile["diskBytes"] = _dir_bytes(chrome_root) if chrome_root.exists() else 0
         profile.pop("pid", None)
         profile["status"] = "trashed"
         out.append(profile)
