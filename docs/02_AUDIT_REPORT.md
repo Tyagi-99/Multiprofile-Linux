@@ -67,10 +67,10 @@ honest-reporting defects rather than deferring them.
 | **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
 | **F4** | ✅ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** — **fixed** | done |
 | **F5** | ✅ **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** — **fixed** | done |
-| **F6** | ⚠️ **High** | Performance | Profile store is a full read+parse per request → **3.1 s** for 25 rows at 10k | 1–2 wk |
+| **F6** | ✅ **High** | Performance | Profile store was a full read+parse per request, and **lost concurrent writes** (3 of 20 survived) — **SQLite store** | done |
 | **F7** | ✅ Medium | Fingerprint | `evasion.js` announces itself via `console.log` on every page — **fixed** | done |
 | **F8** | ✅ Medium | Security | API silently accepts and persists **unknown fields** — **fixed** | done |
-| **F9** | ❌ Medium | UX | No list virtualization; 25/page pagination | 1 wk |
+| **F9** | ✅ Medium | UX | Listing got **quadratically slower**; the whole store was materialised per page — **SQL paging + one-page fleet** | done |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
 | **F11** | 🟡 Medium | Code quality | 138 failure-swallowing handlers, deselected from lint — **identity path done**, rest is policy | 1–2 wk |
 | **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
@@ -86,6 +86,18 @@ honest-reporting defects rather than deferring them.
 | **F22** | ✅ **High** | Fingerprint | Timezone was **JavaScript-only**; every unhooked surface reported the host zone — **fixed** | done |
 | **F23** | ✅ **High** | Fingerprint | `enumerateDevices` **volunteered a persistent id the host withholds**, the same one for all three kinds — **fixed** | done |
 | **F24** | ✅ **High** | Fingerprint | **AudioContext and ClientRects linked every profile on the machine** — identical to 12 decimal places — **fixed** | done |
+| **F25** | ✅ **High** | Fingerprint | A Windows profile **enumerated this host's Linux fonts** — **per-profile fontconfig view** (residual documented) | done |
+| **F26** | ✅ **High** | Fingerprint | **WebGPU contradicted the GPU the profile claims** | done |
+| **F27** | ✅ **High** | Fingerprint | The **Battery API reported the host's battery** — the same curve in every profile | done |
+| **F28** | ✅ Medium | Fingerprint | **Web Bluetooth missing** on a profile claiming Windows | done |
+| **F29** | ✅ Medium | Fingerprint | A Windows profile with **no speech voices** | done |
+| **F30** | ✅ **High** | Fingerprint | **Worker realms disagreed with their own page** | done |
+| **F31** | ✅ **High** | Fingerprint | **Every profile claimed New York**, from every exit | done |
+| **F32** | ✅ Medium | UX | The consistency engine had **no score** | done |
+| **F33** | ✅ **High** | Performance | Starting a fleet cost **one launch after another** — 20 profiles ≈ 32 s | done |
+| **F34** | ✅ Medium | UX | **No way to fill a fleet**: every create path made one profile | done |
+| **F35** | ✅ **High** | Correctness | **Bulk create silently did a third of what was asked** — `count` clamped to 50, reported as success | done |
+| **F36** | ✅ **High** | Data loss | **Deleting a profile destroyed its sessions irreversibly** — no trash, no restore | done |
 
 ---
 
