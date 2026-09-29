@@ -31,6 +31,7 @@ from ..engine import detect_engine_version
 from ..fingerprint import fingerprint_report
 from ..jobs import cancel_job, create_job, get_job, list_jobs
 from ..network import network_config_for_profile
+from ..profile_import import DEFAULT_PROXY_TYPE, import_profiles
 from ..proxy_util import parse_proxy, test_proxy
 from ..storage.clients import (
     create_client,
@@ -567,6 +568,59 @@ def create_app() -> Flask:
             return jsonify({"error": "not found"}), 404
         audit_log("delete", profile_id=profile_id, ok=True, detail={"purgeStorage": purge_storage})
         return jsonify({"ok": True, "purgeStorage": purge_storage})
+
+    @app.post("/api/profiles/import")
+    def profiles_import():
+        """Create one profile per proxy in a pasted list.
+
+        The fleet-filling operation the product was missing: create, clone,
+        duplicate and from-template all made one profile at a time, so an
+        operator arriving with a block of proxies from a provider had to type
+        each one in.
+
+        Body: ``{"proxies": "<text or list>", "namePrefix": "...",
+        "proxyType": "socks5", "tags": [...], "clientId": ..., "poolId": ...,
+        "startUrl": ...}``. Everything but ``proxies`` is optional; the extra
+        fields are applied to every profile in the batch.
+
+        Partial success by design. A bad line does not reject the batch --
+        someone pasting 150 proxies usually has one typo, and failing all 150
+        for it means finding the typo by bisection. The response reports every
+        row by the input line it came from, so a caller fixes two lines rather
+        than re-pasting everything.
+        """
+        payload = require_json()
+        raw = payload.get("proxies")
+        if raw is None:
+            raw = payload.get("proxyList") or payload.get("list")
+        if not isinstance(raw, (str, list)) or not raw:
+            raise ValidationError(
+                "proxies",
+                "give a list of proxies, as newline-separated text or an array",
+            )
+
+        base: dict[str, object] = {}
+        for key in ("tags", "clientId", "poolId", "startUrl", "timezone",
+                    "language", "webrtcMode", "color", "notes"):
+            if key in payload and payload[key] is not None:
+                base[key] = payload[key]
+
+        report = import_profiles(
+            raw,
+            name_prefix=str(payload.get("namePrefix") or "Imported"),
+            proxy_type=str(payload.get("proxyType") or DEFAULT_PROXY_TYPE),
+            base=base,
+        )
+        audit_log(
+            "profiles_import",
+            ok=True,
+            detail={k: v for k, v in report["counts"].items()},
+        )
+        # 207: some rows may have failed while others were created, and the
+        # caller has to look at the body either way. A flat 200 would let a
+        # client treat "created 0 of 150" as success.
+        status = 200 if report["counts"]["failed"] == 0 else 207
+        return jsonify(report), status
 
     @app.post("/api/profiles/<profile_id>/launch")
     def profiles_launch(profile_id: str):

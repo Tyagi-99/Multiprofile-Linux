@@ -946,6 +946,65 @@ secrets-at-rest and the resilience properties all still hold, of the new store.
 
 ---
 
+### F34 — ✅ MEDIUM: no way to fill a fleet — **FIXED**
+
+**Files:** [`profile_import.py`](../src/multiprofile/profile_import.py) (new),
+[`api/server.py`](../src/multiprofile/api/server.py)
+
+The brief asks for "create / clone / bulk create / import / export". The
+product had create, clone, duplicate and from-template — every one of which
+makes a **single** profile. An operator arriving with a block of proxies from
+a provider, which is how a fleet is actually filled, had to type each one in.
+
+`POST /api/profiles/import` takes a pasted list and creates one profile per
+proxy. Parsing is not reimplemented: `proxy_util.parse_proxy` already accepts
+every shape a provider sends — `ip:port`, `ip:port:user:pass`,
+`user:pass@host:port`, and the `http://` / `socks5://` / `socks5h://` URL
+forms — and it is the same function the launcher routes through, so an
+imported profile cannot parse differently from one typed by hand. It had **no
+direct test coverage**; it does now.
+
+**Partial success by design.** A bad line does not reject the batch: someone
+pasting 150 proxies usually has one typo, and failing all 150 for it means
+finding the typo by bisection. Every row is reported by the input line it came
+from, so a caller fixes two lines rather than re-pasting everything. A partial
+import returns **207**, not 200 — a flat 200 would let a client treat
+"created 0 of 150" as success.
+
+**Duplicates are skipped, not merged.** Pasting the same block twice is a far
+more common accident than wanting two profiles on one exit, and the costs are
+asymmetric: a skipped row is a line in a report, a duplicated fleet is 150
+profiles to delete by hand. The same host and port with a *different* username
+is not treated as a duplicate, because rotating providers hand out one endpoint
+with many sessions. A proxy an existing profile already uses is warned about
+and still created — refusing it would make re-importing after a partial failure
+impossible.
+
+**A secret leak caught during the work.** The first version stored the pasted
+line in `customProxy` as "what the operator typed", which wrote the proxy
+password to disk **in clear** beside the encrypted copy of the same password:
+`_encrypt_profile_secrets` wraps `proxyPass` and nothing else. `backup.py`
+already treats `customProxy` as a secret field and strips it, which was the
+hint. Redacting it was not an option either — `NetworkConfig.from_profile`
+prefers `customProxy` over the split fields, so a redacted string would be what
+the launch actually routed on and the credentials would be lost. The field is
+left empty and the split fields carry everything, with the password encrypted
+at rest. A test asserts the password does not appear in the database files.
+
+**A correctness bug caught the same way.** A bare `ip:port:user:pass` has no
+scheme, and `parse_proxy` defaults to HTTP — so importing a SOCKS5 list
+produced a fleet that silently spoke the wrong protocol to every proxy in it.
+The batch takes a `proxyType`, applied only to rows that carry no scheme of
+their own.
+
+One request is bounded at 500 rows. Not a fleet limit — the operator decides
+how many profiles they keep — but a bound on a single call, reported rather
+than silently truncated.
+
+31 tests added.
+
+---
+
 ### F33 — ✅ HIGH: starting a fleet cost one launch after another — **FIXED**
 
 **Files:** [`jobs/legacy.py`](../src/multiprofile/jobs/legacy.py),
