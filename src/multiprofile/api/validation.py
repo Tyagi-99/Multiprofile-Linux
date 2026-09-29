@@ -91,7 +91,7 @@ PROFILE_FIELDS_SERVER_OWNED = frozenset({
     "launchState", "launchError", "launchErrorCode", "cdpPort", "state",
     "proxyOk", "egressIp", "lastLaunch", "lastProxyCheck",
     # written by the launch and network paths, never by a client
-    "allocatedIp", "lastNetworkDiagnostics", "noteEntries",
+    "allocatedIp", "lastNetworkDiagnostics", "noteEntries", "geoAuto",
 })
 
 # 3. Recognised, and honoured by nothing. These are sent by our own wizard

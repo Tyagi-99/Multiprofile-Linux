@@ -553,9 +553,23 @@ def _start_identity_injection(
     fingerprint: dict[str, Any],
     net: Any,
     ua_override: dict[str, Any] | None = None,
+    geo_plan: dict[str, Any] | None = None,
 ) -> list[str]:
-    """Install fingerprint, proxy auth, cookies and UA over CDP. Returns notes."""
-    from .cdp_inject import ProxyAuth, build_identity_script, start_injection
+    """Install fingerprint, proxy auth, cookies and UA over CDP. Returns notes.
+
+    ``geo_plan`` is the place-and-language decision the caller already made
+    (see ``geo.align_to_exit``). It is passed in rather than recomputed so
+    that the fingerprint evasion.js reads, the Client Hints the UA override
+    carries and the CDP overrides installed here can only ever describe one
+    place. Recomputing it here was how a page ended up answering pt-BR to
+    Intl and en-US to navigator.language at the same time.
+    """
+    from .cdp_inject import (
+        ProxyAuth,
+        build_identity_script,
+        build_worker_identity_script,
+        start_injection,
+    )
 
     notes: list[str] = []
 
@@ -598,11 +612,15 @@ def _start_identity_injection(
 
     cookies = _cdp_cookies(load_cookies(profile_id))
 
+    aligned = geo_plan or {}
     status = start_injection(
         profile_id, port, script=script, proxy_auth=auth, cookies=cookies,
         ua_override=ua_override,
+        worker_script=build_worker_identity_script(fingerprint),
+        locale=aligned.get("language") or fingerprint.get("language") or None,
+        geolocation=aligned.get("geolocation"),
         timezone_id=str(
-            profile.get("timezone") or fingerprint.get("timezone") or ""
+            fingerprint.get("timezone") or profile.get("timezone") or ""
         ).strip() or None,
     )
     upsert_runtime(profile_id, inject_ok=status.ok, inject_detail=status.to_dict())
@@ -954,6 +972,33 @@ def launch_profile(
                 notes.append(f"Fingerprint reconciled with device preset ({device_preset.id})")
 
     # ------------------------------------------------------------------
+    # Place and language, decided once, before anything reads them.
+    # ------------------------------------------------------------------
+    # This has to happen here rather than at injection time, because the
+    # timezone and language are not only CDP overrides: they are baked into
+    # the fingerprint that evasion.js reads and into the Client Hints the UA
+    # override carries. Aligning only the overrides produced a page that
+    # answered pt-BR to Intl and en-US to navigator.language -- the profile
+    # disagreeing with itself in the surface meant to fix it.
+    from ..geo import align_to_exit
+
+    geo_plan = align_to_exit(profile, fingerprint, profile.get("lastNetworkDiagnostics"))
+    if geo_plan["timezone"]:
+        fingerprint = {**fingerprint, "timezone": geo_plan["timezone"]}
+    if geo_plan["language"]:
+        fingerprint = {**fingerprint, "language": geo_plan["language"],
+                       "languages": geo_plan["languages"]}
+    for conflict in geo_plan["conflicts"]:
+        notes.append(f"geo conflict: {conflict}")
+    if geo_plan["source"] == "exit_ip":
+        notes.append(
+            "geo: timezone, language and position taken from the exit IP "
+            f"country {geo_plan['country']}"
+        )
+    if geo_plan["geolocation"]:
+        notes.append(f"geo: position claimed near {geo_plan['geolocation']['city']}")
+
+    # ------------------------------------------------------------------
     # Wire identity — ONE answer for the flag, the CDP override and the
     # launch-time assertion. Resolved after preset reconciliation so the
     # client hints it carries are the ones the preset asked for.
@@ -1038,6 +1083,19 @@ def launch_profile(
     if ua:
         cmd.append(f"--user-agent={ua}")
         notes.append(f"User-Agent flag: {ua}")
+
+    # The language, at the flag level, for the same reason the UA is here: it
+    # is the part of the claim that exists before any CDP session does.
+    # Chromium reads --lang at startup to pick its UI language and the initial
+    # Accept-Language, and nothing was passing it, so a profile claiming
+    # de-DE still asked servers for the host's languages on the very first
+    # request -- the same shape of gap as F1, on a different header.
+    _lang = geo_plan.get("language")
+    if _lang:
+        cmd.append(f"--lang={_lang}")
+        if geo_plan.get("languages"):
+            cmd.append("--accept-lang=" + ",".join(geo_plan["languages"]))
+        notes.append(f"Language flags: --lang={_lang}")
 
     # CDP — always localhost-only
     debug_port = allocate_localhost_port()
@@ -1143,7 +1201,7 @@ def launch_profile(
         try:
             notes.extend(_start_identity_injection(
                 profile_id, debug_port, profile, fingerprint, net,
-                ua_override=ua_override,
+                ua_override=ua_override, geo_plan=geo_plan,
             ))
         except Exception as e:  # noqa: BLE001 - never fatal to a launch
             notes.append(f"identity injection skipped: {e}")

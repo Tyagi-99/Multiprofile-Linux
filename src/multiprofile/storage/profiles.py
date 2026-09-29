@@ -82,7 +82,20 @@ def _normalize_fields(profile: dict[str, Any]) -> dict[str, Any]:
     profile.setdefault("proxyUser", profile.get("proxyUser") or "")
     profile.setdefault("proxyPass", profile.get("proxyPass") or "")
     profile.setdefault("proxyType", profile.get("proxyType") or "none")
+    # America/New_York is a fallback, not a decision. Recording which it was
+    # is what lets a launch fill the timezone and language in from the exit IP
+    # instead of announcing New York from every proxy in the world: before
+    # this, a fleet on Brazilian, German and Indian exits all claimed the same
+    # city, which is both a contradiction per profile and a value they shared.
+    #
+    # An operator who deliberately picks America/New_York is left alone --
+    # that is the whole point of distinguishing the two.
+    if not (profile.get("timezone") or "").strip():
+        profile["geoAuto"] = True
+    if not (profile.get("language") or "").strip():
+        profile["geoAuto"] = True
     profile.setdefault("timezone", profile.get("timezone") or "America/New_York")
+    profile.setdefault("geoAuto", False)
     profile.setdefault("clientId", profile.get("clientId"))
     tags = profile.get("tags")
     if tags is None:
