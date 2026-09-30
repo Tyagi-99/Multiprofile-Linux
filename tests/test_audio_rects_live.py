@@ -166,14 +166,26 @@ def _probe_profile(seed: int, tmp_path, monkeypatch) -> dict:
             "params": {"expression": _PROBE, "awaitPromise": True, "returnByValue": True},
         }))
         value = None
-        deadline = time.time() + 30
+        failure = None
+        deadline = time.time() + 60
         while time.time() < deadline:
             msg = json.loads(ws.recv())
             if msg.get("id") == 1:
-                value = ((msg.get("result") or {}).get("result") or {}).get("value")
+                result = msg.get("result") or {}
+                # Surface what the page actually said. "the probe returned
+                # nothing" is true of a thrown exception, a rejected promise
+                # and a timeout alike, and having to guess between them from
+                # a CI log is the same swallowing this suite exists to catch.
+                details = result.get("exceptionDetails")
+                if details:
+                    text = (details.get("exception") or {}).get("description")
+                    failure = text or details.get("text") or json.dumps(details)[:400]
+                value = (result.get("result") or {}).get("value")
                 break
         ws.close()
-        assert value, "the probe returned nothing"
+        if failure:
+            raise AssertionError(f"the probe raised in the page: {failure}")
+        assert value, "the probe returned nothing (no exception, no value — a timeout)"
         return json.loads(value)
     finally:
         L.stop_profile(pid)

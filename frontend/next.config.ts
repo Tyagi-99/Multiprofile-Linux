@@ -35,12 +35,24 @@ function sourceBuildId(root: string): string {
     }
   };
   walk(join(root, "src"));
-  for (const name of ["package.json", "package-lock.json", "tsconfig.json"]) {
+  // Only the parts of package.json that can change the output. Hashing the
+  // whole file would mean renaming an npm script forces a re-export, which
+  // trains people to re-run the build to silence a check rather than because
+  // the console changed.
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+    hash.update(JSON.stringify({
+      dependencies: pkg.dependencies ?? {},
+      devDependencies: pkg.devDependencies ?? {},
+    }));
+  } catch {
+    // Absent contributes nothing, deterministically.
+  }
+  for (const name of ["package-lock.json", "tsconfig.json"]) {
     try {
       hash.update(readFileSync(join(root, name)));
     } catch {
-      // Absent is fine and must stay deterministic: a missing lockfile
-      // contributes nothing rather than throwing mid-build.
+      // Same.
     }
   }
   // Next.js requires a URL-safe id; base64url minus padding is both that and

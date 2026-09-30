@@ -214,6 +214,31 @@ def _webgpu_features() -> list[str]:
     return ["Vulkan"]
 
 
+#: Software rendering flags. `--enable-unsafe-swiftshader` is not optional.
+#:
+#: Chrome gates SwiftShader behind it from 121 onward, and without it WebGL
+#: does not fall back -- it is simply absent. Measured on Chromium 151:
+#:
+#:     --disable-gpu --use-gl=swiftshader
+#:         canvas.getContext('webgl')  ->  null
+#:     ...plus --enable-unsafe-swiftshader
+#:         ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...), SwiftShader driver)
+#:
+#: This is not a headless-CI detail. Any host without /dev/dri takes this
+#: path -- a server, a VM, a container -- and a profile that claims an
+#: "NVIDIA GeForce RTX 4060" while `getContext('webgl')` returns null is a
+#: contradiction no real browser produces. It is the F26 shape again: the
+#: GPU story disagreeing with itself. The "unsafe" in the flag name is about
+#: SwiftShader's own hardening posture, not about this product's use of it;
+#: the alternative on such a host is no WebGL at all, which is worse and more
+#: conspicuous.
+_SOFTWARE_GPU_FLAGS = [
+    "--disable-gpu",
+    "--use-gl=swiftshader",
+    "--enable-unsafe-swiftshader",
+]
+
+
 def chrome_gpu_args(gpu_mode: str) -> list[str]:
     """Return Chrome GPU flags appropriate for the environment.
 
@@ -226,10 +251,7 @@ def chrome_gpu_args(gpu_mode: str) -> list[str]:
     mode = (gpu_mode or "auto").strip().lower()
 
     if mode == "software":
-        return [
-            "--disable-gpu",
-            "--use-gl=swiftshader",
-        ]
+        return _SOFTWARE_GPU_FLAGS[:]
     if mode == "disabled":
         return ["--disable-gpu"]
     if mode == "angle":
@@ -245,10 +267,7 @@ def chrome_gpu_args(gpu_mode: str) -> list[str]:
         ]
     # No GPU available — use software renderer but be honest about it
     log.info("GPU not detected, using SwiftShader software renderer")
-    return [
-        "--disable-gpu",
-        "--use-gl=swiftshader",
-    ]
+    return _SOFTWARE_GPU_FLAGS[:]
 
 
 # ---------------------------------------------------------------------------

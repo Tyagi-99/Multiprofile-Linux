@@ -43,11 +43,22 @@ function sourceBuildId(base) {
     }
   };
   walk(join(base, "src"));
-  for (const name of ["package.json", "package-lock.json", "tsconfig.json"]) {
+  // Only the parts of package.json that can change the output -- see the
+  // matching comment in next.config.ts.
+  try {
+    const pkg = JSON.parse(readFileSync(join(base, "package.json"), "utf8"));
+    hash.update(JSON.stringify({
+      dependencies: pkg.dependencies ?? {},
+      devDependencies: pkg.devDependencies ?? {},
+    }));
+  } catch {
+    // Absent contributes nothing, deterministically.
+  }
+  for (const name of ["package-lock.json", "tsconfig.json"]) {
     try {
       hash.update(readFileSync(join(base, name)));
     } catch {
-      // Absent contributes nothing, deterministically.
+      // Same.
     }
   }
   return hash.digest("base64url").slice(0, 21);
