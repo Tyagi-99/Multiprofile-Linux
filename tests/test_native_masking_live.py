@@ -120,6 +120,45 @@ _PROBE = r"""
   o.non_callable = (() => { try { FTS.call({}); return 'NO THROW'; }
                            catch (e) { return e.constructor.name; } })();
 
+  // --- shape: a hook must look like a native method --------------------
+  // Found by diffing against bare Chromium. Every hook was a plain function,
+  // which has an own `prototype` and is constructible; a native method is
+  // neither, so either check identified the product without reading a line
+  // of source and survived the masking above completely.
+  const shaped = [
+    ['HTMLCanvasElement.prototype', 'toDataURL', 'fn'],
+    ['CanvasRenderingContext2D.prototype', 'getImageData', 'fn'],
+    ['WebGLRenderingContext.prototype', 'getParameter', 'fn'],
+    ['Element.prototype', 'getBoundingClientRect', 'fn'],
+    ['AudioBuffer.prototype', 'getChannelData', 'fn'],
+    ['Date.prototype', 'getTimezoneOffset', 'fn'],
+    ['Intl.DateTimeFormat.prototype', 'resolvedOptions', 'fn'],
+    ['Navigator.prototype', 'platform', 'acc'],
+    ['Navigator.prototype', 'hardwareConcurrency', 'acc'],
+    ['Navigator.prototype', 'languages', 'acc'],
+    ['Screen.prototype', 'width', 'acc'],
+  ];
+  const resolve = (path) => path.split('.').reduce((o, k) => (o ? o[k] : undefined), window);
+  o.withPrototype = [];
+  o.constructible = [];
+  o.shapeChecked = 0;
+  for (const [path, prop, kind] of shaped) {
+    const holder = resolve(path);
+    if (!holder) continue;
+    const d = Object.getOwnPropertyDescriptor(holder, prop);
+    if (!d) continue;
+    const f = kind === 'acc' ? d.get : d.value;
+    if (typeof f !== 'function') continue;
+    o.shapeChecked++;
+    if (Object.prototype.hasOwnProperty.call(f, 'prototype')) {
+      o.withPrototype.push(path + '.' + prop);
+    }
+    try { new f(); o.constructible.push(path + '.' + prop); } catch (e) {}
+  }
+  // A control: Intl.DateTimeFormat really is a constructor, so it must keep
+  // both. Stripping them there would be the anomaly.
+  o.dtf_has_prototype = Object.prototype.hasOwnProperty.call(Intl.DateTimeFormat, 'prototype');
+
   // --- the realm-borrowing bypass -------------------------------------
   // A fresh realm ships a pristine Function.prototype.toString. Borrowing it
   // is the one-line way around masking that only patched the top window.
@@ -316,6 +355,32 @@ def test_a_genuinely_native_function_is_unaffected(measured):
 def test_a_non_callable_this_still_throws_a_TypeError(measured):
     """Native throws. Returning a string instead would be its own signal."""
     assert measured["non_callable"] == "TypeError", measured["non_callable"]
+
+
+# --------------------------------------------------------------------------
+# 3b. Shape — the tell that needs no source at all
+# --------------------------------------------------------------------------
+
+def test_no_hook_carries_an_own_prototype(measured):
+    """Native methods have none. 22 of the replaced functions did, which is a
+    one-line identification that the toString masking does not touch:
+
+        'prototype' in HTMLCanvasElement.prototype.toDataURL
+    """
+    assert measured["shapeChecked"] >= 8, "the probe resolved almost nothing"
+    assert measured["withPrototype"] == [], measured["withPrototype"]
+
+
+def test_no_hook_is_constructible(measured):
+    """`new HTMLCanvasElement.prototype.toDataURL()` throws in a real browser
+    and did not here. The other half of the same tell."""
+    assert measured["constructible"] == [], measured["constructible"]
+
+
+def test_a_real_constructor_keeps_its_prototype(measured):
+    """Intl.DateTimeFormat is genuinely constructed by pages. Stripping its
+    prototype to satisfy the rule above would be the anomaly, not the fix."""
+    assert measured["dtf_has_prototype"] is True
 
 
 # --------------------------------------------------------------------------
