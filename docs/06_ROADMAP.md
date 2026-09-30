@@ -5,8 +5,9 @@ after §2 branches on it, so the roadmap is written as a fork rather than as a
 single line. Presenting one path as settled would be the same failure this
 audit spent its length fixing — an artefact that looks complete and is not.
 
-Where the product stands: **43 findings, 39 fixed, 4 open.** P0, P1, P2 and P3
-are complete. 1906 tests pass. The fingerprint vectors reachable from
+Where the product stands: **44 findings, 41 fixed, 3 open** — and one of the
+three, F3, is open only at its architectural ceiling. P0, P1, P2 and P3
+are complete. The fingerprint vectors reachable from
 JavaScript are coherent and per-profile ([`04`](04_FINGERPRINT_TEST_RESULTS.md));
 the orchestration, storage, API and commercial substrate are production-shaped.
 
@@ -39,7 +40,7 @@ engines. No amount of work on the JavaScript surface changes the comparison.
 |---|---|---|---|
 | **A — Patch the engine** | Fork Chromium; move spoofing to C++; own the build and update pipeline | **XL, 6–12 months**, plus permanent maintenance | Parity on detection |
 | **B — Accept the ceiling** | Stay on stock Chromium; sell on Linux-first, price, API, transparency | **0** | Everything except "undetectable" |
-| **C — Narrow the gap** | Close what is reachable without a fork: `toString` masking, a TLS-rewriting proxy, HTTP/2 alignment at the proxy | **L, 2–4 months** | "Harder to detect", honestly qualified |
+| **C — Narrow the gap** | Close what is reachable without a fork: ~~`toString` masking~~ **(done)**, a TLS-rewriting proxy, HTTP/2 alignment at the proxy | **L, 2–3 months** | "Harder to detect", honestly qualified |
 
 **B is the default and it is not a failure.** A Linux-first anti-detect
 browser with no telemetry, a 91-route API, scoped tokens, a fail-closed router
@@ -102,7 +103,7 @@ Pixelscan, BrowserLeaks and Iphey and record the scores. This is how the F3
 decision gets a number attached to it instead of an argument, and it should
 happen **before** §1 is decided, not after.
 
-### 2.5 F20 and the rest of F11 — M, 2–3 weeks combined
+### 2.5 F20 — M, 1–2 weeks
 
 The job queue has no producer (F20 — the durable queue is bypassed, and it is
 why idle parking never fires); 135 failure-swallowing handlers remain outside
@@ -142,8 +143,8 @@ The pragmatic middle. 2–4 months, and it front-loads the measurable wins.
 
 | Task | Effort | Closes |
 |---|---|---|
-| Complete `toString` masking | M | Most of the F3 surface reachable from JS |
-| Audit every hook for prototype tampering | M | The rest of the JS-observable surface |
+| ~~Complete `toString` masking~~ | ✅ done | Most of the F3 surface reachable from JS |
+| ~~Audit every hook for prototype tampering~~ | ✅ done | Found the own-`prototype` tell on 22 hooks, and F44 |
 | **TLS/JA3 alignment in the local proxy** | **L** | The largest non-engine gap |
 | HTTP/2 SETTINGS and frame-order alignment | M | Same category |
 | Re-run the checkers, publish the delta | S | Proves it worked |
@@ -223,7 +224,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 39 of 43 findings
+The product is in good shape below the fingerprint layer: 41 of 44 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

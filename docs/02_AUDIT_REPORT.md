@@ -82,7 +82,7 @@ engineering draft rather than legal advice.
 |---|---|---|---|---|
 | **F1** | ✅ **Critical** | Fingerprint | UA/Client-Hints spoofing silently does nothing on the default (no-preset) path; reports success — **fixed, see below** | done |
 | **F2** | ✅ **High** | Fingerprint | evasion.js applied **twice** on Chromium (extension + CDP) — **fixed** | done |
-| **F3** | ⚠️ **High** | Fingerprint | Hooks are trivially detectable; `Function.prototype.toString` leaks their source | 1–3 wk |
+| **F3** | 🟡 **High** | Fingerprint | Hooks leaked their source and their shape — **both closed**; the architectural ceiling (JS-level spoofing, TLS/HTTP-2) remains | partial |
 | **F4** | ✅ **High** | Security | Cookie jar + cleartext proxy password written **0644 world-readable** — **fixed** | done |
 | **F5** | ✅ **High** | Fingerprint | Every profile claims Chrome **131**; engine is Chromium **151** — **fixed** | done |
 | **F6** | ✅ **High** | Performance | Profile store was a full read+parse per request, and **lost concurrent writes** (3 of 20 survived) — **SQLite store** | done |
@@ -90,7 +90,7 @@ engineering draft rather than legal advice.
 | **F8** | ✅ Medium | Security | API silently accepts and persists **unknown fields** — **fixed** | done |
 | **F9** | ✅ Medium | UX | Listing got **quadratically slower**; the whole store was materialised per page — **SQL paging + one-page fleet** | done |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
-| **F11** | 🟡 Medium | Code quality | Failure-swallowing handlers — **identity and security paths done**; 135 remain, policy not bugs | 1–2 wk |
+| **F11** | ✅ Medium | Code quality | Failure-swallowing handlers — every site classified, four that cost the operator something fixed, and `BLE001`/`S110` now **enforced** | done |
 | **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
 | **F13** | ✅ Medium | Reliability | Window tiling was X11-bound; dead on the Wayland host it is developed on | done |
 | **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
@@ -123,6 +123,7 @@ engineering draft rather than legal advice.
 | **F41** | ✅ **Critical** | Fingerprint | **`window.__MP_PROFILE__` handed every page the whole spoofing config, seed included** — found by measuring for `docs/04` | done |
 | **F42** | ✅ **High** | Fingerprint | **Every profile claimed Windows whatever you picked** — `userAgentId` reached nothing | done |
 | **F43** | ✅ **High** | Fingerprint | **A profile with no proxy announced New York from the host's own address** — F31 reached every route except the one with no proxy on it | done |
+| **F44** | ✅ **High** | Fingerprint | **`navigator.deviceMemory` reported 16 and 6**, values no Chrome build can return — found by F3's shape diff | done |
 
 ---
 
@@ -395,7 +396,7 @@ Add a test asserting exactly one hook layer.
 
 ---
 
-### F3 — ⚠️ HIGH: the spoofing is detectable in one line
+### F3 — 🟡 HIGH: the spoofing is detectable in one line — **JS SURFACE CLOSED, CEILING REMAINS**
 
 **File:** [`evasion.js`](../src/extension/evasion.js) (`makeNative`, line ~16)
 
@@ -425,6 +426,55 @@ descriptors on the prototype rather than the instance, and never leave own
 spoofing is always inspectable by the page. Closing it properly means patching
 Chromium — a multi-quarter programme and the actual moat competitors have built.
 This should be an explicit, costed strategic decision, not a backlog item.
+
+> **The short term is done, and it was bigger than the finding said.**
+>
+> **Source.** `makeNative` wrote an own `toString` onto each hook, which
+> defeats `fn.toString()` and nothing else. A WeakMap now holds what each hook
+> claims to be and `Function.prototype.toString` answers from it, so nothing is
+> written onto the hook and `.call`/`.apply`/`.bind` have nowhere else to go.
+> The map is shared across realms deliberately, because the one-line way around
+> a patched `toString` is to borrow a clean one:
+> `f.contentWindow.Function.prototype.toString.call(hookedFn)`. Iframe windows
+> are patched before any other hook is installed in them, and the worker script
+> gets the same treatment.
+>
+> Three control tests stop this passing for the wrong reason. Masking that
+> returns `[native code]` for everything is trivially detectable — a browser
+> that calls your own just-declared function native is not a browser — so an
+> untouched function must still report `return 42`, a genuinely native function
+> must be unaffected, and a non-callable `this` must still throw the `TypeError`
+> native throws.
+>
+> **Shape — not in the finding, and found by measurement rather than reading.**
+> Diffing all 27 replaced functions against bare Chromium on name, length,
+> descriptor flags and own property names:
+>
+> ```
+> Object.getOwnPropertyNames(HTMLCanvasElement.prototype.toDataURL)
+>   stock Chromium   ["length", "name"]
+>   a profile        ["length", "name", "prototype"]
+> ```
+>
+> 22 of them carried an own `prototype` and were constructible, because every
+> hook was a plain `function(){}`. Native methods are neither. So
+> `'prototype' in toDataURL` and `new toDataURL()` each identified the product
+> in one line, needed **no source at all**, and were therefore completely
+> untouched by the masking above — they would have been the next thing found.
+> `prototype` is non-configurable, so it cannot be deleted and a Proxy cannot
+> hide it; method shorthand is the only construction that never creates one,
+> and it fixes constructibility at the same time. **22 field differences → 1**,
+> and the remaining one is `deviceMemory`, correctly present in a profile and
+> absent in this host's Chromium. Following it produced **F44**.
+>
+> **What is not closed.** The spoofing still runs in JavaScript inside the
+> page, which is the ceiling above and is unchanged. CDP attachment artefacts,
+> `Runtime.enable`, and TLS/JA3 and HTTP/2 alignment are all untouched. This
+> closes the surface the finding measured and the one it did not; it does not
+> make the product undetectable, and `docs/04` §8 keeps saying so.
+>
+> 21 tests in [`test_native_masking_live.py`](../tests/test_native_masking_live.py),
+> measured on page, iframe and worker realms.
 
 ---
 
@@ -2419,10 +2469,14 @@ workers spin against an empty table. The console's "Park" button does
 
 ---
 
-### F11 — 🟡 MEDIUM: failure-swallowing handlers — **IDENTITY + SECURITY PATHS DONE**
+### F11 — ✅ MEDIUM: failure-swallowing handlers — **FIXED (policy enforced)**
 
 `pyproject.toml` deliberately deselects `BLE001` and `S110`, documenting why.
-Current count: **103 blind-except + 35 try-except-pass**.
+Count when this finding was written: **103 blind-except + 35 try-except-pass**.
+
+> **Closed.** Both rules are now **selected**, every site in `src/` is either
+> fixed or carries a `noqa` naming what is lost when it fires, and a new blind
+> except fails the lint. See the closing note at the end of this section.
 
 The rationale (a launch path must never crash a browser) is legitimate. The cost is
 that this product's value *is* surfacing failures, and F1 is precisely a failure
@@ -2521,6 +2575,96 @@ bug hunt.
 > launcher-scope and have no notes list to write to, so that rule hid them
 > completely. The sweep now skips only the exact scope the note-writing helper
 > stamps.
+
+---
+
+> **Closing note — the policy, and the four handlers that were costing
+> something.** The remaining 136 sites were read one at a time, asking of each
+> "what does the operator lose if this fires?". Most lose nothing: a socket
+> close during teardown, a probe whose `False` result *is* the answer, a
+> fallback the response already reports. Those keep `pass` and gained a `noqa`
+> saying so, which is what the finding asked for.
+>
+> Four were not cosmetic, and all four were the same shape as **F1** — success
+> reported for work that did not happen:
+>
+> | | What it cost |
+> |---|---|
+> | `backup.restore_backup` | swallowed every cookie member failure and returned `ok: True` with no mention of cookies. **Restoring a profile is usually done for the logins**, and the one thing the operator was checking for was the one thing not reported. Now returns `restoredCookies` and `cookieFailures`, always both — 0 with no failures is "this backup had none", 0 with failures is "it had some and you did not get them". |
+> | `cookies_store.load_cookies` | returned `[]` for no jar, an empty jar and *a corrupt one* alike, so a profile with a truncated jar was indistinguishable from one never logged into. It launched signed out of everything, silently. Now logged, and the file is left in place because the operator may be able to recover it. |
+> | `POST /api/profiles/<id>/open-folder` | swallowed the `xdg-open` failure and returned `ok: True` regardless. On a host without it the console said the folder had opened and opened nothing. Two lines from the console's own button. |
+> | `GET /api/health` | reported an empty fleet when the profile store could not be read — the endpoint whose entire job is to say whether something is wrong, reporting a healthy install with zero profiles. Now `ok: false` with `profilesError`. |
+>
+> Two more on the identity path now record a structured fault: a generated
+> fingerprint that could not be persisted (the next launch rebuilds it and may
+> not match), and a profile created without one at all. Four job-queue state
+> writes now log, because a failed launch that still displays "queued" is a row
+> the operator waits on forever.
+>
+> **What makes this closed rather than tidied** is that `BLE001` and `S110` are
+> selected in `pyproject.toml`. The existing sites were never the risk; the next
+> one was. A new blind except now fails the lint, and adding one means writing
+> down why it is safe. `tests/` is exempt, with the reason stated: there the
+> same construct means "no Chrome on this host, skip", and nothing downstream
+> is misled.
+>
+> *"A launch path must never crash a browser" remains why these are broad. It
+> was never a reason for them to be silent.*
+>
+> 9 tests in [`test_silent_failure_policy.py`](../tests/test_silent_failure_policy.py).
+
+---
+
+### F44 — ✅ HIGH: deviceMemory reported a value no Chrome can return — **FIXED**
+
+**Files:** [`fingerprint/_core.py`](../src/multiprofile/fingerprint/_core.py),
+[`fingerprint/navigator.py`](../src/multiprofile/fingerprint/navigator.py),
+[`fingerprint/hardware.py`](../src/multiprofile/fingerprint/hardware.py)
+
+Found by following the single remaining difference in **F3**'s shape diff.
+`Navigator.prototype.deviceMemory` was present in a profile and absent in this
+host's Chromium — which is correct, since the profile claims Chrome on Windows
+where the API exists — but checking *that* sent me to the values, and the
+device pools held:
+
+```
+"memory": [4, 8, 16]    desktop
+"memory": [8, 16]       high-end
+"memory": [4, 6, 8]     mobile
+```
+
+The Device Memory spec rounds a machine's RAM to a power of two and clamps it
+to `[0.25, 8]`, deliberately, to cap the entropy the API contributes. Chrome on
+a 16 GB or a 64 GB machine reports **8**, and never more. So:
+
+```js
+navigator.deviceMemory === 16   // no Chrome build has ever said this
+navigator.deviceMemory === 6    // nor this; not a power of two
+```
+
+Either identifies the profile as spoofed on its own, with nothing else
+measured.
+
+**Why nothing caught it.** Every check the product had compared this value
+against the *other surfaces* — the page, the worker, the injected fingerprint,
+the consistency report — and they all agreed with each other, because they all
+read the same pool. Nothing compared it against the set of values that can
+exist. That is the **F29** shape exactly: a Windows profile with no speech
+voices was caught by what it claimed, not by any disagreement between its
+claims. Internal coherence is necessary and is not sufficient.
+
+**Fix.** The pools keep describing hardware, because a 16 GB machine is
+ordinary; `web_device_memory` is what that machine is permitted to say about
+itself. It rounds **down**, since overstating is the direction that produces
+the impossible value, and `None` passes through untouched because iOS exposes
+nothing here and an absence is not a number to be corrected. Applied where all
+three surfaces read the pool, so they cannot disagree about one profile.
+
+Two profiles on 8 GB and 16 GB now report the same 8. That is not lost variety
+— it is variety real Chrome does not have, and claiming it was the defect.
+
+207 tests in [`test_device_memory_clamp.py`](../tests/test_device_memory_clamp.py),
+including 160 generated profiles across four platforms.
 
 ---
 

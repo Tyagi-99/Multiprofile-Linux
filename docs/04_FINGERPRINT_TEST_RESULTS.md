@@ -249,24 +249,47 @@ a one-line detection and was one before F30.
 
 ## 8. The spoofing as a surface — where F3 lives
 
+Re-measured after the F3 masking and shape work. The first two rows were the
+finding; the middle block is what the fix had to survive.
+
 | Probe | Control | Profile | Verdict |
 |---|---|---|---|
-| `Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)` | `function toDataURL() { [native code] }` | **the hook's source, comments included** | ❌ **F3** |
-| `…call(WebGLRenderingContext.prototype.getParameter)` | native | **source, incl. `// UNMASKED_VENDOR_WEBGL`** | ❌ **F3** |
+| `Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)` | `function toDataURL() { [native code] }` | `function toDataURL() { [native code] }` | ✅ was ❌ **F3** |
+| `…call(WebGLRenderingContext.prototype.getParameter)` | native | native, no `UNMASKED_*` | ✅ was ❌ **F3** |
+| `hasOwnProperty(toDataURL, 'toString')` | `false` | `false` | ✅ was `true` |
+| `getOwnPropertyDescriptor(navigator, 'platform')` | `undefined` | `undefined` | ✅ was a descriptor |
+| `getOwnPropertyNames(toDataURL)` | `length,name` | `length,name` | ✅ was `+prototype` |
+| `new HTMLCanvasElement.prototype.toDataURL()` | TypeError | TypeError | ✅ was constructible |
+| **iframe-borrowed** `toString.call(toDataURL)` | native | native | ✅ |
+| worker `toString.call(getImageData)` | native | native | ✅ |
+| `Function.prototype.toString.call(FTS)` | native | native | ✅ |
+| *control:* an untouched `function untouched(){return 42}` | its source | **its source** | ✅ not blanket-lying |
+| *control:* `toString.call({})` | TypeError | TypeError | ✅ |
 | `window.__MP_PROFILE__` | — | `undefined` | ✅ fixed (F41) |
 | Globals matching `/^__MP\|multiprofile\|evasion/i` | — | **none** | ✅ fixed (F41) |
 | `typeof window.chrome` / `chrome.runtime` | `object` / `object` | `object` / `object` | ✅ |
 | Error stack depth | 4 | 4 | ✅ |
+| **CDP attachment artefacts, `Runtime.enable`** | — | **present** | ❌ **F3, remaining** |
+| **TLS / JA3 / JA4, HTTP/2** | — | **absent** | ❌ see §9 |
 
-**This is the ceiling.** Two hooks return their own source to one line of
-JavaScript. `makeNative()` in `evasion.js` masks `toString` for the functions
-it wraps, but not for every one, and the general problem is unfixable from
-inside the page: a script that patches a prototype can always be asked what it
-is. Closing **F3** means moving the spoofing below JavaScript — a patched
-engine, which is the single largest item in [`06_ROADMAP`](06_ROADMAP.md).
+The last two controls are the point of the row above them. Masking that
+returned `[native code]` for everything would be trivially detectable — a
+browser that calls your own just-declared function native is not a browser —
+so the map is consulted rather than assumed, and a non-callable `this` still
+throws what native throws.
 
-Everything else on this page is at parity. This row is not, and no amount of
-work on the other rows changes it.
+**The ceiling has moved, not gone.** What is reachable from JavaScript is now
+shaped like the real thing, verified across page, iframe and worker realms,
+including the obvious bypass of borrowing a clean `Function.prototype
+.toString` from a fresh realm. What has not changed is *why* F3 exists: the
+spoofing still runs in the page, and a script that patches a prototype can in
+principle always be asked what it is. CDP attachment artefacts remain, and
+TLS/HTTP-2 are untouched below.
+
+So the honest statement is narrower than before and still not "undetectable":
+**the cheap checks no longer work; the structural ones still do.** Closing F3
+properly still means moving the spoofing below JavaScript — a patched engine,
+the largest item in [`06_ROADMAP`](06_ROADMAP.md).
 
 ---
 
@@ -400,9 +423,11 @@ narrows it. Third-party checkers still have not been run — see the header.
 | Realm agreement | ✅ all five worker types + iframes |
 | Fonts | 🟡 documented residual, product reports it |
 | Config exposure | ✅ fixed this pass (F41) |
+| Hook source and shape | ✅ masked and native-shaped, all realms (F3) |
+| deviceMemory plausibility | ✅ fixed this pass (F44) |
 | Identity selection | ✅ fixed this pass (F42) |
 | Direct route (no proxy) | ✅ measured in §11; fixed this pass (F43) |
-| **Hook detectability (F3)** | ❌ **open — architectural** |
+| **Hook detectability (F3)** | 🟡 **JS surface closed; architectural ceiling open** |
 | **TLS / HTTP/2** | ❌ **absent** |
 
 **The honest one-line answer to "is it undetectable?" is no.** What can be

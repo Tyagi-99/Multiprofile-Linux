@@ -33,10 +33,18 @@ Legend: ✅ works · 🟡 partial, qualified in the notes · ❌ absent · — n
 | Engine updates independent of app | ❌ distro-managed | ✅ | ✅ | ✅ | P1 | L |
 
 **This is the finding that matters most.** Row 1 is **F3**, and it sets the
-ceiling for everything in §2: JS-level hooks are observable through
-`Function.prototype.toString`, and no amount of work below the engine closes
-that. The three competitors all ship patched engines. A buyer comparing on
-detection rate will find the difference.
+ceiling for everything in §2. The three competitors all ship patched engines.
+A buyer comparing on detection rate will find the difference.
+
+What changed since this table was first written: the *cheap* half of F3 is
+closed. `Function.prototype.toString` no longer returns the hooks' source, in
+any realm including one borrowed from a fresh iframe, and the hooks are now
+shaped like native methods — no own `prototype`, not constructible — which was
+a separate one-line identification that needed no source at all
+([`04`](04_FINGERPRINT_TEST_RESULTS.md) §8). What did not change is why the
+row is ❌: the spoofing still runs **in the page**, so CDP attachment artefacts
+remain and the structural checks still work. The honest claim is narrower than
+before and is still not "undetectable".
 
 ---
 
