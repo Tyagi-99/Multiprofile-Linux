@@ -134,17 +134,17 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: src/static must match a fresh build
-        # The .deb ships src/static, not the frontend source. If a console
-        # change is committed without re-running the export, the package
-        # silently ships the previous UI.
-        run: |
-          node scripts/sync-static.mjs
-          if ! git diff --quiet -- ../src/static; then
-            echo "::error::src/static is stale — run 'npm run publish' in frontend/ and commit the result"
-            git diff --stat -- ../src/static
-            exit 1
-          fi
+      - name: src/static must be built from the committed console source
+        # The .deb ships src/static, not the frontend source, so a console
+        # change committed without re-exporting silently ships the previous
+        # UI. That is what this guards.
+        #
+        # It compares source hashes, not build outputs. The previous version
+        # rebuilt here and diffed against the committed bundle -- two builds
+        # from two Node versions, whose Next.js output is not byte-identical,
+        # so it failed on every run including on main. A gate that is always
+        # red gets ignored, which is worse than not having one.
+        run: node scripts/check-static-fresh.mjs
 
   package:
     name: Build .deb

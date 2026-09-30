@@ -29,7 +29,8 @@
     "export": "NEXT_TELEMETRY_DISABLED=1 next build",
     "lint": "eslint src --max-warnings=0",
     "publish": "NEXT_TELEMETRY_DISABLED=1 next build && node scripts/sync-static.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check-static": "node scripts/check-static-fresh.mjs"
   },
   "version": "1.9.0"
 }
