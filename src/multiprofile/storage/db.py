@@ -188,7 +188,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_profile ON jobs(profile_id);
-CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id);
+-- idx_jobs_batch is NOT here: it indexes a column v7 adds by ALTER, and this
+-- script runs *before* migrations. On an existing database the CREATE TABLE
+-- above is a no-op, so the column does not exist yet and the index fails --
+-- taking the whole startup with it. See _ensure_late_indexes.
 
 -- Job batches (v7). F20: the durable queue is per-profile, and the operator
 -- works in batches -- "launch these eight" is one thing they started, with one
@@ -310,6 +313,24 @@ CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON api_tokens(revoked_at);
 """
 
 
+def _ensure_late_indexes(conn: sqlite3.Connection) -> None:
+    """Indexes over columns that a migration adds, created after it has run.
+
+    `_SCHEMA_SQL` runs before `_migrate`, and on an existing database its
+    ``CREATE TABLE IF NOT EXISTS`` statements are no-ops -- so a column added
+    by ALTER does not exist yet when that script executes. An index over one
+    therefore raises ``no such column`` and takes the whole startup down.
+
+    This was not hypothetical. v7 put ``idx_jobs_batch ON jobs(batch_id)`` in
+    the base schema, which is correct for a fresh database and fatal for an
+    upgraded one: every existing install would have failed to open its own
+    control database on first launch after the update. The entire test suite
+    missed it because every test starts from an empty directory, which is
+    exactly the case that works.
+    """
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id)")
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     with conn:
         conn.executescript(_SCHEMA_SQL)
@@ -321,6 +342,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, _utcnow()),
             )
+        # After migrations, and unconditionally: a database already at the
+        # current version may still predate an index if an earlier startup
+        # died between the ALTER and the CREATE INDEX.
+        _ensure_late_indexes(conn)
     # Sanity: WAL must actually be on (some filesystems/configs refuse it).
     mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
     if str(mode).lower() != "wal":
