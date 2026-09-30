@@ -153,10 +153,54 @@ jobs:
           if len(set(found.values())) != 1 or None in found.values():
               sys.exit("version markers disagree")
           EOF
+      - name: The fallback builder must agree with dpkg-deb
+        # build-deb.sh prefers dpkg-deb where it exists and falls back to
+        # scripts/build_deb.py where it does not -- which is the development
+        # machine. If the two ever disagree, the package the developer tests
+        # is not the package CI ships, so they are compared on every build.
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP '^VERSION=\K\S+' build-deb.sh)
+          STAGE="dist/multiprofile-native_${VERSION}_amd64"
+          DEB="dist/multiprofile-native_${VERSION}_amd64.deb"
+          python3 scripts/build_deb.py "$STAGE" /tmp/py.deb
+          dpkg-deb -I /tmp/py.deb > /dev/null
+          dpkg-deb -c /tmp/py.deb | awk '{print $6}' | sort > /tmp/py.list
+          dpkg-deb -c "$DEB"      | awk '{print $6}' | sort > /tmp/dpkg.list
+          diff /tmp/py.list /tmp/dpkg.list
+          echo "the fallback builder agrees with dpkg-deb"
+
       - uses: actions/upload-artifact@v4
         with:
           name: deb
           path: dist/*.deb
+
+  release-lifecycle:
+    name: Signed release lifecycle
+    runs-on: ubuntu-latest
+    needs: [package]
+    # F12. The finding was that the packaging path could not be exercised on
+    # the development machine and so shipped unverified. This runs the whole
+    # of it in a clean Debian container on every push: build two versions,
+    # sign a repository with a key generated for this run and discarded with
+    # the container, publish deltas, install, update across the delta, verify
+    # the signature chain, prove a tampered channel is refused, roll back,
+    # and confirm the rolled-back install still serves its API.
+    #
+    # No production secret is involved. The signing key is disposable by
+    # construction: it is generated inside the container and never leaves it.
+    container:
+      image: debian:bookworm-slim
+    steps:
+      - name: Install the tools the lifecycle needs
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            git ca-certificates python3 python3-flask python3-websocket \
+            gnupg gpgv zstd dpkg-dev binutils file curl
+      - uses: actions/checkout@v4
+      - name: Build, sign, publish, install, update, verify, roll back
+        run: bash scripts/release-lifecycle-inner.sh
 
   audit:
     name: Dependency audit

@@ -1,0 +1,21 @@
+# Multiprofile update channel.
+#
+# Copy to /etc/multiprofile/update.conf and set `url` to your channel. Until
+# this file exists, `multiprofile-update` reports that no channel is
+# configured and does nothing — which is the correct behaviour for a build
+# that was installed from a file rather than from a repository.
+#
+# The keyring must be the *binary* form of the archive public key:
+#
+#   gpg --dearmor < multiprofile-archive-keyring.asc \
+#     > /usr/share/keyrings/multiprofile-archive-keyring.gpg
+#
+# Verify the fingerprint out of band before trusting it. A key fetched over
+# the same channel it is meant to authenticate proves nothing.
+
+[update]
+url = https://updates.example.invalid/multiprofile
+suite = stable
+component = main
+arch = amd64
+keyring = /usr/share/keyrings/multiprofile-archive-keyring.gpg

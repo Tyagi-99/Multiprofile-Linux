@@ -33,6 +33,15 @@ mkdir -p "$STAGE/usr/share/icons/hicolor/scalable/apps"
 cp packaging/icons/multiprofile.svg "$STAGE/usr/share/icons/hicolor/scalable/apps/"
 cp README.md "$STAGE/usr/share/doc/$NAME/"
 
+# The updater (F12). Shipped in the package it updates, so an install that
+# predates a security fix still has a way to reach one.
+install -Dm0755 packaging/update/multiprofile-update "$STAGE/usr/bin/multiprofile-update"
+# The channel config is a template, not a live config: this build is not
+# published anywhere yet, and writing a URL that 404s would be worse than
+# having none. The postinst does not install it; docs/UPDATES.md says how.
+install -Dm0644 packaging/update/update.conf.example \
+  "$STAGE/usr/share/doc/$NAME/update.conf.example"
+
 cat > "$STAGE/usr/bin/multiprofile" <<'PY'
 #!/usr/bin/env python3
 import os, sys
@@ -50,6 +59,25 @@ if ! grep -q '^Installed-Size:' "$STAGE/DEBIAN/control"; then
 fi
 
 mkdir -p "$OUT"
-dpkg-deb --build "$STAGE" "$OUT/${NAME}_${VERSION}_amd64.deb"
-dpkg-deb -I "$OUT/${NAME}_${VERSION}_amd64.deb" | head -30
-echo "Built: $OUT/${NAME}_${VERSION}_amd64.deb"
+DEB="$OUT/${NAME}_${VERSION}_amd64.deb"
+
+# F12: this used to be `dpkg-deb --build` and nothing else, so the script
+# could not run on the machine the product is developed on -- Arch has no
+# dpkg-deb -- and every packaging change shipped having been built exactly
+# once, in a CI job, and never opened. A release process that cannot be
+# exercised is one that fails on the day it matters.
+#
+# dpkg-deb stays the preferred path where it exists, because it is the
+# canonical tool. scripts/build_deb.py writes the same three-member ar
+# archive from the standard library, so the script now runs anywhere and the
+# two are checked against each other in CI.
+if command -v dpkg-deb >/dev/null 2>&1; then
+  dpkg-deb --build --root-owner-group "$STAGE" "$DEB"
+  dpkg-deb -I "$DEB" | head -30
+else
+  echo "dpkg-deb not found; building with scripts/build_deb.py"
+  python3 "$ROOT/scripts/build_deb.py" "$STAGE" "$DEB"
+fi
+
+sha256sum "$DEB" | tee "$DEB.sha256"
+echo "Built: $DEB"
