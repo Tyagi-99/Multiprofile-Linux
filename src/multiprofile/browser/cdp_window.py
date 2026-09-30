@@ -100,7 +100,7 @@ def wait_cdp_ready(port: int, timeout_s: float = 8.0) -> dict[str, Any]:
             return data
         except CdpError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             last = str(e)
             time.sleep(0.15)
     raise CdpError("cdp_unreachable", f"CDP not ready on 127.0.0.1:{port}: {last}")
@@ -134,7 +134,7 @@ class CdpWindowController:
         if self._ws is not None:
             try:
                 self._ws.close()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
                 pass
             self._ws = None
 

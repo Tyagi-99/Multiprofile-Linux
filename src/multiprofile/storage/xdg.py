@@ -78,7 +78,7 @@ def record_permission_fault(path: Path | str, detail: str) -> None:
                 "ts": time.time(),
             })
         log.warning("could not tighten permissions on %s: %s", path, detail)
-    except Exception:  # noqa: BLE001 - reporting must not be able to fail
+    except Exception:  # noqa: BLE001,S110 - reporting must not be able to fail
         pass
 
 

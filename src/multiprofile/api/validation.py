@@ -333,11 +333,11 @@ def _known_device_ids() -> set[str] | None:
     """Known device preset ids, or None if the registry is unavailable."""
     try:
         from ..devices.registry import registry
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     try:
         return {p.id for p in registry.list()}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
 
 

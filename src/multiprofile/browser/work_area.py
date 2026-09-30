@@ -307,7 +307,7 @@ class WorkAreaProvider:
                 return env
         except WorkAreaError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             reasons.append(f"env: {e}")
 
         # Wayland first, when this is a Wayland session. The compositor's own
@@ -329,11 +329,11 @@ class WorkAreaProvider:
         net = None
         try:
             xrandr = _from_xrandr_primary()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             reasons.append(f"xrandr_primary: {e}")
         try:
             net = _from_net_workarea()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             reasons.append(f"_NET_WORKAREA: {e}")
 
         if xrandr and net:
@@ -357,7 +357,7 @@ class WorkAreaProvider:
                 log.info("work area from xdpyinfo: %s", area)
                 return area
             reasons.append("xdpyinfo: unavailable")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             reasons.append(f"xdpyinfo: {e}")
 
         # Name the actual situation rather than only the remedy. "Set this

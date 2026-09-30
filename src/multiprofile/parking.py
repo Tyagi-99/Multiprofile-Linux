@@ -73,7 +73,7 @@ def _read_activity() -> dict[str, float]:
         raw = _activity_path().read_text(encoding="utf-8")
         data = json.loads(raw) if raw.strip() else {}
         return {str(k): float(v) for k, v in data.items() if isinstance(v, (int, float))}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return {}
 
 
@@ -128,7 +128,7 @@ def _disk_runtime_state() -> dict[str, dict[str, Any]]:
         raw = (cache_dir() / "runtime.json").read_text(encoding="utf-8")
         data = json.loads(raw) if raw.strip() else {}
         return {str(k): v for k, v in data.items() if isinstance(v, dict)}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return {}
 
 
@@ -146,7 +146,7 @@ def is_profile_running(profile_id: str) -> bool:
         rt = get_runtime(str(profile_id))
         if rt is not None and rt.launch_state == LaunchState.RUNNING:
             return True
-    except Exception:  # noqa: BLE001 - degrade gracefully
+    except Exception:  # noqa: BLE001,S110 - degrade gracefully
         pass
     return False
 
@@ -352,7 +352,7 @@ def read_profiles_runtime() -> tuple[str, list[dict[str, Any]]]:
                         "state": str(r["state"]),
                         "pid": r["pid"] if "pid" in r.keys() else None,
                     })
-                except Exception:
+                except Exception:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
                     continue
         log.info("read %d rows from WS1 profiles_runtime table", len(rows))
         return "ws1", rows

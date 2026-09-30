@@ -129,7 +129,7 @@ class PinnedCdpSession:
         self._closed = True
         try:
             self._ws.close()
-        except Exception:  # noqa: BLE001 - best effort
+        except Exception:  # noqa: BLE001,S110 - best effort
             pass
 
     def __enter__(self) -> "PinnedCdpSession":
@@ -149,7 +149,7 @@ def open_pinned_cdp_session(port: int) -> PinnedCdpSession | None:
     """
     try:
         targets = _cdp_get(port, "/json")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.debug("CDP /json failed on port %s: %s", port, e)
         return None
     picked_url: str | None = None

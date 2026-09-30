@@ -51,7 +51,7 @@ def _resolve_device_preset(profile: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         preset = _registry.get(device_id)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.warning("device preset lookup failed: %s", e)
         return None
     if preset is None:
@@ -59,7 +59,7 @@ def _resolve_device_preset(profile: dict[str, Any]) -> dict[str, Any] | None:
         return None
     try:
         return preset.to_mobile_config_dict()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.warning("device preset serialization failed: %s", e)
         return None
 

@@ -69,7 +69,7 @@ def configure(path: str | os.PathLike[str] | None) -> None:
         if _conn is not None:
             try:
                 _conn.close()
-            except Exception:  # noqa: BLE001 - best effort
+            except Exception:  # noqa: BLE001,S110 - best effort
                 pass
             _conn = None
         _schema_ready = False
@@ -128,7 +128,7 @@ def _connect() -> sqlite3.Connection:
         if _conn is not None and _conn_path != db_path():
             try:
                 _conn.close()
-            except Exception:  # noqa: BLE001 - best effort
+            except Exception:  # noqa: BLE001,S110 - best effort
                 pass
             _conn = None
             _schema_ready = False
@@ -983,7 +983,7 @@ def close() -> None:
         if _conn is not None:
             try:
                 _conn.close()
-            except Exception:  # noqa: BLE001 - best effort
+            except Exception:  # noqa: BLE001,S110 - best effort
                 pass
             _conn = None
         _schema_ready = False

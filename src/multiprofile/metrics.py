@@ -37,7 +37,7 @@ def _btime() -> float | None:
             for line in f:
                 if line.startswith("btime "):
                     return float(line.split()[1])
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     return None
 
@@ -47,7 +47,7 @@ def _parse_stat(pid: int) -> dict[str, int] | None:
     try:
         with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
             text = f.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     try:
         # comm (field 2) may contain spaces/parens: split on the LAST ")".
@@ -57,7 +57,7 @@ def _parse_stat(pid: int) -> dict[str, int] | None:
         stime = int(rest[12])
         starttime = int(rest[19])
         return {"utime": utime, "stime": stime, "starttime": starttime}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
 
 
@@ -68,7 +68,7 @@ def _read_rss_kb(pid: int) -> int | None:
             for line in f:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1])
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     return None
 
@@ -82,7 +82,7 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True  # exists, we just can't signal it
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return False
     return True
 
@@ -218,7 +218,7 @@ def running_profile_ids() -> list[str]:
     try:
         raw = (cache_dir() / "runtime.json").read_text(encoding="utf-8")
         data = json.loads(raw) if raw.strip() else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return []
     return [pid for pid, e in data.items() if isinstance(e, dict) and e.get("status") == "running"]
 

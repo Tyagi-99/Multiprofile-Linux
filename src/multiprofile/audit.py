@@ -48,7 +48,7 @@ def read_audit(limit: int = 100) -> list[dict[str, Any]]:
         return []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return []
     items: list[dict[str, Any]] = []
     for line in lines[-max(1, limit) :]:
@@ -57,6 +57,6 @@ def read_audit(limit: int = 100) -> list[dict[str, Any]]:
             continue
         try:
             items.append(json.loads(line))
-        except Exception:
+        except Exception:  # noqa: BLE001 - one malformed entry must not cost the rest
             continue
     return list(reversed(items))

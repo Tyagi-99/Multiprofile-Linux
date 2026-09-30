@@ -138,7 +138,7 @@ def _binary_exposes_devtools(path: str, timeout: int = 25) -> Tuple[bool, str]:
             except Exception:  # noqa: BLE001
                 try:
                     proc.kill()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001,S110
                     pass
         import shutil as _shutil
 
@@ -262,7 +262,7 @@ def _cleanup_shared() -> None:
         except Exception:  # noqa: BLE001
             try:
                 proc.kill()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001,S110
                 pass
     if tmpdir and os.path.isdir(tmpdir):
         import shutil as _shutil
@@ -288,7 +288,7 @@ def _get_shared_browser(binary: str) -> Tuple[subprocess.Popen, int]:
     if not _wait_devtools(port):
         try:
             proc.terminate()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001,S110
             pass
         raise RuntimeError(f"Chromium at {binary} did not expose DevTools on port {port}")
     _shared["proc"] = proc
@@ -395,12 +395,12 @@ def _cdp_round_trip(binary: str, preset: DevicePreset, timeout: int = 25) -> Tup
         try:
             if ws is not None:
                 ws.close()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001,S110
             pass
         if target_id:
             try:
                 _http_json("GET", f"http://127.0.0.1:{port}/json/close/{target_id}", timeout=5)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001,S110
                 pass
 
 

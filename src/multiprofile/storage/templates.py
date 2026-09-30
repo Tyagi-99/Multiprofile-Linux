@@ -45,7 +45,7 @@ def _read_json(path: Path, default):
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return default
 
 

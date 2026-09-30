@@ -583,7 +583,7 @@ class IdentityInjector:
         try:
             if self._ws is not None:
                 self._ws.close()
-        except Exception:  # noqa: BLE001 - best effort
+        except Exception:  # noqa: BLE001,S110 - best effort
             pass
         self._ws = None
 
@@ -751,7 +751,7 @@ class IdentityInjector:
                 # but a worker started after a timezone change would not.
                 self._send("Emulation.setTimezoneOverride",
                            {"timezoneId": self.timezone_id}, session_id=session_id)
-        except Exception as e:  # never leave a worker frozen
+        except Exception as e:  # never leave a worker frozen  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             log.warning("worker identity failed for %s: %s", self.profile_id, e)
             self.status.detail.append(f"worker identity failed: {e}")
         finally:

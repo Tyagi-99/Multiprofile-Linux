@@ -452,9 +452,9 @@ class ProxyHealthManager:
                     country = data.get("country") or None
                     asn = data.get("org") or None
                     return ip, country, asn, None
-                except Exception:
+                except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
                     return body.strip()[:64] or None, None, None, None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
             return None, None, None, str(e)
 
 
@@ -1040,7 +1040,7 @@ def run_diagnostics(
             # egress path, matching what a DIRECT Chrome launch would use.
             opener = urllib.request.build_opener()
             data = _fetch_echo_geo(opener, timeout)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             diag.error = f"direct route failed: {e}"
             diag.dns = _measure_dns(net_config, timeout)
             diag.ipv6 = _measure_ipv6(net_config, timeout)
@@ -1127,7 +1127,7 @@ def run_diagnostics(
         diag.dns = _measure_dns(net_config, timeout)
         diag.ipv6 = _measure_ipv6(net_config, timeout)
         return diag
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
         diag.error = f"proxy request failed ({proxy.masked_str()}): {e}"
         diag.dns = _measure_dns(net_config, timeout)
         diag.ipv6 = _measure_ipv6(net_config, timeout)

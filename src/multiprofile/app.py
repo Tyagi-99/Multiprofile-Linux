@@ -134,7 +134,7 @@ def open_ui(url: str = "http://127.0.0.1:8765/", title: str = "Multiprofile") ->
             icon=icon,
         )
         return
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.warning("pywebview unavailable (%s); opening system browser", e)
         webbrowser.open(url)
         log.info("UI opened in system browser: %s", url)

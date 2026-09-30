@@ -67,7 +67,7 @@ def _read() -> list[dict[str, Any]]:
         return []
     try:
         items = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return []
     return items if isinstance(items, list) else []
 
