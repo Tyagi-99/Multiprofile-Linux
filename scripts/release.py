@@ -272,7 +272,17 @@ def main(argv: list[str]) -> int:
     for deb in args.deb:
         if not deb.is_file():
             raise SystemExit(f"no such package: {deb}")
-        shutil.copy2(deb, pool / deb.name)
+        # Named from the control fields, not from the input filename. A
+        # Debian pool file is `package_version_arch.deb` by convention, and
+        # several things downstream rely on it -- the delta verifier finds a
+        # base package by that name. Copying `v1.deb` in as `v1.deb` produced
+        # a repository whose indices were all correct and whose base package
+        # could not be located, which is exactly the kind of break that only
+        # shows up once something actually tries to use the channel.
+        fields = _control_of(deb)
+        name = (f"{fields['Package']}_{fields['Version']}_"
+                f"{fields.get('Architecture', 'all')}.deb")
+        shutil.copy2(deb, pool / name)
 
     build_packages_index(repo, args.suite, args.component, args.arch)
     manifest = build_deltas(repo, args.component)
