@@ -239,14 +239,22 @@ def _run_job(job_id: str) -> None:
                 return
             try:
                 set_runtime(pid, "queued", None)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001 - the batch must not stop over bookkeeping
+                # F11: the console reads this state. Swallowing the write left a
+                # profile displaying the previous one indefinitely -- a failed
+                # launch that still shows "queued" is a row the operator waits on
+                # forever.
+                log.warning("job %s: could not mark %s as queued: %s", job_id, pid, e)
             got = browser_manager.acquire_slot(pid, timeout=180.0)
             if not got:
                 try:
                     set_runtime(pid, "failed", None)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - the batch must not stop over bookkeeping
+                    # F11: the console reads this state. Swallowing the write left a
+                    # profile displaying the previous one indefinitely -- a failed
+                    # launch that still shows "queued" is a row the operator waits on
+                    # forever.
+                    log.warning("job %s: could not mark %s as failed: %s", job_id, pid, e)
                 _record(index, {
                     "profileId": pid, "ok": False,
                     "error": "concurrency_timeout", "status": "failed",
@@ -262,17 +270,25 @@ def _run_job(job_id: str) -> None:
                     browser_manager.release_slot(pid)
                     try:
                         set_runtime(pid, "failed", None)
-                    except Exception:
-                        pass
+                    except Exception as e:  # noqa: BLE001 - the batch must not stop over bookkeeping
+                        # F11: the console reads this state. Swallowing the write left a
+                        # profile displaying the previous one indefinitely -- a failed
+                        # launch that still shows "queued" is a row the operator waits on
+                        # forever.
+                        log.warning("job %s: could not mark %s as failed: %s", job_id, pid, e)
                 else:
                     browser_manager.mark_running(pid)
                 _record(index, result)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
                 browser_manager.release_slot(pid)
                 try:
                     set_runtime(pid, "failed", None)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - the batch must not stop over bookkeeping
+                    # F11: the console reads this state. Swallowing the write left a
+                    # profile displaying the previous one indefinitely -- a failed
+                    # launch that still shows "queued" is a row the operator waits on
+                    # forever.
+                    log.warning("job %s: could not mark %s as failed: %s", job_id, pid, e)
                 _record(index, {
                     "profileId": pid, "ok": False, "error": str(e), "status": "failed",
                 })
@@ -312,14 +328,14 @@ def _run_job(job_id: str) -> None:
                         "reasons": e.reasons,
                         "results": [],
                     }
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
                     tile_info = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
             else:
                 plan, meta = layout_mgr.best_effort_plan(launched_ids)
                 if plan is not None:
                     try:
                         tile_info = layout_mgr.apply_plan(plan)
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
                         tile_info = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
                 else:
                     tile_info = meta
@@ -337,7 +353,7 @@ def _run_job(job_id: str) -> None:
             try:
                 result = stop_profile(pid)
                 result = {**result, "profileId": pid}
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
                 result = {"profileId": pid, "ok": False, "error": str(e)}
             results.append(result)
             browser_manager.release_slot(pid)

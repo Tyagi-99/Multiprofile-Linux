@@ -504,7 +504,7 @@ def _release_cdp_port(profile_id: str) -> None:
 
         rt = get_runtime(profile_id)
         release_localhost_port(getattr(rt, "cdp_port", None) if rt else None)
-    except Exception:  # noqa: BLE001 - never let bookkeeping block a stop
+    except Exception:  # noqa: BLE001,S110 - never let bookkeeping block a stop
         pass
 
 
@@ -737,7 +737,7 @@ def _hold_device_session(profile_id: str, pid: int, sess: Any) -> None:
         finally:
             try:
                 sess.close()
-            except Exception:  # noqa: BLE001 - best effort
+            except Exception:  # noqa: BLE001,S110 - best effort
                 pass
 
     threading.Thread(
@@ -995,8 +995,22 @@ def launch_profile(
         try:
             update_profile(profile_id, {"fingerprint": fingerprint, "seed": fingerprint.get("seed")})
             profile = get_profile(profile_id) or profile
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - this launch is still viable
+            # F11, on the identity path. The launch continues with the
+            # fingerprint in hand, so this browser is fine -- but nothing was
+            # written, so the *next* launch rebuilds it. That is only harmless
+            # while the seed is stable, and a profile whose seed was generated
+            # here and never stored is a profile whose identity can change
+            # between runs. Being the same machine every time is the promise
+            # the whole product rests on, so a failure to persist it is not a
+            # detail to swallow.
+            identity_faults.record(
+                "fingerprint_not_persisted",
+                f"generated fingerprint could not be saved ({e}); the next "
+                "launch will rebuild it and may not match this one",
+                where="browser.launcher",
+                profile_id=profile_id,
+            )
 
     # ------------------------------------------------------------------
     # Chrome binary + identity-script bundle
@@ -1234,7 +1248,7 @@ def launch_profile(
         )
         if _fc is not None:
             env["FONTCONFIG_FILE"] = str(_fc)
-    except Exception as e:  # never let font policy stop a launch
+    except Exception as e:  # never let font policy stop a launch  # noqa: BLE001 - the failure is recorded in the value this assigns
         _fault(notes, "font_policy_failed", str(e), profile_id=profile_id)
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -1438,7 +1452,7 @@ def launch_profile(
                 last_proxy_check=proxy_health.checked_at,
             )
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
         set_launch_state(
             profile_id,
             LaunchState.CDP_FAILED,
@@ -1458,7 +1472,7 @@ def launch_profile(
     try:
         if proc.stderr:
             proc.stderr.close()
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
         pass
 
     audit_log(

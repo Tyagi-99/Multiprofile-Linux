@@ -166,7 +166,7 @@ def _start_reaper() -> None:
                 reaped = reap_orphans()
                 for item in reaped:
                     audit_log("reap", profile_id=item.get("profileId"), ok=True, detail=item)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
                 log.warning("orphan reaper error: %s", e)
             time.sleep(15)
 
@@ -334,7 +334,7 @@ def _read_all_audit() -> list:
     """Read the full audit log for keyset pagination (newest-unbounded)."""
     try:
         return read_audit(limit=1_000_000)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.warning("audit read failed: %s", e)
         return []
 
@@ -343,7 +343,7 @@ def _runtime_state_name(profile_id: str) -> str | None:
     """Best-effort current launch state name for event payloads."""
     try:
         rt = get_runtime(profile_id or "")
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     if not rt:
         return None
@@ -369,7 +369,7 @@ def create_app() -> Flask:
     def health():
         try:
             reaped = reap_orphans()
-        except Exception:
+        except Exception:  # noqa: BLE001 - the fallback is the answer: this could not be confirmed
             reaped = []
 
         chrome_path = None
@@ -395,26 +395,26 @@ def create_app() -> Flask:
                     "unprivilegedUserns": st.unprivileged_userns,
                     "runningAsRoot": st.running_as_root,
                 }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             sandbox_info = {"ok": False, "reason": f"probe_failed: {e}"}
         try:
             wa = WorkAreaProvider().detect()
             work_area_info = {"x": wa.x, "y": wa.y, "w": wa.w, "h": wa.h, "source": wa.source, "ok": True}
         except WorkAreaError as e:
             work_area_info = {"ok": False, "error": "work_area_unavailable", "message": str(e), "reasons": e.reasons}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             work_area_info = {"ok": False, "error": "work_area_unavailable", "message": str(e)}
 
         static_ok = False
         try:
             static_ok = (static_dir() / "index.html").exists()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - False is the answer: the console assets could not be confirmed present
             pass
 
         extension_ok = False
         try:
             extension_ok = (extension_src() / "manifest.json").exists()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - False is the answer: the evasion source could not be confirmed present
             pass
 
         from ..storage.db import db_path as _db_path
@@ -427,18 +427,27 @@ def create_app() -> Flask:
             test.write_text("ok", encoding="utf-8")
             test.unlink(missing_ok=True)
             profiles_writable = True
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
             pass
 
         items = []
+        profiles_error = None
         try:
             items = load_profiles()
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - health must answer even when the store cannot
+            # F11: this returned an empty list, so /api/health -- the endpoint
+            # whose job is to say whether anything is wrong -- reported a
+            # healthy install with zero profiles when the store was
+            # unreadable. "No profiles" and "could not read the profiles"
+            # have to be different answers here of all places.
+            profiles_error = str(e)
+            log.warning("health: profile store unreadable: %s", e)
 
         return jsonify(
             {
-                "ok": True,
+                # False when the profile store could not be read: an install
+                # whose profiles are unreachable is not ok, whatever else is.
+                "ok": profiles_error is None,
                 "app": "multiprofile-native",
                 "version": __version__,
                 "chrome_path": chrome_path,
@@ -453,6 +462,10 @@ def create_app() -> Flask:
                 "profiles_store": "sqlite",
                 "profiles_writable": profiles_writable,
                 "count": len(items),
+                # Always present. null is "the store was read"; a string is
+                # "count is 0 because it could not be", which is the one case
+                # a health check must not render as a healthy empty fleet.
+                "profilesError": profiles_error,
                 "data_dir": str(data_dir()),
                 "slots": browser_manager.slot_status(),
                 "maxConcurrentProfiles": settings.max_concurrent_profiles,
@@ -1403,7 +1416,7 @@ def create_app() -> Flask:
     def jobs_get(job_id: str):
         try:
             job = get_job(job_id)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             log.warning("job lookup unavailable: %s", e)
             job = None
             unavailable = True
@@ -1440,7 +1453,7 @@ def create_app() -> Flask:
             ids = [ids]
         try:
             result = get_layout_manager().tile_running(ids)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             result = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
         # Always 200 with ok flag — client decides; browsers stay up.
         return jsonify(result)
@@ -1449,7 +1462,7 @@ def create_app() -> Flask:
     def windows_layout():
         try:
             snap = get_layout_manager().layout_snapshot()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             snap = {"ok": False, "error": str(e), "profiles": []}
         return jsonify(snap)
 
@@ -1575,11 +1588,25 @@ def create_app() -> Flask:
 
     @app.post("/api/profiles/<profile_id>/open-folder")
     def open_folder(profile_id: str):
+        """Open the profile's directory in the desktop file manager.
+
+        F11: this swallowed the failure and returned ok:True regardless, so a
+        host with no `xdg-open` -- a server install, a bare window manager --
+        told the operator the folder had opened and opened nothing. Reporting
+        success for work that did not happen is the defect this whole audit
+        is named after, and it was two lines from the console's own button.
+        """
         path = chrome_profile_dir(profile_id)
         try:
             subprocess.Popen(["xdg-open", str(path)])
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - the path is still useful to report
+            log.warning("xdg-open failed for %s: %s", path, e)
+            return jsonify({
+                "ok": False,
+                "error": "open_failed",
+                "message": f"Could not open a file manager: {e}",
+                "path": str(path),
+            }), 500
         return jsonify({"ok": True, "path": str(path)})
 
     @app.post("/api/profiles/switch-all-direct")
@@ -1653,7 +1680,7 @@ def create_app() -> Flask:
                 # Never expose credentials
                 "proxy": net.proxy.to_dict() if net.proxy else None,
             })
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
             return jsonify({"ok": False, "mode": net.mode.value, "error": str(e)}), 500
 
     # ------------------------------------------------------------------ #
@@ -1716,7 +1743,7 @@ def create_app() -> Flask:
         try:
             h = provider.health()
             return jsonify({"ok": h.ok, "gatewayId": gw_id, "health": h.to_dict()})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
             return jsonify({"ok": False, "gatewayId": gw_id, "error": str(e)}), 500
 
     @app.post("/api/gateways/<gw_id>/provision")
@@ -1744,12 +1771,12 @@ def create_app() -> Flask:
     try:
         from ..devices.routes import register_devices_routes
         register_devices_routes(app)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("devices routes not registered: %s", e)
     try:
         from ..network_routes import register_network_routes
         register_network_routes(app)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("network routes not registered: %s", e)
 
     # ------------------------------------------------------------------ #
@@ -1761,7 +1788,7 @@ def create_app() -> Flask:
     # bus accessor), else an in-process fallback bus.
     try:
         register_events_routes(app)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("events routes not registered: %s", e)
 
     # ------------------------------------------------------------------ #
@@ -1774,7 +1801,7 @@ def create_app() -> Flask:
         register_metrics_routes(app)
     except ImportError:
         log.info("metrics routes not present (Workstream 2 pending)")
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("metrics routes not registered: %s", e)
     # ------------------------------------------------------------------ #
     #  v1.7.0 startup sequence: control-plane recovery + durable job      #

@@ -62,12 +62,32 @@ def _ensure_seed(profile: dict[str, Any]) -> None:
 
 
 def _attach_fingerprint(profile: dict[str, Any]) -> None:
+    """Derive and attach this profile's fingerprint.
+
+    F11, on the identity path. A failure here used to leave the profile with
+    no fingerprint and say nothing, which is indistinguishable from a profile
+    that simply has not been launched yet -- the launcher builds one on
+    demand for exactly that case. So the profile was created, looked normal
+    in the console, and the reason its identity was derived later rather than
+    at creation was nowhere on record.
+    """
     try:
         from ..fingerprint import build_fingerprint
 
         profile["fingerprint"] = build_fingerprint(profile)
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 - creation must not fail over this
+        try:
+            from ..browser import identity_faults
+
+            identity_faults.record(
+                "fingerprint_not_built",
+                f"could not derive a fingerprint at creation ({e}); the first "
+                "launch will build one instead",
+                where="storage.profiles",
+                profile_id=str(profile.get("id") or ""),
+            )
+        except Exception:  # noqa: BLE001,S110 - the recorder is the last thing that may break a create
+            pass
 
 
 def _resolve_user_agent_id(profile: dict[str, Any]) -> None:
@@ -167,7 +187,7 @@ def _normalize_fields(profile: dict[str, Any]) -> dict[str, Any]:
                     profile["proxyUser"] = parsed["username"]
                 if parsed.get("password"):
                     profile["proxyPass"] = parsed["password"]
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
             pass
     _ensure_seed(profile)
     return profile
@@ -178,7 +198,7 @@ def _read_json(path: Path, default):
         return default
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return default
 
 
@@ -272,7 +292,7 @@ def _decorate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             else:
                 p.setdefault("launchState", None)
                 p.setdefault("cdpPort", None)
-        except Exception:
+        except Exception:  # noqa: BLE001 - the failure is recorded in the value this assigns
             p.setdefault("launchState", None)
             p.setdefault("cdpPort", None)
     return items
@@ -480,14 +500,14 @@ def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
         if chrome_root.exists():
             try:
                 shutil.rmtree(chrome_root)
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
                 pass
         try:
             from ..cookies_store import cookies_path
             cp = cookies_path(profile_id)
             if cp.exists():
                 cp.unlink(missing_ok=True)
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
             pass
     return True
 
@@ -685,7 +705,7 @@ def clone_profile(
             cookies = _lc(profile_id)
             if cookies:
                 _sc(new_id, cookies)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             log.warning("clone: cookie copy failed: %s", e)  # non-fatal
 
     if mode == "full_session":
@@ -696,7 +716,7 @@ def clone_profile(
                 if dst_dir.exists():
                     _shutil.rmtree(dst_dir)
                 _shutil.copytree(src_dir, dst_dir)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             log.warning("clone: user-data copy failed: %s", e)  # non-fatal
 
     return new_profile
@@ -818,7 +838,7 @@ def reap_orphans() -> list[dict[str, Any]]:
     """Mark profiles idle when status=running but pid is dead."""
     try:
         from ..browser import manager as browser_manager
-    except Exception:
+    except Exception:  # noqa: BLE001 - the failure is recorded in the value this assigns
         browser_manager = None  # type: ignore
 
     reaped: list[dict[str, Any]] = []
@@ -830,7 +850,7 @@ def reap_orphans() -> list[dict[str, Any]]:
                 if browser_manager is not None:
                     try:
                         browser_manager.release_slot(p["id"])
-                    except Exception:
+                    except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
                         pass
                 reaped.append({"profileId": p["id"], "oldPid": pid})
     return reaped

@@ -239,8 +239,14 @@ def delete_everything(confirmation: str) -> dict[str, Any]:
         removed["profiles"] = db.count_profiles()
         removed["usageSessions"] = db.count_usage_sessions()
         removed["apiTokens"] = db.count_api_tokens(include_revoked=True)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001 - a preview must still be shown
+        # F11: these numbers are the whole point of a preview -- the operator
+        # is about to type DELETE EVERYTHING and is deciding on them. A count
+        # that silently went missing read as "nothing of that kind to
+        # delete", which is the most dangerous thing this dict could say
+        # wrongly, so the uncertainty is named instead.
+        log.warning("deletion preview: counts unavailable: %s", e)
+        removed["countsUnavailable"] = str(e)
     try:
         db_path = Path(db.db_path())
         db.close()
