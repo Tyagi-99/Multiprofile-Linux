@@ -50,11 +50,11 @@
     return 'function ' + (name || '') + '() { [native code] }';
   }
 
-  // Remembers what `fn` should say it is. The name is set as a real own
-  // property because native functions have one too -- writable:false,
-  // enumerable:false, configurable:true is the native descriptor shape, and
-  // omitting `writable` here gives exactly that.
-  function makeNative(fn, name) {
+  // Registers `fn` under `name` without changing what it is. For the few
+  // replacements that really are constructors -- RTCPeerConnection,
+  // Intl.DateTimeFormat -- where a `prototype` property is correct and
+  // removing it would be the anomaly.
+  function makeNativeCtor(fn, name) {
     try {
       if (name) {
         Object.defineProperty(fn, 'name', { value: name, configurable: true });
@@ -62,6 +62,52 @@
       nativeSources.set(fn, nativeSourceFor(name || fn.name));
     } catch(e) {}
     return fn;
+  }
+
+  // Returns a stand-in for `fn` shaped like a native *method*, registered so
+  // Function.prototype.toString will describe it as one.
+  //
+  // Found by diffing every hooked function against bare Chromium rather than
+  // by reading the code, because nothing in the source looks wrong:
+  //
+  //   Object.getOwnPropertyNames(HTMLCanvasElement.prototype.toDataURL)
+  //     stock Chromium   ["length", "name"]
+  //     a profile        ["length", "name", "prototype"]
+  //
+  // Every hook was a plain `function(){}`, and a plain function has an own
+  // `prototype` and is constructible. Native methods are neither, so
+  //
+  //   'prototype' in HTMLCanvasElement.prototype.toDataURL   -> true
+  //   new HTMLCanvasElement.prototype.toDataURL()            -> did not throw
+  //
+  // each identified the product in one line, without reading any source, and
+  // so survived the toString masking entirely. 22 of the replaced functions
+  // carried it.
+  //
+  // `prototype` is non-configurable, so it cannot be deleted, and a Proxy
+  // cannot hide it either -- the ownKeys invariant requires every
+  // non-configurable own key of the target to be reported. Method shorthand
+  // is the one construction that never creates it, and it is also not
+  // constructible, which is the other half of the same tell.
+  //
+  // `length` is restored explicitly because rest parameters report 0, and an
+  // arity that disagrees with the real method is the tell one level down.
+  function makeNative(fn, name) {
+    try {
+      const label = name || fn.name || '';
+      const arity = fn.length;
+      const holder = {
+        [label](...args) { return Reflect.apply(fn, this, args); }
+      };
+      const shim = holder[label];
+      Object.defineProperty(shim, 'length', { value: arity, configurable: true });
+      nativeSources.set(shim, nativeSourceFor(label));
+      return shim;
+    } catch(e) {
+      // Better a registered original than an unregistered one: the toString
+      // masking still applies, only the shape does not.
+      return makeNativeCtor(fn, name);
+    }
   }
 
   function applyNativeMasking(scope) {
@@ -675,7 +721,7 @@
   // WebRTC hardening when profile requests disable modes
   try {
     if (MP_WEBRTC_MODE === "disable") {
-      const StubPC = makeNative(function RTCPeerConnection() {
+      const StubPC = makeNativeCtor(function RTCPeerConnection() {
         throw new DOMException("WebRTC disabled for this profile", "NotSupportedError");
       }, 'RTCPeerConnection');
       window.RTCPeerConnection = StubPC;
@@ -684,7 +730,7 @@
       // Light candidate filter — strip host candidates when possible
       if (window.RTCPeerConnection) {
         const OrigPC = window.RTCPeerConnection;
-        window.RTCPeerConnection = makeNative(function RTCPeerConnection(config, constraints) {
+        window.RTCPeerConnection = makeNativeCtor(function RTCPeerConnection(config, constraints) {
           const cfg = Object.assign({}, config || {});
           if (!cfg.iceTransportPolicy) cfg.iceTransportPolicy = "relay";
           return new OrigPC(cfg, constraints);
@@ -797,7 +843,7 @@
       }
       PatchedDateTimeFormat.prototype = OriginalDateTimeFormat.prototype;
       PatchedDateTimeFormat.supportedLocalesOf = OriginalDateTimeFormat.supportedLocalesOf;
-      makeNative(PatchedDateTimeFormat, 'DateTimeFormat');
+      makeNativeCtor(PatchedDateTimeFormat, 'DateTimeFormat');
       scope.Intl.DateTimeFormat = PatchedDateTimeFormat;
 
       // 2. Intl.DateTimeFormat.prototype.resolvedOptions
@@ -809,14 +855,16 @@
         } catch(e) {}
         return res;
       };
-      makeNative(OriginalDateTimeFormat.prototype.resolvedOptions, 'resolvedOptions');
+      OriginalDateTimeFormat.prototype.resolvedOptions =
+        makeNative(OriginalDateTimeFormat.prototype.resolvedOptions, 'resolvedOptions');
 
       // 3. Date.prototype.getTimezoneOffset
       const originalGetTimezoneOffset = scope.Date.prototype.getTimezoneOffset;
       scope.Date.prototype.getTimezoneOffset = function() {
         return getTzOffsetMinutes(this, TARGET_TIMEZONE);
       };
-      makeNative(scope.Date.prototype.getTimezoneOffset, 'getTimezoneOffset');
+      scope.Date.prototype.getTimezoneOffset =
+        makeNative(scope.Date.prototype.getTimezoneOffset, 'getTimezoneOffset');
 
       // 4. Date.prototype.toString & toTimeString
       function formatTzDateString(d, tz, timeOnly) {
@@ -847,14 +895,16 @@
         if (isNaN(this.getTime())) return originalDateToString.apply(this, arguments);
         return formatTzDateString(this, TARGET_TIMEZONE, false);
       };
-      makeNative(scope.Date.prototype.toString, 'toString');
+      scope.Date.prototype.toString =
+        makeNative(scope.Date.prototype.toString, 'toString');
 
       const originalDateToTimeString = scope.Date.prototype.toTimeString;
       scope.Date.prototype.toTimeString = function() {
         if (isNaN(this.getTime())) return originalDateToTimeString.apply(this, arguments);
         return formatTzDateString(this, TARGET_TIMEZONE, true);
       };
-      makeNative(scope.Date.prototype.toTimeString, 'toTimeString');
+      scope.Date.prototype.toTimeString =
+        makeNative(scope.Date.prototype.toTimeString, 'toTimeString');
 
     } catch(e) {}
   }
@@ -886,11 +936,10 @@
         const origCandDesc = Object.getOwnPropertyDescriptor(scope.RTCIceCandidate.prototype, 'candidate');
         if (origCandDesc && origCandDesc.get) {
           const origGet = origCandDesc.get;
-          const newGet = function() {
+          const newGet = makeNative(function() {
             const val = origGet.call(this);
             return sanitizeCandidateStr(val);
-          };
-          makeNative(newGet, 'get candidate');
+          }, 'get candidate');
           Object.defineProperty(scope.RTCIceCandidate.prototype, 'candidate', {
             get: newGet,
             configurable: true,
@@ -901,13 +950,12 @@
         const origAddrDesc = Object.getOwnPropertyDescriptor(scope.RTCIceCandidate.prototype, 'address');
         if (origAddrDesc && origAddrDesc.get) {
           const origGet = origAddrDesc.get;
-          const newGet = function() {
+          const newGet = makeNative(function() {
             const val = origGet.call(this);
             if (!val) return val;
             if (val.endsWith('.local') || val === '0.0.0.0' || val.startsWith('127.')) return val;
             return TARGET_IP;
-          };
-          makeNative(newGet, 'get address');
+          }, 'get address');
           Object.defineProperty(scope.RTCIceCandidate.prototype, 'address', {
             get: newGet,
             configurable: true,
@@ -927,7 +975,8 @@
             }
             return obj;
           };
-          makeNative(scope.RTCIceCandidate.prototype.toJSON, 'toJSON');
+          scope.RTCIceCandidate.prototype.toJSON =
+            makeNative(scope.RTCIceCandidate.prototype.toJSON, 'toJSON');
         }
       }
 
@@ -936,11 +985,10 @@
         const origSdpDesc = Object.getOwnPropertyDescriptor(scope.RTCSessionDescription.prototype, 'sdp');
         if (origSdpDesc && origSdpDesc.get) {
           const origGet = origSdpDesc.get;
-          const newGet = function() {
+          const newGet = makeNative(function() {
             const val = origGet.call(this);
             return sanitizeCandidateStr(val);
-          };
-          makeNative(newGet, 'get sdp');
+          }, 'get sdp');
           Object.defineProperty(scope.RTCSessionDescription.prototype, 'sdp', {
             get: newGet,
             configurable: true,
@@ -955,7 +1003,8 @@
             if (obj && obj.sdp) obj.sdp = sanitizeCandidateStr(obj.sdp);
             return obj;
           };
-          makeNative(scope.RTCSessionDescription.prototype.toJSON, 'toJSON');
+          scope.RTCSessionDescription.prototype.toJSON =
+            makeNative(scope.RTCSessionDescription.prototype.toJSON, 'toJSON');
         }
       }
 
@@ -976,7 +1025,8 @@
           } catch(e) {}
           return report;
         };
-        makeNative(scope.RTCPeerConnection.prototype.getStats, 'getStats');
+        scope.RTCPeerConnection.prototype.getStats =
+          makeNative(scope.RTCPeerConnection.prototype.getStats, 'getStats');
       }
     } catch(e) {}
   }
@@ -1410,9 +1460,9 @@
       fakePL.item = i => fakePL[i] || null;
       fakePL.namedItem = n => [plugin1, plugin2, plugin3].find(p => p.name === n) || null;
       fakePL.refresh = () => {};
-      makeNative(fakePL.item, 'item');
-      makeNative(fakePL.namedItem, 'namedItem');
-      makeNative(fakePL.refresh, 'refresh');
+      fakePL.item = makeNative(fakePL.item, 'item');
+      fakePL.namedItem = makeNative(fakePL.namedItem, 'namedItem');
+      fakePL.refresh = makeNative(fakePL.refresh, 'refresh');
       Object.defineProperty(Navigator.prototype, 'plugins', {
         get: makeNative(() => fakePL, 'get plugins'),
         configurable: true, enumerable: true
@@ -1422,8 +1472,8 @@
       fakeML[0] = pdfMime; fakeML[1] = pdfXMime;
       fakeML.item = i => fakeML[i] || null;
       fakeML.namedItem = n => [pdfMime, pdfXMime].find(m => m.type === n) || null;
-      makeNative(fakeML.item, 'item');
-      makeNative(fakeML.namedItem, 'namedItem');
+      fakeML.item = makeNative(fakeML.item, 'item');
+      fakeML.namedItem = makeNative(fakeML.namedItem, 'namedItem');
       Object.defineProperty(Navigator.prototype, 'mimeTypes', {
         get: makeNative(() => fakeML, 'get mimeTypes'),
         configurable: true, enumerable: true

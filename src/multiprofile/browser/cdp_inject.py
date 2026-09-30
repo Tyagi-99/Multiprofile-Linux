@@ -167,12 +167,26 @@ _WORKER_SCRIPT_TEMPLATE = r"""
   // source, and `Object.prototype.hasOwnProperty.call(fn, 'toString')`
   // returning true, which no native function does.
   const nativeSources = new WeakMap();
+  // Method shorthand, not a plain function: a plain function has an own
+  // `prototype` and is constructible, and a native method is neither, so
+  // `'prototype' in OffscreenCanvasRenderingContext2D.prototype.getImageData`
+  // identified the product in one line without reading any source. The
+  // property is non-configurable, so it can only be avoided at construction.
+  // `length` is restored because rest parameters report 0.
   const native = (fn, name) => {
     try {
-      Object.defineProperty(fn, 'name', {value: name, configurable: true});
-      nativeSources.set(fn, 'function ' + name + '() { [native code] }');
-    } catch (e) {}
-    return fn;
+      const arity = fn.length;
+      const holder = {
+        [name](...args) { return Reflect.apply(fn, this, args); }
+      };
+      const shim = holder[name];
+      Object.defineProperty(shim, 'length', {value: arity, configurable: true});
+      nativeSources.set(shim, 'function ' + name + '() { [native code] }');
+      return shim;
+    } catch (e) {
+      try { nativeSources.set(fn, 'function ' + name + '() { [native code] }'); } catch (e2) {}
+      return fn;
+    }
   };
   try {
     const FnProto = self.Function && self.Function.prototype;
