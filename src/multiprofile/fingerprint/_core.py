@@ -39,6 +39,43 @@ def _rng(seed: int, salt: int = 0) -> float:
     return int(h[:8], 16) / 0xFFFFFFFF
 
 
+#: The only values ``navigator.deviceMemory`` is allowed to take.
+#:
+#: The Device Memory spec rounds the machine's RAM down to a power of two and
+#: then clamps it to [0.25, 8] -- explicitly to cap how much entropy the API
+#: contributes. Chrome on a 16 GB or a 64 GB machine reports **8**, and never
+#: more. The pools below describe hardware, where 16 GB is an ordinary amount;
+#: this is what that hardware is permitted to say about itself.
+#:
+#: Without the clamp, profiles were reporting ``deviceMemory: 16`` and ``6``.
+#: Neither value exists in any Chrome build, so either one identified the
+#: profile as spoofed on its own -- the same shape as F29, a Windows profile
+#: with no speech voices, where the *claim* was the tell rather than anything
+#: missing.
+_DEVICE_MEMORY_STEPS = (0.25, 0.5, 1, 2, 4, 8)
+
+
+def web_device_memory(gb: float | int | None) -> float | int | None:
+    """What a machine with ``gb`` of RAM reports to the web, or None.
+
+    Rounds down rather than to nearest: every step is a legal value, and
+    overstating memory is the direction that produces the impossible claim.
+    None passes through -- iOS exposes nothing here, and an absence is not a
+    number to be corrected.
+    """
+    if gb is None:
+        return None
+    try:
+        value = float(gb)
+    except (TypeError, ValueError):
+        return None
+    if value <= _DEVICE_MEMORY_STEPS[0]:
+        return _DEVICE_MEMORY_STEPS[0]
+    allowed = [s for s in _DEVICE_MEMORY_STEPS if s <= value]
+    step = allowed[-1]
+    return int(step) if step >= 1 else step
+
+
 def _pick(seed: int, salt: int, choices: list):
     idx = int(_rng(seed, salt) * len(choices)) % len(choices)
     return choices[idx]
@@ -506,7 +543,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     screen = _pick(seed, 1, pool["screens"])
     w, h, avail_h, dpr = screen
     cores = _pick(seed, 2, pool["cores"])
-    memory = _pick(seed, 3, pool["memory"])
+    memory = web_device_memory(_pick(seed, 3, pool["memory"]))
     gpu = _pick(seed, 4, pool["gpus"])
     gpu_webgpu = webgpu_identity(gpu[1], gpu[0])
 
