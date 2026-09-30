@@ -11,19 +11,96 @@
 (function() {
   'use strict';
 
-  // Helper to make hooked functions appear 100% native
+  // ==========================================
+  // 0. NATIVE-FUNCTION MASKING  (F3)
+  // ==========================================
+  //
+  // The previous makeNative assigned an **own** `toString` to every hooked
+  // function. That defeats `fn.toString()` and nothing else. Measured:
+  //
+  //   Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)
+  //     -> "function toDataURL() { let copy = null; try { copy = n..."
+  //   Object.prototype.hasOwnProperty.call(toDataURL, 'toString')
+  //     -> true      <- no native function has this, ever
+  //
+  // `Function.prototype.toString.call(fn)` never consults an own property, so
+  // it returned the hook's real source, comments included. That is not a
+  // statistical signal; it is the spoofing code handing a page its
+  // implementation, and it is the check every serious detector actually runs.
+  //
+  // So patch the one function all of those paths go through. A WeakMap holds
+  // what each hooked function should claim to be, and Function.prototype
+  // .toString answers from it. Nothing is written onto the hooked function, so
+  // there is no own property to find, and .call / .apply / .bind / Reflect
+  // .apply all arrive here because there is nowhere else for them to go.
+  //
+  // The WeakMap is shared across realms on purpose. The obvious way around a
+  // patched toString is to borrow a clean one from a fresh realm --
+  //
+  //   const f = document.createElement('iframe'); document.body.append(f);
+  //   f.contentWindow.Function.prototype.toString.call(hookedFn)
+  //
+  // -- so every realm this script reaches gets the same patch reading the same
+  // map, and a borrowed toString answers about a foreign realm's function just
+  // as the local one would. See applyNativeMasking, called for the top window
+  // here and for each iframe window in section 8.
+  const nativeSources = new WeakMap();
+
+  function nativeSourceFor(name) {
+    return 'function ' + (name || '') + '() { [native code] }';
+  }
+
+  // Remembers what `fn` should say it is. The name is set as a real own
+  // property because native functions have one too -- writable:false,
+  // enumerable:false, configurable:true is the native descriptor shape, and
+  // omitting `writable` here gives exactly that.
   function makeNative(fn, name) {
     try {
       if (name) {
         Object.defineProperty(fn, 'name', { value: name, configurable: true });
       }
-      const nativeStr = `function ${name || fn.name || ''}() { [native code] }`;
-      fn.toString = function toString() { return nativeStr; };
-      Object.defineProperty(fn.toString, 'name', { value: 'toString', configurable: true });
-      fn.toString.toString = function toString() { return 'function toString() { [native code] }'; };
+      nativeSources.set(fn, nativeSourceFor(name || fn.name));
     } catch(e) {}
     return fn;
   }
+
+  function applyNativeMasking(scope) {
+    try {
+      const FnProto = scope.Function && scope.Function.prototype;
+      if (!FnProto) return;
+      const original = FnProto.toString;
+      // Idempotent: this runs for the top window and again for every iframe
+      // window handed back by contentWindow, which can be the same window
+      // many times over. Wrapping a wrapper would work but each layer is
+      // another chance to differ from native.
+      if (nativeSources.get(original) !== undefined) return;
+
+      const masked = new Proxy(original, {
+        apply: function(target, thisArg, args) {
+          // `masked` is itself in the map, which is what makes
+          // Function.prototype.toString.toString() answer "native" -- it
+          // resolves .toString through Function.prototype and arrives here
+          // with itself as `this`.
+          const claimed = nativeSources.get(thisArg);
+          if (claimed !== undefined) return claimed;
+          // Not one of ours: the genuine answer, including the genuine
+          // TypeError when `this` is not callable.
+          return Reflect.apply(target, thisArg, args);
+        }
+      });
+
+      nativeSources.set(masked, nativeSourceFor('toString'));
+
+      Object.defineProperty(FnProto, 'toString', {
+        value: masked,
+        writable: true,
+        enumerable: false,
+        configurable: true
+      });
+    } catch(e) {}
+  }
+
+  applyNativeMasking(window);
 
   // Detect platform profile based on User-Agent
   const ua = navigator.userAgent || "";
@@ -168,70 +245,71 @@
   // ==========================================
   // 1. HARDWARE & CPU/MEMORY PROTOTYPE SPOOFING
   // ==========================================
+  // Where a spoofed accessor belongs (F3).
+  //
+  // This used to define every getter on BOTH Navigator.prototype and the
+  // navigator instance. The prototype one is correct and sufficient -- that is
+  // where the real accessor lives -- and the instance one is a tell:
+  //
+  //   Object.getOwnPropertyDescriptor(navigator, 'platform')
+  //     -> {get, set, enumerable, configurable}   <- native returns undefined
+  //
+  // A real navigator has no own 'platform', 'hardwareConcurrency' or
+  // 'deviceMemory'; they are inherited. Defining them on the instance
+  // shadowed the prototype correctly and announced itself while doing it.
+  //
+  // So: prototype when there is one, instance only as a fallback for a realm
+  // that does not expose the constructor. Returns nothing; it is used for its
+  // effect.
+  function defineOn(proto, instance, prop, descriptor) {
+    try {
+      if (proto) {
+        Object.defineProperty(proto, prop, descriptor);
+        return;
+      }
+      if (instance) {
+        Object.defineProperty(instance, prop, descriptor);
+      }
+    } catch(e) {}
+  }
+
+  function deleteFrom(proto, instance, prop) {
+    try { if (proto) delete proto[prop]; } catch(e) {}
+    try { if (instance) delete instance[prop]; } catch(e) {}
+  }
+
   function applyHardwareSpoofs(navObj, NavProto) {
     try {
+      const accessor = function(get) {
+        return { get: get, configurable: true, enumerable: true };
+      };
+
       // hardwareConcurrency
       const hcGetter = makeNative(function() {
         return TARGET_CORES;
       }, 'get hardwareConcurrency');
-
-      if (NavProto) {
-        Object.defineProperty(NavProto, 'hardwareConcurrency', {
-          get: hcGetter,
-          configurable: true,
-          enumerable: true
-        });
-      }
-      if (navObj) {
-        Object.defineProperty(navObj, 'hardwareConcurrency', {
-          get: hcGetter,
-          configurable: true,
-          enumerable: true
-        });
-      }
+      defineOn(NavProto, navObj, 'hardwareConcurrency', accessor(hcGetter));
 
       // deviceMemory
       if (TARGET_MEMORY !== undefined) {
         const dmGetter = makeNative(function() {
           return TARGET_MEMORY;
         }, 'get deviceMemory');
-
-        if (NavProto) {
-          Object.defineProperty(NavProto, 'deviceMemory', {
-            get: dmGetter,
-            configurable: true,
-            enumerable: true
-          });
-        }
-        if (navObj) {
-          Object.defineProperty(navObj, 'deviceMemory', {
-            get: dmGetter,
-            configurable: true,
-            enumerable: true
-          });
-        }
+        defineOn(NavProto, navObj, 'deviceMemory', accessor(dmGetter));
       } else {
-        if (NavProto) delete NavProto.deviceMemory;
-        if (navObj) delete navObj.deviceMemory;
+        // A profile claiming iOS must not expose deviceMemory at all, so this
+        // removes it from both -- an instance copy left behind by an earlier
+        // pass would resurrect the property the absence is the point of.
+        deleteFrom(NavProto, navObj, 'deviceMemory');
       }
 
       // platform spoofing (Android -> Linux armv8l, iPhone -> iPhone, Mac -> MacIntel, Windows -> Win32)
       const platGetter = makeNative(function() { return TARGET_PLATFORM; }, 'get platform');
-      if (NavProto) {
-        Object.defineProperty(NavProto, 'platform', { get: platGetter, configurable: true, enumerable: true });
-      }
-      if (navObj) {
-        Object.defineProperty(navObj, 'platform', { get: platGetter, configurable: true, enumerable: true });
-      }
+      defineOn(NavProto, navObj, 'platform', accessor(platGetter));
 
       // maxTouchPoints for mobile
       const touchGetter = makeNative(function() { return TARGET_TOUCH; }, 'get maxTouchPoints');
-      if (NavProto) {
-        Object.defineProperty(NavProto, 'maxTouchPoints', { get: touchGetter, configurable: true, enumerable: true });
-      }
-      if (navObj) {
-        Object.defineProperty(navObj, 'maxTouchPoints', { get: touchGetter, configurable: true, enumerable: true });
-      }
+      defineOn(NavProto, navObj, 'maxTouchPoints', accessor(touchGetter));
 
       // Keep navigator.webdriver exactly as the installed browser exposes it.
       // Replacing its native descriptor is rejected by some identity providers.
@@ -244,12 +322,9 @@
   try {
     const langGetter = makeNative(function() { return TARGET_LANGUAGE; }, 'get language');
     const langsGetter = makeNative(function() { return TARGET_LANGUAGES.slice(); }, 'get languages');
-    if (window.Navigator && Navigator.prototype) {
-      Object.defineProperty(Navigator.prototype, 'language', { get: langGetter, configurable: true, enumerable: true });
-      Object.defineProperty(Navigator.prototype, 'languages', { get: langsGetter, configurable: true, enumerable: true });
-    }
-    Object.defineProperty(navigator, 'language', { get: langGetter, configurable: true, enumerable: true });
-    Object.defineProperty(navigator, 'languages', { get: langsGetter, configurable: true, enumerable: true });
+    const NavProto = window.Navigator ? Navigator.prototype : null;
+    defineOn(NavProto, navigator, 'language', { get: langGetter, configurable: true, enumerable: true });
+    defineOn(NavProto, navigator, 'languages', { get: langsGetter, configurable: true, enumerable: true });
   } catch(e) {}
 
   // devicePixelRatio from fingerprint screen.dpr
@@ -305,15 +380,21 @@
     if (!proto || !proto.getParameter) return;
     const originalGetParameter = proto.getParameter;
 
+    // Parameter numbers are named out here rather than in comments inside the
+    // hook. The masking in section 0 means a page can no longer read this
+    // function's source -- but it could, and what it read was
+    // "// UNMASKED_VENDOR_WEBGL", the hook naming its own purpose. A comment
+    // that is only safe while another defence holds is worth moving.
+    const UNMASKED_VENDOR_WEBGL = 37445;
+    const UNMASKED_RENDERER_WEBGL = 37446;
+    const VENDOR = 7936;
+    const RENDERER = 7937;
+
     const patchedGetParameter = makeNative(function getParameter(param) {
-      // UNMASKED_VENDOR_WEBGL
-      if (param === 37445) return TARGET_GPU_VENDOR;
-      // UNMASKED_RENDERER_WEBGL
-      if (param === 37446) return TARGET_GPU_RENDERER;
-      // VENDOR
-      if (param === 7936) return "Google Inc.";
-      // RENDERER
-      if (param === 7937) return "WebKit WebGL";
+      if (param === UNMASKED_VENDOR_WEBGL) return TARGET_GPU_VENDOR;
+      if (param === UNMASKED_RENDERER_WEBGL) return TARGET_GPU_RENDERER;
+      if (param === VENDOR) return "Google Inc.";
+      if (param === RENDERER) return "WebKit WebGL";
 
       return originalGetParameter.call(this, param);
     }, 'getParameter');
@@ -656,6 +737,12 @@
           const win = origIFrameContentWindow.call(this);
           if (win) {
             try {
+              // First, and before anything else installs a hook here: a fresh
+              // realm ships a pristine Function.prototype.toString, and
+              // borrowing it is the one-line way around the masking in the
+              // parent. Patch it while this frame still has no hooks of its
+              // own to describe.
+              applyNativeMasking(win);
               applyHardwareSpoofs(win.navigator, win.Navigator ? win.Navigator.prototype : null);
               applyScreenSpoofs(win);
               applyTimezoneSpoofs(win);

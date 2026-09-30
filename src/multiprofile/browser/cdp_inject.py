@@ -159,22 +159,50 @@ _WORKER_SCRIPT_TEMPLATE = r"""
   const C = __MP_WORKER_CFG__;
   const nav = self.navigator;
   const proto = self.WorkerNavigator ? self.WorkerNavigator.prototype : null;
+
+  // Native-function masking, same as the page's (F3). A worker is a realm a
+  // page can ask arbitrary questions of, so the two tells the page had were
+  // both reachable here: an own `toString` on each hook, which
+  // Function.prototype.toString.call() ignores while reporting the real
+  // source, and `Object.prototype.hasOwnProperty.call(fn, 'toString')`
+  // returning true, which no native function does.
+  const nativeSources = new WeakMap();
   const native = (fn, name) => {
     try {
       Object.defineProperty(fn, 'name', {value: name, configurable: true});
-      const s = 'function ' + name + '() { [native code] }';
-      fn.toString = function toString() { return s; };
+      nativeSources.set(fn, 'function ' + name + '() { [native code] }');
     } catch (e) {}
     return fn;
   };
+  try {
+    const FnProto = self.Function && self.Function.prototype;
+    if (FnProto) {
+      const original = FnProto.toString;
+      const masked = new Proxy(original, {
+        apply: function (target, thisArg, args) {
+          const claimed = nativeSources.get(thisArg);
+          if (claimed !== undefined) return claimed;
+          return Reflect.apply(target, thisArg, args);
+        }
+      });
+      nativeSources.set(masked, 'function toString() { [native code] }');
+      Object.defineProperty(FnProto, 'toString', {
+        value: masked, writable: true, enumerable: false, configurable: true
+      });
+    }
+  } catch (e) {}
+
+  // Prototype when there is one, instance only as a fallback. Defining on
+  // both shadowed correctly and left an own property on navigator that a real
+  // one does not have -- getOwnPropertyDescriptor(navigator, 'platform')
+  // answered where native returns undefined.
   const put = (key, value) => {
     if (value === null || value === undefined) return;
     const get = native(function () { return value; }, 'get ' + key);
-    for (const target of [proto, nav]) {
-      if (!target) continue;
-      try { Object.defineProperty(target, key, {get: get, configurable: true, enumerable: true}); }
-      catch (e) {}
-    }
+    const target = proto || nav;
+    if (!target) return;
+    try { Object.defineProperty(target, key, {get: get, configurable: true, enumerable: true}); }
+    catch (e) {}
   };
   if (nav) {
     put('platform', C.platform);
