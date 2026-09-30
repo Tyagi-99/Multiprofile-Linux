@@ -1,22 +1,18 @@
-"""F20 (part one): a durable job must not be invisible.
+"""F20: every job is visible, and there is only one queue to be visible in.
 
-Two job generations coexist. ``POST /api/jobs`` writes to the legacy
-in-process queue; the durable SQLite queue starts its workers at boot and
-recovers on crash, but nothing in the API enqueues into it. ``GET /api/jobs``
-listed only the legacy one, so a durable job that *did* exist -- parking can
-create one, and crash recovery re-queues into it -- could not be seen by any
-client at all.
+Written when the finding was half done -- ``GET /api/jobs`` listed both
+queues while ``POST`` still wrote to the in-process one -- and kept, with the
+two tests that pinned the interim state rewritten to pin the finished one.
+The rest are unchanged, because what they assert never depended on which
+queue was underneath: a job that exists must be listed, ids must not collide,
+and the listing must survive one source failing.
 
-Listing both is the smaller half of the finding and is what these tests pin.
-Moving the writer is the larger half: bulk API types map to N durable jobs,
-cancel semantics differ, and the console's jobs page changes shape. That is
-filed, not done here, so ``POST`` deliberately still goes to legacy.
-
-The two shapes were never reconciled either -- legacy uses ``type`` and an
-epoch ``createdAt`` with a string id, the jobs table uses ``job_type``, ISO
-``created_at`` and an integer id -- so the durable rows are normalised into the
-shape the console already reads, with a prefixed id so the two can never
-collide.
+The migration itself is in :mod:`multiprofile.jobs.batches`. What these tests
+still guard is the property the finding was about: **a job that exists must be
+visible to a client.** A durable job with no batch -- parking, a health check,
+anything crash recovery re-queued -- is listed alongside the batches, and a
+batch's members are not listed separately, or every bulk launch would appear
+N+1 times.
 """
 from __future__ import annotations
 
@@ -61,7 +57,9 @@ def test_a_durable_job_is_listed(client, profile):
     assert any(r.get("source") == "durable" for r in rows), rows
 
 
-def test_both_queues_appear_together(client, profile):
+def test_batches_and_background_jobs_appear_together(client, profile):
+    """The finding, restated for one queue: a job that exists is listed,
+    whether the operator started it or the product did."""
     from multiprofile.jobs import enqueue
 
     enqueue("health_check", profile["id"], {})
@@ -70,7 +68,13 @@ def test_both_queues_appear_together(client, profile):
         headers=HEADERS,
     )
     assert r.status_code == 201, r.get_json()
-    assert {row.get("source") for row in _items(client)} == {"legacy", "durable"}
+    rows = _items(client)
+    batches = [x for x in rows if not str(x["id"]).startswith("durable:")]
+    background = [x for x in rows if str(x["id"]).startswith("durable:")]
+    assert batches, "the operator's batch is missing"
+    assert background, "the background health_check is missing"
+    # Both carry the same source now, because there is one store.
+    assert {x.get("source") for x in rows} == {"durable"}
 
 
 def test_a_durable_job_is_normalised_into_the_console_shape(client, profile):
@@ -112,19 +116,34 @@ def test_the_listing_is_sortable_across_both_queues(client, profile):
     assert all(float(r["createdAt"]) > 0 for r in rows), rows
 
 
-def test_posting_still_targets_the_legacy_queue(client, profile):
-    """Deliberate: moving the writer is the larger half of F20 and is filed."""
+def test_posting_creates_a_durable_batch(client, profile):
+    """The finding's larger half: the writer moved. A job created through the
+    API is now a row in the control database, not a dict in this process."""
+    from multiprofile.storage import db
+
     r = client.post(
         "/api/jobs", json={"type": "bulk_stop", "profileIds": [profile["id"]]},
         headers=HEADERS,
     )
     assert r.status_code == 201
     created = r.get_json()["job"]
-    assert not str(created["id"]).startswith("durable:")
+    assert db.get_job_batch(created["id"]) is not None, "the batch must be persisted"
+    assert len(db.list_batch_members(created["id"])) == 1
 
 
-def test_one_queue_failing_does_not_hide_the_other(client, profile, monkeypatch):
-    """A missing control DB must not blank the jobs page."""
+def test_a_batch_is_listed_once_not_once_per_member(client, profile):
+    """Members live in the same table as background jobs. Listing both without
+    excluding members would show every bulk launch N+1 times."""
+    client.post("/api/jobs",
+                json={"type": "bulk_stop", "profileIds": [profile["id"]] * 1},
+                headers=HEADERS)
+    rows = _items(client)
+    assert len([r for r in rows if not str(r["id"]).startswith("durable:")]) == 1
+
+
+def test_background_jobs_failing_does_not_hide_the_batches(client, profile, monkeypatch):
+    """The two reads are of the same table but not the same query. One
+    raising must not blank the operator's jobs page."""
     import multiprofile.jobs as jobs_pkg
 
     client.post("/api/jobs", json={"type": "stop_profile", "profileIds": [profile["id"]]},
@@ -135,4 +154,5 @@ def test_one_queue_failing_does_not_hide_the_other(client, profile, monkeypatch)
 
     monkeypatch.setattr(jobs_pkg, "list_durable_jobs", boom)
     rows = _items(client)
-    assert any(r.get("source") == "legacy" for r in rows), rows
+    assert rows, "the batch must still be listed"
+    assert all(not str(r["id"]).startswith("durable:") for r in rows)

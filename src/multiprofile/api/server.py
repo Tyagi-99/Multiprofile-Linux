@@ -1309,42 +1309,37 @@ def create_app() -> Flask:
         }
 
     def _list_all_jobs() -> list:
-        """Every job from both queues; None when neither can be read.
+        """Every job the operator can see; None when the store cannot be read.
 
-        Two generations coexist (see ``multiprofile.jobs``): the legacy
-        in-process queue that ``POST /api/jobs`` still writes to, and the
-        durable SQLite queue whose workers start at boot. Nothing enqueues
-        into the durable one from the API yet (F20), but ``parking`` can, and
-        a crash recovery re-queues into it -- so a durable job that did exist
-        was invisible to every client. Listing both is the smaller half of
-        F20; moving the writer is its own task.
+        Since F20 there is one queue. This lists batches -- what the operator
+        started -- and then the durable jobs that belong to no batch, which
+        are the background ones: parking, health checks, and anything a crash
+        recovery re-queued. Both come from the same table, so "the job system
+        is unavailable" now means one thing rather than two.
         """
-        legacy_jobs: list = []
-        legacy_failed = False
+        jobs: list = []
+        failed = True
         try:
-            try:
-                legacy_jobs = list_jobs(limit=100_000)
-            except TypeError:
-                # Forward-compat: WS1's jobs table may not accept limit=.
-                legacy_jobs = list_jobs()
-            legacy_jobs = [{**j, "source": j.get("source") or "legacy"} for j in legacy_jobs]
-        except Exception as e:  # noqa: BLE001 - one queue must not hide the other
-            log.warning("legacy job queue unavailable: %s", e)
-            legacy_failed = True
+            jobs = list(list_jobs(limit=100_000))
+            failed = False
+        except Exception as e:  # noqa: BLE001 - the control DB may be absent
+            log.warning("job batches unavailable: %s", e)
 
-        durable_jobs: list = []
-        durable_failed = False
         try:
             from ..jobs import list_durable_jobs
 
-            durable_jobs = [_normalize_durable_job(r) for r in list_durable_jobs(limit=100_000)]
-        except Exception as e:  # noqa: BLE001 - the control DB may be absent
+            # Members of a batch are already represented by their batch; a
+            # list showing both would double-count every bulk launch.
+            jobs += [
+                _normalize_durable_job(r)
+                for r in list_durable_jobs(limit=100_000)
+                if not r.get("batch_id")
+            ]
+            failed = False
+        except Exception as e:  # noqa: BLE001 - one view must not hide the other
             log.warning("durable job queue unavailable: %s", e)
-            durable_failed = True
 
-        if legacy_failed and durable_failed:
-            return None
-        return legacy_jobs + durable_jobs
+        return None if failed else jobs
 
     @app.get("/api/jobs")
     def jobs_list():
@@ -1845,6 +1840,18 @@ def create_app() -> Flask:
             log.info("durable job workers started")
         except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
             log.warning("job workers failed to start: %s", e)
+
+        # Idle parking. F20's missing producer: park_profile was reachable
+        # only from a job handler and nothing enqueued one, so the whole
+        # feature and its config flag reached nothing. Returns None and logs
+        # when parking is disabled, which is the default -- see
+        # config.parking_enabled for why.
+        try:
+            from ..parking import start_parking_sweeper
+
+            start_parking_sweeper()
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning("idle parking sweeper failed to start: %s", e)
 
         # Browser supervisor (crash watchdog). start() is itself a no-op
         # when disabled by config; the guard here keeps a broken

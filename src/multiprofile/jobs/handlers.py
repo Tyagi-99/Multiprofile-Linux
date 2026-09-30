@@ -84,16 +84,51 @@ def _stop_fn(ctx: HandlerContext) -> Callable[[str], Any]:
     return stop_profile
 
 
+class JobCancelled(Exception):
+    """The operator cancelled this job before it started doing anything."""
+
+
+def _check_cancelled(record: dict[str, Any]) -> None:
+    """Raise if this job has been cancelled, at a point where stopping is free.
+
+    F20: a batch's queued members are cancelled outright, but a member already
+    claimed by a worker is not -- interrupting a half-launched browser leaves
+    a process nobody is tracking, which is worse than one extra window. So the
+    check happens here, before any work, and nowhere later.
+    """
+    from . import batches
+
+    if batches.cancel_requested(record.get("id")):
+        raise JobCancelled(str(record.get("id")))
+
+
 def handle_launch(record: dict[str, Any], ctx: HandlerContext) -> dict[str, Any]:
     """Launch a profile through the existing launcher code path."""
     profile_id = record.get("profile_id")
     if not profile_id:
         raise JobHandlerError("launch job requires a profile_id")
+    _check_cancelled(record)
     payload = _payload(record)
     sem = ctx.launch_semaphore
     launch = _launch_fn(ctx)
     _transition(record, ProfileState.STARTING)
     kwargs = {k: v for k, v in payload.items() if k in ("url", "direct", "cdp")}
+    # The grid slot this profile was assigned at create time, passed to Chrome
+    # as a --window-position hint so the window opens roughly where the tiling
+    # pass will put it, instead of jumping after the fact.
+    rect = payload.get("window_rect")
+    if isinstance(rect, dict):
+        from ..browser.grid import Rect
+
+        try:
+            kwargs["window_rect"] = Rect(
+                x=int(rect["x"]), y=int(rect["y"]),
+                w=int(rect["w"]), h=int(rect["h"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            # A hint, not a requirement: the tiling pass at the end of the
+            # batch places the window properly either way.
+            log.warning("job %s: unusable window_rect %r", record.get("id"), rect)
     if sem is not None:
         with sem:
             result = launch(profile_id, **kwargs)
@@ -112,6 +147,7 @@ def handle_stop(record: dict[str, Any], ctx: HandlerContext) -> dict[str, Any]:
     profile_id = record.get("profile_id")
     if not profile_id:
         raise JobHandlerError("stop job requires a profile_id")
+    _check_cancelled(record)
     _transition(record, ProfileState.STOPPING)
     result = _stop_fn(ctx)(profile_id)
     if isinstance(result, dict) and result.get("error"):
@@ -237,6 +273,7 @@ DISPATCH: dict[str, Callable[[dict[str, Any], HandlerContext], dict[str, Any]]] 
 __all__ = [
     "DISPATCH",
     "HandlerContext",
+    "JobCancelled",
     "JobHandlerError",
     "handle_launch",
     "handle_stop",

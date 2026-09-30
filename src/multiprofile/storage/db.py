@@ -44,7 +44,7 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
@@ -180,10 +180,39 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     result_json  TEXT,
-    error        TEXT
+    error        TEXT,
+    -- v7, F20: batch membership and cooperative cancellation.
+    batch_id     TEXT,
+    batch_seq    INTEGER NOT NULL DEFAULT 0,
+    cancel_requested INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_profile ON jobs(profile_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_batch ON jobs(batch_id);
+
+-- Job batches (v7). F20: the durable queue is per-profile, and the operator
+-- works in batches -- "launch these eight" is one thing they started, with one
+-- progress bar and one cancel button. The legacy in-process queue modelled
+-- that and nothing else did, which is why moving the writer needed a
+-- migration rather than a redirect.
+--
+-- A batch owns N rows in `jobs`, joined by batch_id. Progress is derived by
+-- counting members in a terminal state rather than stored, so a crash cannot
+-- leave the count disagreeing with the rows it counts.
+CREATE TABLE IF NOT EXISTS job_batches (
+    id           TEXT PRIMARY KEY,
+    job_type     TEXT NOT NULL,
+    payload_json TEXT,
+    status       TEXT NOT NULL DEFAULT 'queued',
+    total        INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT,
+    tile_json    TEXT,
+    error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_job_batches_status ON job_batches(status);
 
 -- Profiles. The fields worth querying are columns; everything else stays in
 -- data_json.
@@ -325,11 +354,31 @@ def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
     #     product never recorded runtime before, and inventing history for a
     #     table a bill would be drawn from is the one thing metering must not
     #     do. An upgraded install starts measuring from its first launch.
+    # v7: `job_batches`, plus batch_id / batch_seq / cancel_requested on
+    #     `jobs`. F20 -- the durable queue had no batch concept, so ordinary
+    #     job creation could not move onto it without losing the one thing the
+    #     console shows: a batch with one progress bar and one cancel button.
+    #     Nothing is backfilled. Jobs enqueued before this version were
+    #     single-profile parking and health-check jobs with no batch, and
+    #     inventing one to put them in would be inventing history.
     if from_v == 3:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles_trash)")}
         if "disk_bytes" not in cols:
             conn.execute(
                 "ALTER TABLE profiles_trash ADD COLUMN disk_bytes INTEGER NOT NULL DEFAULT 0"
+            )
+    # Applied for any upgrade that arrives below v7, not just from v6: the
+    # `jobs` table has existed since v1, so a database at v1..v6 all need the
+    # columns, and ALTER is the only way to reach an existing table.
+    if from_v < 7:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+        if "batch_id" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN batch_id TEXT")
+        if "batch_seq" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN batch_seq INTEGER NOT NULL DEFAULT 0")
+        if "cancel_requested" not in cols:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
             )
 
 
@@ -894,6 +943,194 @@ def update_job_record(job_id: int, **fields: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Job batches (v7, F20)
+#
+# A batch is what the operator started: "launch these eight". It owns N rows
+# in `jobs`, joined by batch_id. Its progress is *derived* by counting members
+# in a terminal state rather than stored, because a stored counter and the
+# rows it counts can disagree after a crash, and the rows are the truth.
+# ---------------------------------------------------------------------------
+
+#: A job member that will not run again, whatever happens next.
+#: ``done`` is the worker's spelling for success (workers.py `_finish_job`);
+#: naming it "completed" here would produce a batch that never finishes while
+#: every one of its members had.
+TERMINAL_JOB_STATES = ("done", "failed", "cancelled")
+
+
+def _settled_batch_status(counts: dict[str, int]) -> str:
+    """The batch status implied by its members, once they have all finished.
+
+    Order matters and is a judgement, not an accident. Any failure makes the
+    batch ``failed`` even when most members succeeded, because "launch these
+    eight" partly done is not done -- the legacy queue reported the same way,
+    and the console's per-member results say which ones. A batch with no
+    failures but some cancellations is ``cancelled``: the operator pressed the
+    button and should see that they did.
+    """
+    if counts.get("failed"):
+        return "failed"
+    if counts.get("cancelled"):
+        return "cancelled"
+    return "completed"
+
+
+def insert_job_batch(
+    batch_id: str,
+    job_type: str,
+    payload_json: str | None,
+    total: int,
+) -> dict[str, Any]:
+    conn = _connect()
+    now = _utcnow()
+    with _lock:
+        with conn:
+            conn.execute(
+                "INSERT INTO job_batches (id, job_type, payload_json, status, total, "
+                "created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+                (batch_id, job_type, payload_json, int(total), now, now),
+            )
+            row = conn.execute(
+                "SELECT * FROM job_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+    return dict(row)
+
+
+def insert_batch_members(
+    batch_id: str,
+    job_type: str,
+    entries: list[tuple[str, str]],
+    *,
+    max_attempts: int = 3,
+) -> list[int]:
+    """Insert every member of a batch in one transaction.
+
+    ``entries`` is ``[(profile_id, payload_json), ...]`` in the order the
+    operator gave. One transaction because a half-created batch whose total
+    says 8 and whose rows number 3 is a progress bar that can never finish.
+    """
+    conn = _connect()
+    now = _utcnow()
+    ids: list[int] = []
+    with _lock:
+        with conn:
+            for seq, (profile_id, payload_json) in enumerate(entries):
+                cur = conn.execute(
+                    "INSERT INTO jobs (job_type, profile_id, payload_json, status, "
+                    "attempts, max_attempts, created_at, updated_at, batch_id, batch_seq) "
+                    "VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)",
+                    (job_type, profile_id, payload_json, max(1, int(max_attempts)),
+                     now, now, batch_id, seq),
+                )
+                ids.append(int(cur.lastrowid))
+    return ids
+
+
+def get_job_batch(batch_id: str) -> dict[str, Any] | None:
+    conn = _connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT * FROM job_batches WHERE id = ?", (batch_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_job_batches(limit: int = 100) -> list[dict[str, Any]]:
+    conn = _connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT * FROM job_batches ORDER BY created_at DESC, id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_batch_members(batch_id: str) -> list[dict[str, Any]]:
+    conn = _connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE batch_id = ? ORDER BY batch_seq ASC, id ASC",
+            (batch_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_job_batch(batch_id: str, **fields: Any) -> None:
+    allowed = {"status", "started_at", "finished_at", "tile_json", "error"}
+    clean = {k: v for k, v in fields.items() if k in allowed}
+    if not clean:
+        return
+    conn = _connect()
+    with _lock:
+        with conn:
+            sets = ", ".join(f"{k} = ?" for k in clean) + ", updated_at = ?"
+            conn.execute(
+                f"UPDATE job_batches SET {sets} WHERE id = ?",
+                [*clean.values(), _utcnow(), batch_id],
+            )
+
+
+def request_batch_cancel(batch_id: str) -> dict[str, int]:
+    """Ask a batch to stop, and return what that did.
+
+    Members still ``queued`` are cancelled outright, in the same transaction
+    that raises the flag, so no worker can claim one after the decision and
+    before the write. Members already ``running`` cannot be interrupted safely
+    -- a half-launched browser is worse than a finished one -- so they carry
+    ``cancel_requested`` and the handler checks it at its next safe point.
+    """
+    conn = _connect()
+    now = _utcnow()
+    with _lock:
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET cancel_requested = 1, updated_at = ? WHERE batch_id = ?",
+                (now, batch_id),
+            )
+            cur = conn.execute(
+                "UPDATE jobs SET status = 'cancelled', updated_at = ? "
+                "WHERE batch_id = ? AND status = 'queued'",
+                (now, batch_id),
+            )
+            cancelled = int(cur.rowcount or 0)
+            running = conn.execute(
+                "SELECT COUNT(*) AS n FROM jobs WHERE batch_id = ? AND status = 'running'",
+                (batch_id,),
+            ).fetchone()["n"]
+    return {"cancelled": cancelled, "stillRunning": int(running)}
+
+
+def job_cancel_requested(job_id: int) -> bool:
+    conn = _connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    return bool(row and row["cancel_requested"])
+
+
+def batch_progress(batch_id: str) -> dict[str, int]:
+    """Counts per member state, derived from the rows themselves."""
+    conn = _connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM jobs WHERE batch_id = ? GROUP BY status",
+            (batch_id,),
+        ).fetchall()
+    counts = {r["status"]: int(r["n"]) for r in rows}
+    settled = sum(counts.get(k, 0) for k in TERMINAL_JOB_STATES)
+    return {
+        "queued": counts.get("queued", 0),
+        "running": counts.get("running", 0),
+        "succeeded": counts.get("done", 0),
+        "failed": counts.get("failed", 0),
+        "cancelled": counts.get("cancelled", 0),
+        "done": settled,
+        "total": sum(counts.values()),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Startup recovery — never lose a queued job on restart
 # ---------------------------------------------------------------------------
 
@@ -913,6 +1150,7 @@ def recover() -> dict[str, Any]:
     recovered_jobs = 0
     failed_jobs = 0
     recovered_profiles: list[str] = []
+    recovered_batches: list[str] = []
     with _lock:
         with conn:
             # Crash-recoverable jobs: running -> queued (attempts + 1),
@@ -949,6 +1187,45 @@ def recover() -> dict[str, Any]:
                     (now, row["profile_id"]),
                 )
                 recovered_profiles.append(row["profile_id"])
+
+            # v7/F20: a batch's status is derived from its members, and the
+            # members were just moved. A batch left 'running' whose members
+            # are all terminal would otherwise show a progress bar that never
+            # finishes, and one whose members were re-queued must go back to
+            # 'running' rather than stay finished.
+            for brow in conn.execute(
+                "SELECT id, status FROM job_batches "
+                "WHERE status IN ('queued', 'running')"
+            ).fetchall():
+                counts = {
+                    r["status"]: int(r["n"])
+                    for r in conn.execute(
+                        "SELECT status, COUNT(*) AS n FROM jobs "
+                        "WHERE batch_id = ? GROUP BY status",
+                        (brow["id"],),
+                    ).fetchall()
+                }
+                total = sum(counts.values())
+                done = sum(counts.get(k, 0) for k in TERMINAL_JOB_STATES)
+                if total and done == total:
+                    settled = _settled_batch_status(counts)
+                    conn.execute(
+                        "UPDATE job_batches SET status = ?, finished_at = ?, "
+                        "updated_at = ? WHERE id = ?",
+                        (settled, now, now, brow["id"]),
+                    )
+                    recovered_batches.append(str(brow["id"]))
+                elif total == 0:
+                    # A batch row with no members is a create that did not
+                    # finish. It can never progress, so it is failed rather
+                    # than left queued forever.
+                    conn.execute(
+                        "UPDATE job_batches SET status = 'failed', "
+                        "error = 'recovered after restart: batch has no members', "
+                        "finished_at = ?, updated_at = ? WHERE id = ?",
+                        (now, now, brow["id"]),
+                    )
+                    recovered_batches.append(str(brow["id"]))
     for profile_id in recovered_profiles:
         audit_log(
             "profile_state_recovered",
@@ -970,6 +1247,7 @@ def recover() -> dict[str, Any]:
         "recovered_jobs": recovered_jobs,
         "failed_jobs": failed_jobs,
         "recovered_profiles": recovered_profiles,
+        "recovered_batches": recovered_batches,
         "closed_usage_sessions": closed_sessions,
     }
     log.info("startup recovery: %s", result)

@@ -167,11 +167,20 @@ def test_a_browser_that_dies_late_is_still_caught(monkeypatch):
 # --------------------------------------------------------------------------
 
 def _run_bulk(monkeypatch, n, *, launch_delay=0.2, fail=(), ids=None):
-    """Drive the bulk job with a stubbed launch, so this measures the loop."""
+    """Drive a bulk batch with a stubbed launch, so this measures the loop.
+
+    Rewritten for F20: the batch now runs on the durable queue's workers
+    rather than a thread pool inside the job record. **Every assertion below
+    is unchanged** -- overlap, exactly-once, operator ordering, the
+    concurrency ceiling and partial failure are properties of bulk launch,
+    not of which queue implements it, and the point of porting rather than
+    deleting these is that the migration had to keep all five.
+    """
     from multiprofile.browser import manager as browser_manager
-    from multiprofile.jobs import legacy
+    from multiprofile.jobs import batches, create_job, get_job, start_workers, stop_workers
     from multiprofile.storage.profiles import create_profile
 
+    monkeypatch.setenv("MULTIPROFILE_WINDOW_TILING_ENABLED", "0")
     if ids is None:
         ids = [create_profile({"name": f"b{i}", "proxyType": "none"})["id"]
                for i in range(n)]
@@ -194,22 +203,29 @@ def _run_bulk(monkeypatch, n, *, launch_delay=0.2, fail=(), ids=None):
             with lock:
                 concurrent -= 1
 
-    # _run_job imports launch_profile from the launcher at call time, so the
-    # stub has to go on the launcher module rather than on legacy.
-    import multiprofile.browser.launcher as L
-
-    monkeypatch.setattr(L, "launch_profile", fake_launch)
     monkeypatch.setattr(browser_manager, "acquire_slot", lambda pid, timeout=None: True)
     monkeypatch.setattr(browser_manager, "release_slot", lambda pid: None)
     monkeypatch.setattr(browser_manager, "mark_running", lambda pid: None)
+    # The state transitions write to the control DB and publish events; none
+    # of that is what this file measures.
+    monkeypatch.setattr(batches, "_apply_tiling", lambda *a, **k: None)
 
-    job = {"id": "job_t", "type": "bulk_launch", "profileIds": ids,
-           "status": "running", "createdAt": time.time(),
-           "progress": 0, "results": []}
-    legacy._jobs["job_t"] = job
     start = time.monotonic()
-    legacy._run_job("job_t")
-    return job, ids, time.monotonic() - start, peak
+    job = create_job("bulk_launch", ids)
+    worker = start_workers(launch_fn=fake_launch)
+    try:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            current = get_job(job["id"])
+            if current["status"] in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(0.01)
+        else:  # pragma: no cover - only on a hang
+            raise AssertionError(f"batch never finished: {get_job(job['id'])}")
+    finally:
+        stop_workers()
+        assert not worker.running
+    return get_job(job["id"]), ids, time.monotonic() - start, peak
 
 
 def test_bulk_launch_overlaps_instead_of_queueing(monkeypatch):

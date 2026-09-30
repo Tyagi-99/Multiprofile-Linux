@@ -37,28 +37,22 @@ def client(xdg_isolated):
 
 @pytest.fixture()
 def fake_jobs():
-    """Seed the legacy in-memory job store with 30 fake jobs (no workers)."""
-    from multiprofile.jobs import legacy
+    """Seed 30 job batches, no workers running.
 
-    saved_jobs = dict(legacy._jobs)
-    saved_recent = list(legacy._recent)
-    try:
-        for i in range(30):
-            jid = f"job_test_{i:03d}"
-            legacy._jobs[jid] = {
-                "id": jid,
-                "type": "launch_profile",
-                "profileIds": ["p1"],
-                "status": "queued",
-                "createdAt": 1_700_000_000.0 + i,  # distinct, sortable
-            }
-            legacy._recent.append(jid)
-        yield
-    finally:
-        legacy._jobs.clear()
-        legacy._jobs.update(saved_jobs)
-        legacy._recent.clear()
-        legacy._recent.extend(saved_recent)
+    Writes rows directly rather than calling create_job: this file is about
+    pagination, and going through the real creator would drag in tiling and
+    the profile store for no benefit. Since F20 these are durable rows, so
+    the fixture no longer needs to save and restore process-global state --
+    each test gets its own XDG dir and therefore its own database.
+    """
+    from multiprofile.storage import db
+
+    for i in range(30):
+        # Distinct, sortable timestamps: pagination keys on (createdAt, id).
+        db.insert_job_batch(f"job_test_{i:03d}", "launch_profile",
+                            '{"profileIds":["p1"]}', 1)
+        db.update_job_batch(f"job_test_{i:03d}", status="queued")
+    yield
 
 
 def _seed_profiles(n=30):

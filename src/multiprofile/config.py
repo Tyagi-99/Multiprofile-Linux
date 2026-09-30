@@ -107,11 +107,37 @@ class Settings:
     # and keep spending the same restart budget.
     supervisor_restart_stability_s: int = 60
     # Durable job queue
-    jobs_max_workers: int = 4
-    jobs_max_concurrent_launches: int = 2
+    # Job worker width. Both default to the profile concurrency cap, because
+    # since F20 ordinary bulk launches run on this queue and the cap is the
+    # thing that decides how many browsers may exist at once (`acquire_slot`).
+    # The previous defaults of 4 and 2 were sized for background parking and
+    # health-check jobs; leaving them would have quietly undone F33, which
+    # made a batch of 8 take ~3 s instead of ~13 s by overlapping the waiting.
+    # A value of 0 means "follow max_concurrent_profiles".
+    jobs_max_workers: int = 0
+    jobs_max_concurrent_launches: int = 0
     # Idle parking ([parking])
-    parking_enabled: bool = True           # park idle profiles (graceful stop, data kept)
+    #
+    # **Default OFF, and that is the decision F20 asked for.**
+    #
+    # This read True for the whole of the audit and parked nothing, because
+    # `park_profile` was only reachable from a job handler and nothing ever
+    # enqueued one -- the finding itself. Wiring the producer while leaving
+    # the default True would have changed what the product *does* on every
+    # existing install: browsers the operator left open would start
+    # disappearing after 30 minutes, silently, on upgrade. A setting that has
+    # never done anything is not a setting anyone has opted into.
+    #
+    # So the default matches what installs have actually been doing since the
+    # feature shipped, and turning it on is now a choice that works rather
+    # than a checkbox that reaches nothing. Parking stops the browser and
+    # keeps the profile's data; nothing is lost but the open window and
+    # whatever was unsaved in it, which is exactly why it should be asked for.
+    parking_enabled: bool = False          # park idle profiles (graceful stop, data kept)
     parking_idle_timeout_s: int = 1800     # idle seconds before a profile may be parked
+    # How often the sweeper looks for idle profiles. Only runs when
+    # `parking_enabled`; a sweep is a cheap read of the runtime table.
+    parking_sweep_interval_s: int = 300
     # Health-check staggering ([health])
     health_stagger: bool = True            # jitter health checks so N profiles don't fire at once
     health_max_concurrent: int = 4         # max health checks in flight per wave
@@ -164,13 +190,16 @@ def get_settings() -> Settings:
             "MULTIPROFILE_SUPERVISOR_STABILITY_S", 60, minimum=0, maximum=3600
         ),
         # [jobs]
-        jobs_max_workers=_env_int("MULTIPROFILE_JOBS_MAX_WORKERS", 4, minimum=1, maximum=32),
+        jobs_max_workers=_env_int("MULTIPROFILE_JOBS_MAX_WORKERS", 0, minimum=0, maximum=128),
         jobs_max_concurrent_launches=_env_int(
-            "MULTIPROFILE_JOBS_MAX_LAUNCHES", 2, minimum=1, maximum=16
+            "MULTIPROFILE_JOBS_MAX_LAUNCHES", 0, minimum=0, maximum=128
         ),
         # [parking]
-        parking_enabled=_env_bool("MULTIPROFILE_PARKING_ENABLED", True),
+        parking_enabled=_env_bool("MULTIPROFILE_PARKING_ENABLED", False),
         parking_idle_timeout_s=_env_int("MULTIPROFILE_PARKING_IDLE_TIMEOUT_S", 1800, minimum=1, maximum=86400),
+        parking_sweep_interval_s=_env_int(
+            "MULTIPROFILE_PARKING_SWEEP_INTERVAL_S", 300, minimum=10, maximum=86400
+        ),
         # [health]
         health_stagger=_env_bool("MULTIPROFILE_HEALTH_STAGGER", True),
         health_max_concurrent=_env_int("MULTIPROFILE_HEALTH_MAX_CONCURRENT", 4, minimum=1, maximum=64),
