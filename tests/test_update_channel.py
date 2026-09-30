@@ -519,3 +519,201 @@ def test_installing_without_root_refuses_early(channel, tmp_path):
         assert "requires root" in out.stderr
     finally:
         srv.close()
+
+
+# --------------------------------------------------------------------------
+# 5. Automatic checking, and the decision not to auto-install
+# --------------------------------------------------------------------------
+#
+# The matrix row is "signed delta *auto*-update" and everything above is
+# started by hand, so this is the part that makes it automatic -- and the
+# part where a second principle applies. F14 established that this product
+# makes no network requests of its own, which an updater polling on a timer
+# plainly is. The resolution is that the request only happens once the
+# operator has written /etc/multiprofile/update.conf, and installing stays a
+# separate decision that is off by default and refused under a running fleet.
+
+def test_no_channel_means_no_requests(monkeypatch, tmp_path):
+    """The default state of a freshly installed package, and the one F14's
+    principle requires: it asks nobody anything."""
+    from multiprofile import updates
+
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(tmp_path / "absent.conf"))
+    assert updates.channel_configured() is False
+    result = updates.check_now()
+    assert result["available"] is None
+    assert result["error"] == "no update channel configured"
+
+
+def test_the_checker_does_not_start_without_a_channel(monkeypatch, tmp_path):
+    from multiprofile import updates
+
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(tmp_path / "absent.conf"))
+    assert updates.start_update_checker() is None
+
+
+def test_configuring_a_channel_is_the_opt_in(channel, tmp_path, monkeypatch):
+    """Writing the config is the deliberate act. Once it exists, checking on
+    a schedule is what was asked for."""
+    from multiprofile import updates
+
+    srv = _Server(channel["repo"])
+    try:
+        env = _client_env(tmp_path, channel["repo"], srv.url, installed="1.0.0")
+        monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", env["MULTIPROFILE_UPDATE_CONF"])
+        monkeypatch.setenv("MULTIPROFILE_UPDATE_STATE", env["MULTIPROFILE_UPDATE_STATE"])
+        monkeypatch.setenv("PATH", env["PATH"])
+        assert updates.channel_configured() is True
+        result = updates.check_now()
+        assert result["available"] is True, result
+        assert result["installed"] == "1.0.0"
+        assert result["latest"] == "1.1.0"
+        assert result["error"] is None
+    finally:
+        srv.close()
+
+
+def test_up_to_date_is_reported_as_false_not_none(channel, tmp_path, monkeypatch):
+    """"No update" and "could not tell" have to be different answers, or a
+    stale install reads as a healthy one."""
+    from multiprofile import updates
+
+    srv = _Server(channel["repo"])
+    try:
+        env = _client_env(tmp_path, channel["repo"], srv.url, installed="1.1.0")
+        for key in ("MULTIPROFILE_UPDATE_CONF", "MULTIPROFILE_UPDATE_STATE", "PATH"):
+            monkeypatch.setenv(key, env[key])
+        result = updates.check_now()
+        assert result["available"] is False
+        assert result["error"] is None
+    finally:
+        srv.close()
+
+
+def test_a_broken_channel_reports_unknown_not_up_to_date(tmp_path, monkeypatch):
+    """The important distinction: a signature that will not verify must never
+    read as "you are on the latest version"."""
+    from multiprofile import updates
+
+    conf = tmp_path / "update.conf"
+    conf.write_text(
+        "[update]\nurl = http://127.0.0.1:1\nsuite = stable\n"
+        f"keyring = {tmp_path / 'absent.gpg'}\n"
+    )
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(conf))
+    result = updates.check_now(timeout=30)
+    assert result["available"] is None, "a failure must not read as up to date"
+    assert result["error"]
+
+
+def test_auto_install_is_off_by_default():
+    """The product decision. Replacing the binary under a running fleet risks
+    exactly what the operator uses this product to avoid."""
+    from multiprofile.config import get_settings
+
+    assert get_settings().update_auto_install is False
+
+
+def test_auto_install_is_refused_while_profiles_are_running(monkeypatch, tmp_path):
+    """Even when it has been turned on. An update that waits is an update;
+    one that interrupts a session is an incident."""
+    from multiprofile import updates
+
+    conf = tmp_path / "update.conf"
+    conf.write_text("[update]\nurl = http://127.0.0.1:1\nkeyring = /dev/null\n")
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(conf))
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_AUTO_INSTALL", "1")
+    monkeypatch.setattr(
+        "multiprofile.storage.db.list_profile_runtimes",
+        lambda *a, **k: [{"profile_id": "p1", "state": "running"}],
+    )
+    result = updates.install_now(require_opt_in=True)
+    assert result["ok"] is False
+    assert result["reason"] == "profiles_running"
+
+
+def test_auto_install_refuses_when_it_cannot_tell_what_is_running(monkeypatch, tmp_path):
+    """If the runtime table cannot be read, the safe answer is not to
+    install -- not to assume the fleet is idle."""
+    from multiprofile import updates
+
+    conf = tmp_path / "update.conf"
+    conf.write_text("[update]\nurl = http://127.0.0.1:1\nkeyring = /dev/null\n")
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(conf))
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_AUTO_INSTALL", "1")
+
+    def boom(*a, **k):
+        raise RuntimeError("control db unavailable")
+
+    monkeypatch.setattr("multiprofile.storage.db.list_profile_runtimes", boom)
+    result = updates.install_now(require_opt_in=True)
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_unknown"
+
+
+def test_the_scheduled_path_requires_the_opt_in(monkeypatch, tmp_path):
+    from multiprofile import updates
+
+    conf = tmp_path / "update.conf"
+    conf.write_text("[update]\nurl = http://127.0.0.1:1\nkeyring = /dev/null\n")
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(conf))
+    monkeypatch.delenv("MULTIPROFILE_UPDATE_AUTO_INSTALL", raising=False)
+    assert updates.install_now(require_opt_in=True)["reason"] == "auto_install_disabled"
+
+
+# --------------------------------------------------------------------------
+# 6. The endpoints that used to be stubs
+# --------------------------------------------------------------------------
+
+@pytest.fixture()
+def api(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "g"))
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
+    monkeypatch.setenv("MULTIPROFILE_UPDATE_CONF", str(tmp_path / "absent.conf"))
+    from multiprofile.api.server import create_app
+
+    app = create_app()
+    app.config["TESTING"] = True
+    return app.test_client()
+
+
+def test_the_update_endpoints_are_no_longer_stubs(api):
+    """They returned "Updater disabled in native build", {"status":
+    "disabled"} and {"ok": false} -- the F16 shape, a control the console can
+    call that reaches nothing."""
+    body = api.get("/api/update/status").get_json()
+    assert body["status"] != "disabled"
+    assert body["status"] == "no_channel"
+    assert "channelConfigured" in body
+
+
+def test_update_status_answers_without_a_channel(api):
+    body = api.get("/api/update").get_json()
+    assert body["ok"] is True
+    assert body["channelConfigured"] is False
+    assert body["autoInstall"] is False
+
+
+def test_checking_without_a_channel_is_not_a_server_error(api):
+    """200 with a body that says why. A 5xx would make the default state of
+    every fresh install look like a broken server."""
+    response = api.post("/api/update/check")
+    assert response.status_code == 200
+    assert response.get_json()["error"] == "no update channel configured"
+
+
+def test_apply_without_a_channel_is_refused_clearly(api):
+    response = api.post("/api/update/apply")
+    assert response.status_code == 409
+    assert response.get_json()["reason"] == "no_channel"
+
+
+def test_health_always_carries_the_update_block(api):
+    """Like the permissions and identity blocks: "no channel configured" is a
+    statement about this install, not an absence to be inferred."""
+    block = api.get("/api/health").get_json()["update"]
+    assert block["channelConfigured"] is False
+    assert block["autoInstall"] is False
+    assert "available" in block

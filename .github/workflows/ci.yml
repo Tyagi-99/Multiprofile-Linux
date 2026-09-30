@@ -46,7 +46,15 @@ jobs:
       - name: Test
         env:
           PYTHONPATH: src
-        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
+        # `-m "not network"` because this job installs no browser and no
+        # display. The live tests launch a real headful Chromium, so here they
+        # failed with "Chrome exited immediately with code 1" on every run,
+        # including on main -- a red light nobody could act on.
+        #
+        # They are not skipped: the `live-browser` job below exists for them
+        # and now has the display and session bus they actually need. This
+        # matches what the coverage job has always done.
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q -m "not network"
 
   coverage:
     name: Coverage
@@ -84,12 +92,26 @@ jobs:
           enable-cache: true
       - name: Install Chrome
         uses: browser-actions/setup-chrome@v1
+      - name: Install a display and a session bus
+        # The product launches Chromium **headful** with --ozone-platform=x11,
+        # because window tiling is a real feature and CDP can only set bounds
+        # on a window that exists. Without an X server Chrome exits 1 before
+        # doing anything, and without a session bus it prints
+        #   Could not parse server address: Unknown address type
+        # which is what every live test in CI was actually hitting.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb dbus dbus-x11 fonts-liberation
       - name: Install the project
         run: uv sync --all-extras --dev
       - name: Isolation and live launch tests
         env:
           PYTHONPATH: src
-        run: uv run pytest tests/ -q -m network -p no:randomly
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- \
+              uv run pytest tests/ -q -m network -p no:randomly
 
   frontend:
     name: Console

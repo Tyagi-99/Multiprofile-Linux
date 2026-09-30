@@ -215,6 +215,7 @@ def test_a_fault_reads_as_a_launch_note():
     assert "the override did not apply" in note
 
 
+@pytest.mark.network
 def test_a_fault_from_deeper_in_the_stack_reaches_the_notes(xdg, monkeypatch):
     """The launcher notes its own branches; this is for the rest.
 

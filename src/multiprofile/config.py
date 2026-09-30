@@ -116,6 +116,27 @@ class Settings:
     # A value of 0 means "follow max_concurrent_profiles".
     jobs_max_workers: int = 0
     jobs_max_concurrent_launches: int = 0
+    # Updates ([update])
+    #
+    # Checking is enabled, and inert until a channel is configured. Those two
+    # facts together are the product decision, and they are not a compromise:
+    #
+    #   * F14 established that this product makes no network requests of its
+    #     own. An install that was handed a .deb and nothing else has no
+    #     /etc/multiprofile/update.conf, so it asks nobody anything, ever.
+    #   * Writing that file is the opt-in. It says where this install should
+    #     look, and once it exists, checking on a schedule is the thing the
+    #     operator asked for.
+    #
+    # Installing is a separate decision and defaults OFF. This product's job
+    # is keeping browser sessions alive and separate; replacing the binary
+    # under a running fleet risks exactly what the operator uses it to avoid.
+    # When it is turned on it is still refused while any profile is running --
+    # an update that waits is an update, one that interrupts a session is an
+    # incident.
+    update_check_enabled: bool = True
+    update_check_interval_s: int = 86400   # daily; an update is never urgent to the second
+    update_auto_install: bool = False
     # Idle parking ([parking])
     #
     # **Default OFF, and that is the decision F20 asked for.**
@@ -195,6 +216,11 @@ def get_settings() -> Settings:
             "MULTIPROFILE_JOBS_MAX_LAUNCHES", 0, minimum=0, maximum=128
         ),
         # [parking]
+        update_check_enabled=_env_bool("MULTIPROFILE_UPDATE_CHECK_ENABLED", True),
+        update_check_interval_s=_env_int(
+            "MULTIPROFILE_UPDATE_CHECK_INTERVAL_S", 86400, minimum=3600, maximum=2592000
+        ),
+        update_auto_install=_env_bool("MULTIPROFILE_UPDATE_AUTO_INSTALL", False),
         parking_enabled=_env_bool("MULTIPROFILE_PARKING_ENABLED", False),
         parking_idle_timeout_s=_env_int("MULTIPROFILE_PARKING_IDLE_TIMEOUT_S", 1800, minimum=1, maximum=86400),
         parking_sweep_interval_s=_env_int(

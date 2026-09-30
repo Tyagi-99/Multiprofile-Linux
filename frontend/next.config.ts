@@ -1,5 +1,52 @@
+import { createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
 import type { NextConfig } from "next";
+
+/**
+ * A build id derived from the source, not from randomness.
+ *
+ * Next.js generates a random build id per build and writes it into the
+ * exported RSC payloads. CI has a step asserting that `src/static` matches a
+ * fresh build -- the package ships that directory, so a console change
+ * committed without re-exporting would silently ship the previous UI. With a
+ * random id that check compared two builds that could never be equal, so it
+ * failed on every run including on main, which makes it a gate nobody can
+ * act on. A red light that is always red is not a gate.
+ *
+ * Hashing the console's own sources and its lockfile makes the export
+ * reproducible: identical input gives an identical bundle, so the check fails
+ * only when the console actually changed without being re-exported. The id
+ * still moves whenever the app does, which is what it is for.
+ */
+function sourceBuildId(root: string): string {
+  const hash = createHash("sha256");
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir).sort()) {
+      const full = join(dir, entry);
+      const info = statSync(full);
+      if (info.isDirectory()) {
+        walk(full);
+      } else if (info.isFile()) {
+        hash.update(full.slice(root.length));
+        hash.update(readFileSync(full));
+      }
+    }
+  };
+  walk(join(root, "src"));
+  for (const name of ["package.json", "package-lock.json", "tsconfig.json"]) {
+    try {
+      hash.update(readFileSync(join(root, name)));
+    } catch {
+      // Absent is fine and must stay deterministic: a missing lockfile
+      // contributes nothing rather than throwing mid-build.
+    }
+  }
+  // Next.js requires a URL-safe id; base64url minus padding is both that and
+  // shorter than hex.
+  return hash.digest("base64url").slice(0, 21);
+}
 
 /**
  * Static export: the console is a localhost desktop app served by the Flask
@@ -25,6 +72,10 @@ export default (phase: string): NextConfig => {
     images: { unoptimized: true },
     // Keep asset paths relative-safe for serving under Flask's static dir.
     // (No basePath: the console is served from the server root, as today.)
+    //
+    // Deterministic build id: see sourceBuildId above. Without it the CI
+    // check that src/static matches a fresh build can never pass.
+    generateBuildId: async () => sourceBuildId(process.cwd()),
   };
 
   if (isDev) {

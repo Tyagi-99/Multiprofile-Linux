@@ -209,6 +209,27 @@ def _operator_state(launch_state: str | None) -> str | None:
 _LIST_OMITTED_FIELDS = ("fingerprint",)
 
 
+def _update_health() -> dict:
+    """A compact update summary for /api/health. Never raises."""
+    try:
+        from ..updates import status as _status
+
+        st = _status()
+        return {
+            "channelConfigured": st.get("channelConfigured"),
+            "checkEnabled": st.get("checkEnabled"),
+            "autoInstall": st.get("autoInstall"),
+            "available": st.get("available"),
+            "installed": st.get("installed"),
+            "latest": st.get("latest"),
+            "checkedAt": st.get("checkedAt"),
+            "error": st.get("error"),
+        }
+    except Exception as e:  # noqa: BLE001 - health must answer regardless
+        log.debug("update health unavailable: %s", e)
+        return {"channelConfigured": None, "error": "unavailable"}
+
+
 def _with_effective_geo(row: dict) -> dict:
     """Add the timezone the launch will actually claim, and why.
 
@@ -462,6 +483,10 @@ def create_app() -> Flask:
                 "profiles_store": "sqlite",
                 "profiles_writable": profiles_writable,
                 "count": len(items),
+                # Always present, like the permissions and identity blocks:
+                # "no channel configured" is a statement about how this
+                # install is set up, not an absence to be inferred.
+                "update": _update_health(),
                 # Always present. null is "the store was read"; a string is
                 # "count is 0 because it could not be", which is the one case
                 # a health check must not render as a healthy empty fleet.
@@ -1341,6 +1366,29 @@ def create_app() -> Flask:
 
         return None if failed else jobs
 
+    @app.get("/api/update")
+    def update_status():
+        """What this install knows about updates, without asking again.
+
+        Always answers, including when no channel is configured -- that is
+        the default state and the one where the product makes no network
+        requests at all, so it has to read as a fact rather than a failure.
+        """
+        from ..updates import status as _status
+
+        return jsonify({"ok": True, **_status()})
+
+    @app.post("/api/update/check")
+    def update_check():
+        """Ask the channel now. Reports; never installs."""
+        from ..updates import check_now
+
+        result = check_now()
+        # 200 even when the check could not be made: the request succeeded,
+        # and the body says what happened. A 5xx here would make "no channel
+        # configured" look like a broken server.
+        return jsonify({"ok": result.get("error") is None, **result})
+
     @app.get("/api/jobs")
     def jobs_list():
         all_jobs = _list_all_jobs()
@@ -1608,17 +1656,43 @@ def create_app() -> Flask:
     def switch_all_direct():
         return jsonify({"ok": True})
 
+    # These three were stubs -- "Updater disabled in native build",
+    # {"status": "disabled"}, {"ok": false} -- which is the F16 shape: a
+    # control the console can call that reaches nothing. Now they reach the
+    # updater that ships in the package.
     @app.post("/api/update/download")
     def update_download():
-        return jsonify({"ok": False, "error": "Updater disabled in native build"})
+        """Fetch and verify the update, without installing it."""
+        from ..updates import download_now
+
+        result = download_now()
+        return jsonify(result), (200 if result.get("ok") else 409)
 
     @app.get("/api/update/status")
-    def update_status():
-        return jsonify({"status": "disabled"})
+    def update_status_legacy():
+        """Kept at its old path; the console reads this one."""
+        from ..updates import status as _status
+
+        st = _status()
+        # `status` was a bare string here. Both shapes are returned so a
+        # client written against either keeps working.
+        if not st.get("channelConfigured"):
+            label = "no_channel"
+        elif st.get("available") is True:
+            label = "available"
+        elif st.get("available") is False:
+            label = "up_to_date"
+        else:
+            label = "unknown"
+        return jsonify({"status": label, **st})
 
     @app.post("/api/update/apply")
     def update_apply():
-        return jsonify({"ok": False})
+        """Install the available update. Refused while profiles are running."""
+        from ..updates import install_now
+
+        result = install_now()
+        return jsonify(result), (200 if result.get("ok") else 409)
 
     # ------------------------------------------------------------------ #
     #  Clone profile                                                       #
@@ -1852,6 +1926,16 @@ def create_app() -> Flask:
             start_parking_sweeper()
         except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
             log.warning("idle parking sweeper failed to start: %s", e)
+
+        # Update checking. Returns None and logs when no channel is
+        # configured, which is the default and the state in which this
+        # product makes no network requests of its own (F14).
+        try:
+            from ..updates import start_update_checker
+
+            start_update_checker()
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning("update checker failed to start: %s", e)
 
         # Browser supervisor (crash watchdog). start() is itself a no-op
         # when disabled by config; the guard here keeps a broken

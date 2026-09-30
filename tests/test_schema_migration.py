@@ -208,9 +208,14 @@ def test_the_base_schema_indexes_no_migrated_column():
     )
 
 
-def test_a_fresh_database_gets_the_same_shape_as_an_upgraded_one(tmp_path):
+def test_a_fresh_database_gets_the_same_shape_as_an_upgraded_one(tmp_path, monkeypatch):
     """The two paths must converge, or a bug only reproduces on one of them —
-    which is exactly how this was missed."""
+    which is exactly how this was missed.
+
+    `monkeypatch.setenv` rather than `os.environ[...]`: the suite runs in a
+    random order, so a directly mutated variable leaks into whichever test
+    happens to come next and fails something unrelated somewhere else.
+    """
     db.count_profiles()  # fresh
     conn = sqlite3.connect(str(db.db_path()))
     fresh_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
@@ -223,9 +228,7 @@ def test_a_fresh_database_gets_the_same_shape_as_an_upgraded_one(tmp_path):
 
     upgraded = tmp_path / "upgraded" / "multiprofile" / "control.db"
     _make_old_database(upgraded, 6)
-    import os
-
-    os.environ["XDG_DATA_HOME"] = str(tmp_path / "upgraded")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "upgraded"))
     db.close()
     db.count_profiles()
     conn = sqlite3.connect(str(db.db_path()))
