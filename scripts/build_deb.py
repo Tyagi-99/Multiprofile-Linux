@@ -150,6 +150,14 @@ def _add_data(tar: tarfile.TarFile, stage: Path) -> None:
                 continue
             files.append(p)
 
+    # dpkg-deb emits the archive root as a member of its own, and `dpkg-deb
+    # -c` lists it. Omitting it made the two builders' file listings differ by
+    # exactly one line, which is the sort of difference that is invisible
+    # until something compares them -- here, the CI step that does.
+    root_info = tarfile.TarInfo("./")
+    root_info.type = tarfile.DIRTYPE
+    root_info.mode = 0o755
+    tar.addfile(_tar_filter(root_info))
     for d in sorted(dirs):
         info = tarfile.TarInfo(d + "/")
         info.type = tarfile.DIRTYPE

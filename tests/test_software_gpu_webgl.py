@@ -67,3 +67,58 @@ def test_the_flag_list_is_not_shared_between_calls():
     a = chrome_gpu_args("software")
     a.append("--poisoned")
     assert "--poisoned" not in chrome_gpu_args("software")
+
+
+# --------------------------------------------------------------------------
+# A display is not a GPU
+# --------------------------------------------------------------------------
+
+def test_a_virtual_display_does_not_count_as_a_gpu(monkeypatch, tmp_path):
+    """`_probe_gpu_available` used to return True whenever DISPLAY was set,
+    on the reasoning that "at minimum Xvfb may work with ANGLE".
+
+    It does not. Xvfb is a window server, not a graphics device: ANGLE has
+    nothing to bind, WebGL fails outright, and because the probe claimed
+    hardware the software path with its SwiftShader flag was never taken. Any
+    headless server with a virtual display hits this, which is a large share
+    of the machines this product runs on unattended.
+    """
+    from pathlib import Path
+
+    import multiprofile.browser.launcher as L
+
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    assert L._probe_gpu_available() is False
+    assert SWIFTSHADER_GATE in L.chrome_gpu_args("auto")
+
+
+def test_a_wayland_display_does_not_count_either(monkeypatch):
+    from pathlib import Path
+
+    import multiprofile.browser.launcher as L
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-1")
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    assert L._probe_gpu_available() is False
+
+
+def test_a_real_render_node_still_counts(monkeypatch):
+    """The fix must not go the other way and send a machine with a GPU down
+    the software path."""
+    from pathlib import Path
+
+    import multiprofile.browser.launcher as L
+
+    monkeypatch.setattr(Path, "is_dir", lambda self: True)
+    monkeypatch.setattr(Path, "glob", lambda self, pat: [Path("/dev/dri/renderD128")])
+    monkeypatch.setattr(Path, "stat", lambda self, **k: True)
+
+    assert L._probe_gpu_available() is True
+    assert L.chrome_gpu_args("auto") == ["--use-gl=angle", "--use-angle=gl"]

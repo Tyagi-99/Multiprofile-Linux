@@ -151,9 +151,20 @@ def _probe_gpu_available() -> bool:
     for path in [Path("/dev/nvidia0"), Path("/dev/nvidiactl")]:
         if path.exists():
             return True
-    # DISPLAY set — at minimum Xvfb may work with ANGLE
-    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
-        return True
+    # A display is NOT a GPU.
+    #
+    # This used to return True whenever DISPLAY or WAYLAND_DISPLAY was set,
+    # on the reasoning that "at minimum Xvfb may work with ANGLE". It does
+    # not: Xvfb provides a window server, not a graphics device, so ANGLE has
+    # nothing to bind and WebGL fails outright -- and because this branch
+    # claimed hardware, the software path with its SwiftShader flag was never
+    # taken. Measured under Xvfb: getContext('webgl') null, and every
+    # GPU-related spoof inert.
+    #
+    # Any headless server with a virtual display hits this, which is a large
+    # share of the machines this product is likely to run on unattended. The
+    # docstring above says "a real GPU device is accessible"; a display is
+    # evidence of neither, so the guess is gone rather than refined.
     return False
 
 

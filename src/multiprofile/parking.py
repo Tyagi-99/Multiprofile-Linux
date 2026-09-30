@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 import threading
 import time
@@ -491,8 +492,20 @@ def compute_health_delays(
     out: list[tuple[str, float]] = []
     for i, profile_id in enumerate(profile_ids):
         wave = i // maxc
-        delay = wave * wave_gap + (rng.uniform(0, jitter) if jitter > 0 else 0.0)
-        out.append((str(profile_id), round(delay, 2)))
+        # `rng.random() * jitter`, not `rng.uniform(0, jitter)`: uniform is
+        # documented as inclusive of both endpoints and can return the upper
+        # bound outright through float rounding. The interval this function
+        # promises just above is half-open, and the difference was a test that
+        # failed roughly one run in a hundred -- which is worse than a bug,
+        # because an intermittently red suite is one people re-run rather than
+        # read.
+        delay = wave * wave_gap + (rng.random() * jitter if jitter > 0 else 0.0)
+        # Truncated, not rounded. `round(1.996, 2)` is 2.0, which puts the
+        # *returned* value outside the half-open interval this function
+        # documents -- and that is the value callers and tests see. It made a
+        # bound assertion fail roughly one run in a hundred, and an
+        # intermittently red suite is one people re-run rather than read.
+        out.append((str(profile_id), math.floor(delay * 100) / 100))
     return out
 
 
