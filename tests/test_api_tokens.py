@@ -80,12 +80,38 @@ def test_a_token_is_shown_once_and_never_again(client):
 
 
 def test_the_secret_is_not_stored_in_the_database(client, tmp_path):
-    secret = _mint(client, "cron")
-    raw = secret.split("_")[-1].encode()
+    """The property F39 exists for: a stolen control.db yields no working token.
+
+    This used to split the presented token on "_" and take the **last**
+    fragment. The token is ``mpt_<id>_<secret>`` and the secret is
+    ``secrets.token_urlsafe(32)``, whose alphabet includes "_" -- so about
+    half the time the fragment was a piece of the secret rather than the
+    secret, and 13% of the time it was under ten characters. Those runs
+    passed while asserting almost nothing. It failed only when the fragment
+    got short enough to occur in a binary file by chance, which is how it was
+    found: a one-byte "Q" that any database contains.
+
+    `maxsplit=2` takes everything after the prefix and the id, so the whole
+    secret is checked whatever it happens to contain.
+    """
+    presented = _mint(client, "cron")
+    prefix, token_id, secret = presented.split("_", 2)
+    assert prefix == "mpt" and len(token_id) == 12
+    # If a future token format breaks this split, fail here rather than
+    # quietly searching for a substring that proves nothing.
+    assert len(secret) >= 20, f"that is not a secret, it is a fragment: {secret!r}"
+
     blob = b""
     for path in (tmp_path / "data" / "multiprofile").glob("control.db*"):
         blob += path.read_bytes()
-    assert raw not in blob, "a leaked database must not yield a working token"
+    assert blob, "nothing was read; the assertions below would pass vacuously"
+    # The id *is* stored, so finding it proves this search can find things.
+    # Without it, "the secret is absent" and "the search is broken" look the
+    # same, and a test that cannot fail is not evidence of anything.
+    assert token_id.encode() in blob, "the search found nothing it should have found"
+
+    assert secret.encode() not in blob, "a leaked database must not yield a working token"
+    assert presented.encode() not in blob
 
 
 def test_the_listing_never_carries_the_hash(client):
