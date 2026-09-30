@@ -5,8 +5,9 @@ after §2 branches on it, so the roadmap is written as a fork rather than as a
 single line. Presenting one path as settled would be the same failure this
 audit spent its length fixing — an artefact that looks complete and is not.
 
-Where the product stands: **44 findings, 41 fixed, 3 open** — and one of the
-three, F3, is open only at its architectural ceiling. P0, P1, P2 and P3
+Where the product stands: **44 findings, 42 fixed, 2 open** — and both of the
+two are open only at the part that needs something outside this repository:
+F3 at its architectural ceiling, F12 at a signing key and a host. P0, P1, P2 and P3
 are complete. The fingerprint vectors reachable from
 JavaScript are coherent and per-profile ([`04`](04_FINGERPRINT_TEST_RESULTS.md));
 the orchestration, storage, API and commercial substrate are production-shaped.
@@ -66,18 +67,21 @@ within two weeks forever is a standing obligation that does not pause.
 
 These do not depend on the F3 answer and should start now.
 
-### 2.1 Signed builds and auto-update (**F12**) — M, 2–4 weeks · **highest priority**
+### 2.1 Signed builds and auto-update (**F12**) — ✅ built and tested · ⬜ not published
 
-An unsigned `.deb` with no update channel cannot be recommended to any buyer,
-and it is the only way a security fix reaches an existing install. Worse,
-`build-deb.sh` **cannot be exercised on the development machine**, so every
-packaging change ships unverified — an untested release process is a release
-process that fails on the day it matters.
+Every acceptance criterion on the original entry is met and runs on each push:
+a signed `.deb`, a verifiable signature chain, a delta channel, and a CI job
+that builds, installs, updates, verifies, refuses tampering and rolls back in
+a clean Debian container. `build-deb.sh` runs on the development machine now,
+which was the blocker underneath the blocker.
 
-*Acceptance:* a signed `.deb` with a verifiable signature; a delta update
-channel; a CI job that builds and installs it in a clean container.
-*Test plan:* install → update → verify signature → roll back.
-*Depends on:* nothing. This is the single highest-value item on the page.
+**What is left is not engineering.** There is no real signing key and nothing
+is published, so no install anywhere can yet receive an update.
+[`UPDATES.md`](UPDATES.md) §4 is the exact procedure and §5 is what stays
+unverified until it is followed — an hour of work once there is a key and a
+host, and impossible before.
+
+*Depends on:* your signing identity and somewhere to serve static files.
 
 ### 2.2 Two low-effort findings — ✅ done
 
@@ -103,16 +107,13 @@ Pixelscan, BrowserLeaks and Iphey and record the scores. This is how the F3
 decision gets a number attached to it instead of an argument, and it should
 happen **before** §1 is decided, not after.
 
-### 2.5 F20 — M, 1–2 weeks
+### 2.5 F20 — ✅ done
 
-The job queue has no producer (F20 — the durable queue is bypassed, and it is
-why idle parking never fires); 135 failure-swallowing handlers remain outside
-the identity and security paths (F11 — policy, not a bug hunt). **F13** is
-done: the work area is now read from the compositor that is actually running.
-
-F20 needs a product decision before it needs engineering — whether idle
-parking is on by default — plus a real migration, because the legacy job is a
-*batch* with shared progress and the durable queue has no batch concept.
+Job creation moved to the durable queue, which needed the batch concept the
+durable queue lacked; the legacy in-process queue is retired. Idle parking
+**defaults to off**, which is the decision the finding asked for and the one
+that matches what installs have actually been doing — the flag read `true` and
+reached nothing. Turning it on now works. **F13** and **F11** are also done.
 
 ---
 
@@ -195,14 +196,16 @@ changes the distribution model entirely.
 ## 7. Sequencing, independent of the fork
 
 ```
-NOW      ├─ F12 signed builds + auto-update      ← start today
-         ├─ F14 + F15                            ← 20 minutes
+DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43, F44
+         └─ F3's JavaScript surface
+
+NOW      ├─ Publish the channel                  ← needs a key + a host
          └─ Run the checkers                     ← gives §1 a number
 
 DECIDE   ├─ F3: A, B or C                        ← blocks everything below
          └─ Validate payment processors          ← blocks all of §6
 
-THEN     ├─ SDKs, F20, F13, F11
+THEN     ├─ SDKs
          ├─ The chosen §3 / §4 / §5 path
          └─ §6 if selling
 ```
@@ -224,7 +227,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 41 of 44 findings
+The product is in good shape below the fingerprint layer: 42 of 44 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

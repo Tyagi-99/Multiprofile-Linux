@@ -28,13 +28,28 @@ Optional extras, all included by `[all]`:
 
 ## The `.deb`
 
-`./build-deb.sh` produces `dist/multiprofile-native_<version>_amd64/`.
+```bash
+./build-deb.sh
+```
 
-**It is unsigned and there is no update channel** — see **F12** in
-[`02_AUDIT_REPORT`](02_AUDIT_REPORT.md). It also **cannot be built or exercised
-on the development machine**, which is Arch and has no `dpkg-deb`, so packaging
-changes here ship unverified. Install it only if you are prepared to verify it
-yourself.
+Produces `dist/multiprofile-native_<version>_amd64.deb` and its `.sha256`.
+This runs anywhere, including on Arch: it prefers `dpkg-deb` when that exists
+and falls back to [`scripts/build_deb.py`](../scripts/build_deb.py), which
+writes the same archive from the standard library. CI diffs the two on every
+build.
+
+**Signing and updates are built but not published.** The repository tooling,
+delta channel, `multiprofile-update` client and rollback all exist and are
+tested end to end in a clean Debian container on every push — but there is no
+real signing key and no host, so **a `.deb` you build today is unsigned and
+has no update channel**. See [`UPDATES.md`](UPDATES.md), and **F12** in
+[`02_AUDIT_REPORT`](02_AUDIT_REPORT.md).
+
+To exercise the whole release process yourself:
+
+```bash
+bash scripts/release-lifecycle.sh
+```
 
 ## Where your data lives
 

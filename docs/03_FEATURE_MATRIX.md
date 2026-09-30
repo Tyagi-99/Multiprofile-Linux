@@ -191,7 +191,7 @@ product exists to avoid.
 | Headless mode | 🟡 engine supports it, not exposed | ✅ | ✅ | ✅ | P1 | S |
 | **No-code RPA builder** | ❌ | ✅ | ✅ | ✅ | P2 | XL |
 | Synchronizer (mirror actions) | ❌ | ✅ | 🟡 | ✅ | P2 | L |
-| Scheduler | ❌ | ✅ | ✅ | ✅ | P2 | M |
+| Scheduler | 🟡 durable queue + idle-parking sweeper (F20); no user-facing scheduler | ✅ | ✅ | ✅ | P2 | M |
 | Window tiling | ✅ F13 — X11 **and** Wayland | ✅ | 🟡 | ✅ | P1 | — |
 | Webhooks / events | 🟡 SSE locally, no webhooks | ✅ | 🟡 | ✅ | P2 | M |
 | CLI | ✅ | 🟡 | ❌ | 🟡 | P2 | — |
@@ -214,17 +214,20 @@ ratio of parity-per-effort on this page.
 | Linux (.rpm / AppImage) | ❌ | ❌ | ❌ | ❌ | P2 | S |
 | Windows | ❌ | ✅ | ✅ | ✅ | P2 | XL |
 | macOS (Intel + Apple Silicon) | ❌ | ✅ | ✅ | ✅ | P2 | XL |
-| **Signed builds** | ❌ **F12** | ✅ | ✅ | ✅ | **P1** | M |
-| **Signed delta auto-update** | ❌ **F12** | ✅ | ✅ | ✅ | **P1** | M |
+| **Signed builds** | 🟡 **F12** — built and CI-tested, no key yet | ✅ | ✅ | ✅ | **P1** | S |
+| **Signed delta auto-update** | 🟡 **F12** — built and CI-tested, not published | ✅ | ✅ | ✅ | **P1** | S |
 | Offline mode | ✅ fully local | 🟡 | 🟡 | 🟡 | P1 | — |
 | Crash reporting (opt-in) | ❌ | ✅ | ✅ | ✅ | P2 | S |
 | Telemetry (opt-in) | ✅ **none at all** | 🟡 | 🟡 | 🟡 | P1 | — |
 
 Linux-first is this product's only structural differentiator: the other three
-treat Linux as a port. Against that, **F12** is the row that blocks selling to
-anyone — an unsigned `.deb` with no update channel is not something a
-commercial buyer installs, and `build-deb.sh` cannot be exercised on the
-development machine, so packaging changes ship unverified.
+treat Linux as a port. **F12** used to be the row that blocked selling to
+anyone. The machinery now exists and is exercised end to end on every push —
+signed repository, deltas, an updater, rollback, and a tampered channel proven
+to be refused — and `build-deb.sh` runs on the development machine, which was
+the reason packaging shipped unverified. What is left is a signing key and a
+host, which is an hour of work and not an engineering task; see
+[`UPDATES.md`](UPDATES.md) §4.
 
 ---
 

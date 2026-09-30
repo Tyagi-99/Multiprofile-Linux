@@ -91,7 +91,7 @@ engineering draft rather than legal advice.
 | **F9** | ✅ Medium | UX | Listing got **quadratically slower**; the whole store was materialised per page — **SQL paging + one-page fleet** | done |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
 | **F11** | ✅ Medium | Code quality | Failure-swallowing handlers — every site classified, four that cost the operator something fixed, and `BLE001`/`S110` now **enforced** | done |
-| **F12** | 🟡 Medium | Distribution | Build can't run on the dev machine; no signing, no auto-update | 2–4 wk |
+| **F12** | 🟡 Medium | Distribution | Build now runs anywhere; signed channel, deltas, updater and rollback **built and tested in CI** — no real key and nothing published yet | partial |
 | **F13** | ✅ Medium | Reliability | Window tiling was X11-bound; dead on the Wayland host it is developed on | done |
 | **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
 | **F15** | ✅ Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | done |
@@ -99,7 +99,7 @@ engineering draft rather than legal advice.
 | **F17** | ✅ **Critical** | Security | An **unresolvable route launched on the host IP** and reported success — found by F16 | done |
 | **F18** | ✅ **Critical** | Security | **Every profile in a proxy pool egressed through the same member** — pools never recorded a decision | done |
 | **F19** | ✅ **High** | Security | The **WebRTC control was inert**: the API's vocabulary matched nothing downstream | done |
-| **F20** | 🟡 Medium | Reliability | The **durable job queue has no producer** — now at least visible; moving the writer is filed | 1 wk |
+| **F20** | ✅ Medium | Reliability | The **durable job queue had no producer** — job creation migrated to it, batches added, legacy retired, idle-parking default decided | done |
 | **F21** | ✅ Medium | UX / Correctness | More silent-drop contract bugs: `description`, null-clearing, `egress_ip`/`latency_ms` case — **fixed** | done |
 | **F22** | ✅ **High** | Fingerprint | Timezone was **JavaScript-only**; every unhooked surface reported the host zone — **fixed** | done |
 | **F23** | ✅ **High** | Fingerprint | `enumerateDevices` **volunteered a persistent id the host withholds**, the same one for all three kinds — **fixed** | done |
@@ -2429,7 +2429,7 @@ overwrites an operator's explicit choice.
 
 ---
 
-### F20 — 🟡 MEDIUM: the durable job queue has no producer — **VISIBLE, WRITER FILED**
+### F20 — ✅ MEDIUM: the durable job queue has no producer — **FIXED**
 
 **Files:** [`api/server.py`](../src/multiprofile/api/server.py), [`jobs/`](../src/multiprofile/jobs/)
 
@@ -2457,15 +2457,60 @@ workers spin against an empty table. The console's "Park" button does
 > and crash recovery *does* re-queue into that table, and until now no client
 > could see either.
 >
-> **Filed, not done: moving the writer.** `POST /api/jobs` still targets legacy,
-> deliberately. A bulk API type maps to N durable jobs, cancel semantics differ
-> between the two, and the console's jobs page changes shape — that is a feature
-> with a migration, not an audit fix, and it should land with the decision about
-> whether idle-parking is on by default. Until it does, the second queue stays a
-> recovery mechanism with no ordinary producer.
+> **Done: the writer moved.** `POST /api/jobs` writes to the durable queue,
+> the legacy module is retired, and there is one queue.
 >
-> Verified: 7 tests in `tests/test_jobs_listing.py`, including that one queue
-> failing does not hide the other, and that `POST` still targets legacy.
+> The migration needed a missing concept, which is why it was not a redirect.
+> The durable queue is **per profile**; the operator works in **batches** —
+> "launch these eight" is one thing they started, with one progress bar and one
+> cancel button. Schema v7 adds `job_batches` plus `batch_id` / `batch_seq` /
+> `cancel_requested` on `jobs`, and [`jobs/batches.py`](../src/multiprofile/jobs/batches.py)
+> rebuilds the record the API has always returned from those rows.
+>
+> Three decisions inside it are worth stating:
+>
+> - **Progress is derived, never stored.** It counts members in a terminal
+>   state. A stored counter and the rows it counts can disagree after a crash,
+>   and a progress bar that survives a restart saying 5/8 while three rows are
+>   still queued is worse than none.
+> - **A running member is asked to stop, not killed.** Queued members are
+>   cancelled outright in the same transaction that raises the flag, so no
+>   worker can claim one after the decision. A member already launching carries
+>   `cancel_requested` and checks it at its next safe point, because
+>   interrupting a half-launched browser leaves a process nobody is tracking.
+> - **Tiling is planned before anything launches and applied after everything
+>   has.** With `tileRequired`, the work area is resolved at create time and the
+>   batch is refused outright if it cannot be — failing before any browser
+>   starts beats failing after eight of them have.
+>
+> **The performance trap.** `jobs_max_workers` was 4 and
+> `jobs_max_concurrent_launches` was 2, sized for background parking jobs.
+> Leaving them would have quietly undone **F33**, which made a batch of 8 take
+> ~3 s instead of ~13 s. Both now follow the profile concurrency cap, since
+> `acquire_slot` is the authoritative gate and a narrower pool would only
+> serialise behind it. F33's five invariants — overlap, exactly-once, operator
+> ordering, the ceiling, partial failure — are asserted **unchanged** against
+> the new queue in `test_launch_throughput.py`.
+>
+> **Idle parking: default OFF, and that is the decision this finding asked
+> for.** `parking_enabled` read `True` for the whole audit and parked nothing,
+> because nothing enqueued a park job — the finding itself. Wiring the producer
+> while leaving the default True would have changed what the product *does* on
+> every existing install: browsers left open would start disappearing after 30
+> minutes, silently, on upgrade. A setting that has never done anything is not
+> one anyone opted into. So the default now matches what installs have actually
+> been doing, and `parking.sweep_idle_profiles` / `start_parking_sweeper` make
+> turning it on work rather than reach nothing.
+>
+> **The legacy module is retired, not deleted.** It raises with an explanation.
+> Deleting it would let an import missed in the migration fail as a NameError
+> somewhere unrelated, and quietly running a second queue nobody watches is the
+> finding.
+>
+> Verified: 28 tests in `tests/test_job_batches.py`, 8 in
+> `tests/test_jobs_listing.py`, and F33's throughput tests ported. Measured
+> live: 4 profiles launched in parallel, batch `completed`, 7.7 s end to end,
+> rows still in the database afterwards.
 
 ---
 
@@ -2668,12 +2713,59 @@ including 160 generated profiles across four platforms.
 
 ---
 
-### F12 — 🟡 MEDIUM: distribution is not production-ready
+### F12 — 🟡 MEDIUM: distribution is not production-ready — **BUILT AND TESTED, NOT PUBLISHED**
 
 No signing, no auto-update, no crash reporting, Debian-only, and `build-deb.sh`
 **cannot run on the primary dev machine** (exit 127, no `dpkg-deb`). The packaging
 path is exercised only in CI. For a paid desktop app in a category where users are
 security-sensitive, unsigned unverifiable binaries are a hard blocker.
+
+> **The blocker underneath the blocker was the first sentence, not the
+> signing.** A release process that cannot be run is one that fails on the day
+> it matters, and this one had been built exactly once per push, in a job
+> nobody opened. `scripts/build_deb.py` writes the three-member `ar` archive a
+> `.deb` is from the standard library, so **`build-deb.sh` now runs on Arch**.
+> `dpkg-deb` stays preferred where it exists, and CI diffs the two on every
+> build — if they ever disagree, the package the developer tests is not the one
+> that ships.
+>
+> **The channel is an ordinary signed apt repository**, because that is the
+> mechanism apt already verifies and an operator already knows how to trust.
+> `InRelease` is signed; it carries the hashes of `Packages`; `Packages` carries
+> the SHA-256 of each `.deb`. One signature, whole chain, and a tampered package
+> fails before dpkg sees it. Per-package `debsigs` signatures are deliberately
+> not used: almost nothing verifies them by default, and a signature nobody
+> checks is worse than none because it reads as protection.
+>
+> **Deltas are real and measured.** `zstd --patch-from` (zstd is in Debian
+> main) between consecutive versions, listed in a `deltas.json` whose own hash
+> is in the signed `Release`. A delta is an optimisation and never a trust
+> boundary: the client applies it and then checks the result against the hash in
+> the signed `Packages`, so a corrupt or hostile delta costs a download rather
+> than an install.
+>
+> **`multiprofile-update` ships inside the package it updates** — `--check`,
+> `--download`, `--install`, `--rollback` — and never installs without being
+> asked. The package being replaced is kept locally, so a rollback works when
+> the network or the new release does not.
+>
+> **The whole lifecycle runs in a clean Debian container** on every push
+> (`scripts/release-lifecycle-inner.sh`): build two versions, sign with a key
+> generated for that run and discarded with the container, publish, install,
+> update **across the delta**, verify the chain, confirm a tampered channel is
+> **refused**, roll back, and confirm the rolled-back install still serves its
+> API. No production secret is involved anywhere.
+>
+> **What is not done, and it is the half that matters commercially:** there is
+> no real signing key and nothing is published. Every signature so far is from a
+> throwaway key inside a test. [`docs/UPDATES.md`](UPDATES.md) §4 has the exact
+> steps, and §5 lists what stays unverified until they are taken — including
+> `apt update` against a live repository, upgrade across a genuine code change,
+> anything but amd64, and key rotation.
+>
+> Verified: 28 tests in `tests/test_update_channel.py` covering the builder,
+> the signature chain, three kinds of tampering, a signature from the wrong key,
+> delta reconstruction, and the client's fallback behaviour.
 
 ---
 
