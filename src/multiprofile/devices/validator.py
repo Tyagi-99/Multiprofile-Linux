@@ -367,18 +367,49 @@ def _cdp_round_trip(binary: str, preset: DevicePreset, timeout: int = 25) -> Tup
         if "error" in r1:
             return _fail(f"Emulation.setDeviceMetricsOverride rejected: {r1['error']}")
 
-        r2 = _send("Runtime.evaluate", {
-            "expression": "JSON.stringify({w: window.innerWidth, h: window.innerHeight})",
-            "returnByValue": True,
-        }, 2)
-        if "error" in r2:
-            return _fail(f"Runtime.evaluate rejected: {r2['error']}")
-        try:
-            val = json.loads(r2["result"]["result"]["value"])
-        except Exception as e:  # noqa: BLE001
-            return _fail(f"could not parse evaluate result: {e}")
-
-        got_w, got_h = val.get("w"), val.get("h")
+        # Observe the relayout, do not assume it.
+        #
+        # `setDeviceMetricsOverride` returns when the browser process accepts
+        # the override, not when the renderer has finished laying out at the
+        # new size. Reading `window.innerWidth` immediately after it can
+        # therefore return the *previous* viewport, and under load it
+        # sometimes did: one preset in a few hundred failed with
+        #
+        #     round-trip mismatch: applied 412x906, page reports 981x2156
+        #
+        # 981/412 is the device scale factor -- the stale, physical-pixel
+        # viewport from before the override. A different preset each run, so
+        # it read as a flake, which is the worst thing a check can be: this
+        # one decides whether a device preset is VALIDATED, and a verdict
+        # that depends on a race is not a verdict.
+        #
+        # Polling does not weaken the check. It still fails when the viewport
+        # never becomes what was applied; it just stops failing when the
+        # answer had not arrived yet.
+        got_w = got_h = None
+        settle_deadline = time.time() + 5.0
+        attempt = 2
+        while time.time() < settle_deadline:
+            r2 = _send("Runtime.evaluate", {
+                "expression": "JSON.stringify({w: window.innerWidth, h: window.innerHeight})",
+                "returnByValue": True,
+            }, attempt)
+            attempt += 1
+            if "error" in r2:
+                return _fail(f"Runtime.evaluate rejected: {r2['error']}")
+            try:
+                val = json.loads(r2["result"]["result"]["value"])
+            except Exception as e:  # noqa: BLE001
+                return _fail(f"could not parse evaluate result: {e}")
+            got_w, got_h = val.get("w"), val.get("h")
+            if got_w is not None and abs(got_w - vw) <= 2 and abs(got_h - vh) <= 2:
+                break
+            time.sleep(0.1)
+        else:
+            return _fail(
+                f"round-trip mismatch: applied {vw}x{vh}, page still reports "
+                f"{got_w}x{got_h} after 5s"
+            )
         if got_w is None or abs(got_w - vw) > 2 or abs(got_h - vh) > 2:
             return _fail(
                 f"round-trip mismatch: applied {vw}x{vh}, page reports {got_w}x{got_h}"
