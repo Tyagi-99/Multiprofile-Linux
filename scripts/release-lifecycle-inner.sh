@@ -107,33 +107,70 @@ test "$(dpkg-query --showformat='${Version}' --show multiprofile-native)" = "1.9
 echo "updated 1.9.0 -> 1.9.1 via delta: ok"
 
 step "10. a tampered channel must be refused"
-cp -r "$WORK/repo" "$WORK/evil"
-printf 'evil' >> "$WORK/evil/pool/main/multiprofile-native_1.9.1_amd64.deb"
-# Re-hash Packages so only the signature is wrong. That is the attack that
-# matters: a mirror that can rewrite files but cannot sign them.
-python3 - "$WORK/evil" <<'PY'
-import hashlib, pathlib, re, sys
+# Two separate gates, because they fail for different reasons and a channel
+# that catches one and not the other is not protected.
+#
+# The first version of this step rewrote `Packages` and watched for a refusal
+# that never came: the client fetches `Packages.gz`, so the tampered file was
+# never read. It then reported "up to date" and the step passed its own
+# grep for the wrong reason. Tamper with what is actually fetched.
+
+tamper_dir() {
+  rm -rf "$2"; cp -r "$1" "$2"
+}
+
+serve() {
+  ( cd "$1" && nohup python3 -m http.server "$2" >/dev/null 2>&1 & )
+  sleep 2
+}
+
+expect_refusal() {
+  local label="$1" port="$2" pattern="$3"
+  sed -i "s|:[0-9]\{4\}|:$port|" /etc/multiprofile/update.conf
+  set +e
+  multiprofile-update --check > "$WORK/$label.log" 2>&1
+  local rc=$?
+  set -e
+  cat "$WORK/$label.log"
+  if [ "$rc" = "0" ] || [ "$rc" = "10" ]; then
+    echo "FAIL: $label was accepted (exit $rc)"; exit 1
+  fi
+  grep -qiE "$pattern" "$WORK/$label.log" || {
+    echo "FAIL: $label was refused, but not for the expected reason"; exit 1; }
+  echo "$label refused: ok"
+}
+
+# 10a. The package index rewritten by a mirror that cannot sign.
+tamper_dir "$WORK/repo" "$WORK/evil-index"
+printf 'evil' >> "$WORK/evil-index/pool/main/multiprofile-native_1.9.1_amd64.deb"
+python3 - "$WORK/evil-index" <<'PY'
+import gzip, hashlib, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 deb = root / "pool/main/multiprofile-native_1.9.1_amd64.deb"
 idx = root / "dists/stable/main/binary-amd64/Packages"
-text = idx.read_text()
+blocks = idx.read_text().split("\n\n")
 digest = hashlib.sha256(deb.read_bytes()).hexdigest()
-blocks = text.split("\n\n")
 for i, b in enumerate(blocks):
     if "1.9.1" in b:
-        blocks[i] = re.sub(r"(?m)^SHA256: .*$", f"SHA256: {digest}", b)
-        blocks[i] = re.sub(r"(?m)^Size: .*$", f"Size: {deb.stat().st_size}", blocks[i])
-idx.write_text("\n\n".join(blocks))
+        b = re.sub(r"(?m)^SHA256: .*$", f"SHA256: {digest}", b)
+        blocks[i] = re.sub(r"(?m)^Size: .*$", f"Size: {deb.stat().st_size}", b)
+text = "\n\n".join(blocks)
+idx.write_text(text)
+# ...and the compressed copy, which is the one the client actually fetches.
+with gzip.GzipFile(str(root / "dists/stable/main/binary-amd64/Packages.gz"), "wb", mtime=0) as fh:
+    fh.write(text.encode())
 PY
-( cd "$WORK/evil" && nohup python3 -m http.server 8098 >/dev/null 2>&1 & )
-sleep 2
-sed -i 's|:8099|:8098|' /etc/multiprofile/update.conf
-set +e; multiprofile-update --check > "$WORK/evil.log" 2>&1; set -e
-cat "$WORK/evil.log"
-grep -qi "does not match the signed Release\|not signed by the expected key" "$WORK/evil.log" \
-  || { echo "a tampered channel was NOT refused"; exit 1; }
-echo "tampered channel refused: ok"
-sed -i 's|:8098|:8099|' /etc/multiprofile/update.conf
+serve "$WORK/evil-index" 8098
+expect_refusal "tampered-index" 8098 "does not match the signed Release"
+
+# 10b. The signature removed entirely.
+tamper_dir "$WORK/repo" "$WORK/evil-unsigned"
+cp "$WORK/evil-unsigned/dists/stable/Release" "$WORK/evil-unsigned/dists/stable/InRelease"
+serve "$WORK/evil-unsigned" 8097
+expect_refusal "unsigned" 8097 "not signed by the expected key"
+
+# Back to the real channel.
+sed -i "s|:[0-9]\{4\}|:8099|" /etc/multiprofile/update.conf
 
 step "11. roll back"
 multiprofile-update --rollback --yes

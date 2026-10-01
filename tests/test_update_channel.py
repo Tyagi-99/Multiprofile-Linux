@@ -717,3 +717,48 @@ def test_health_always_carries_the_update_block(api):
     assert block["channelConfigured"] is False
     assert block["autoInstall"] is False
     assert "available" in block
+
+
+def test_tampering_with_only_the_compressed_index_is_refused(channel, tmp_path):
+    """The client fetches Packages.gz, not Packages.
+
+    The release lifecycle's tamper step originally rewrote the plain
+    `Packages`, watched for a refusal that never came, and passed anyway --
+    the file it corrupted was never read. A gate aimed at a file nobody
+    fetches protects nothing, so this pins which one is actually verified.
+    """
+    evil = tmp_path / "gz-only"
+    shutil.copytree(channel["repo"], evil)
+    idx = evil / "dists/stable/main/binary-amd64/Packages"
+    rewritten = idx.read_text().replace("Version: 1.1.0", "Version: 9.9.9")
+    gz = evil / "dists/stable/main/binary-amd64/Packages.gz"
+    with gzip.GzipFile(str(gz), "wb", mtime=0) as fh:
+        fh.write(rewritten.encode())
+    # The plain index is left untouched on purpose: only the compressed one
+    # is corrupt, and the client must still refuse.
+
+    srv = _Server(evil)
+    try:
+        env = _client_env(tmp_path, evil, srv.url, installed="1.0.0")
+        out = _run_updater(env, "--check")
+        assert out.returncode != 0, out.stdout
+        assert "does not match the signed Release" in out.stderr, out.stderr
+    finally:
+        srv.close()
+
+
+def test_an_untouched_plain_index_does_not_rescue_a_bad_gz(channel, tmp_path):
+    """Belt and braces for the above: the client must not silently fall back
+    to the uncompressed index when the compressed one fails its hash."""
+    evil = tmp_path / "gz-bad-plain-good"
+    shutil.copytree(channel["repo"], evil)
+    gz = evil / "dists/stable/main/binary-amd64/Packages.gz"
+    gz.write_bytes(b"not gzip at all")
+
+    srv = _Server(evil)
+    try:
+        env = _client_env(tmp_path, evil, srv.url, installed="1.0.0")
+        out = _run_updater(env, "--check")
+        assert out.returncode != 0, out.stdout
+    finally:
+        srv.close()
