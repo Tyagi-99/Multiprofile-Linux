@@ -30,7 +30,7 @@ bash build-deb.sh >/dev/null
 cp dist/multiprofile-native_1.9.1_amd64.deb "$WORK/"
 sed -i 's/^VERSION=1.9.1/VERSION=1.9.0/' build-deb.sh
 sed -i 's/^Version: 1.9.1/Version: 1.9.0/' packaging/debian/control
-ls -l "$WORK"/v1.deb "$WORK"/v2.deb
+ls -l "$WORK"/multiprofile-native_*.deb
 
 step "2. the fallback builder must match dpkg-deb"
 # dpkg-deb exists here, so build-deb.sh used it. Build the same stage with the
