@@ -141,21 +141,24 @@ def _probe(seed: int, tmp_path) -> dict:
 @pytest.fixture(scope="module")
 def two_profiles(tmp_path_factory):
     probed = {s: _probe(s, tmp_path_factory.mktemp(f"g{s}")) for s in (111, 222)}
-    # A host whose engine exposes no WebGPU cannot be asked whether this
-    # product's WebGPU claim is coherent. Measured on Chromium 151 with
-    # software rendering: `navigator.gpu` is undefined, and neither
-    # --enable-unsafe-webgpu nor a SwiftShader Vulkan driver brings it back.
+    # A host with no graphics device has no WebGPU adapter, and there is then
+    # no adapter for this product's claim to agree or disagree with.
     #
-    # Skipped on the browser's own answer rather than on a guess about the
-    # machine, so this still runs wherever WebGPU exists -- which includes
-    # the development host and any runner with a real GPU. Asserting into an
-    # absent API would report an environment gap as a product failure, and a
-    # suite that cries wolf about the environment is one whose real findings
-    # get skimmed.
-    if all(p.get("has_gpu") != "object" for p in probed.values()):
+    # The distinction that matters: on a machine **with** a GPU, a missing
+    # adapter is a product bug and these tests must say so -- that is what
+    # test_webgpu_is_available_at_all was written for, after
+    # --ozone-platform=x11 cost the adapter entirely. So the skip is gated on
+    # the product's own host probe rather than on the symptom. `webgl_renderer`
+    # below is no use for this: it is the value the product *claims*, not what
+    # the machine actually has.
+    from multiprofile.browser.launcher import _probe_gpu_available
+
+    no_adapter = all(p.get("adapter") is None for p in probed.values())
+    if no_adapter and not _probe_gpu_available():
         pytest.skip(
-            "this engine exposes no navigator.gpu (software rendering); "
-            "WebGPU coherence cannot be measured here"
+            "this host has no graphics device, so there is no WebGPU adapter "
+            "for the claim to be checked against; on a machine with a GPU a "
+            "missing adapter still fails these tests"
         )
     return probed
 
