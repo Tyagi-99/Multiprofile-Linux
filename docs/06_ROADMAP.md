@@ -5,7 +5,7 @@ after §2 branches on it, so the roadmap is written as a fork rather than as a
 single line. Presenting one path as settled would be the same failure this
 audit spent its length fixing — an artefact that looks complete and is not.
 
-Where the product stands: **44 findings, 42 fixed, 2 open** — and both of the
+Where the product stands: **46 findings, 44 fixed, 2 open** — and both of the
 two are open only at the part that needs something outside this repository:
 F3 at its architectural ceiling, F12 at a signing key and a host. P0, P1, P2 and P3
 are complete. The fingerprint vectors reachable from
@@ -69,10 +69,11 @@ These do not depend on the F3 answer and should start now.
 
 ### 2.1 Signed builds and auto-update (**F12**) — ✅ built and tested · ⬜ not published
 
-Every acceptance criterion on the original entry is met and runs on each push:
-a signed `.deb`, a verifiable signature chain, a delta channel, and a CI job
-that builds, installs, updates, verifies, refuses tampering and rolls back in
-a clean Debian container. `build-deb.sh` runs on the development machine now,
+Every acceptance criterion on the original entry is met and **green in CI on
+every push**: a signed `.deb`, a verifiable signature chain, a delta channel,
+automatic update checking, and a job that builds, installs, updates across the
+delta, verifies, refuses two kinds of tampered channel and rolls back in a
+clean Debian container. `build-deb.sh` runs on the development machine now,
 which was the blocker underneath the blocker.
 
 **What is left is not engineering.** There is no real signing key and nothing
@@ -227,7 +228,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 42 of 44 findings
+The product is in good shape below the fingerprint layer: 44 of 46 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

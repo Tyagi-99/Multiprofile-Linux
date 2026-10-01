@@ -6,6 +6,10 @@ developer machine; it has never been pointed at a real signing key or a real
 host, because neither exists yet. §5 is the exact list of what that leaves
 unverified, stated rather than implied.
 
+The full lifecycle — build, sign, publish, install, **update across a delta**,
+verify, refuse two kinds of tampered channel, roll back, and confirm the
+rolled-back install still serves its API — runs green in CI on every push.
+
 This closes the buildable half of **F12**. See [`02`](02_AUDIT_REPORT.md).
 
 ---
@@ -35,6 +39,57 @@ it to the installed `.deb` and then checks the result against the hash in the
 signed `Packages` — not against the delta manifest. A corrupt or hostile delta
 therefore costs a download, never an install. That is asserted in
 `tests/test_update_channel.py::test_a_corrupt_delta_costs_a_download_not_an_install`.
+
+## 2b. Automatic updates — what is automatic, and what is not
+
+The feature matrix row says "signed delta **auto**-update", and everything in
+§1 is something the operator starts. Two principles collide here and both are
+right:
+
+* **F14** established that this product makes no network requests of its own.
+  That is a selling point, not an oversight. An updater that polls a server on
+  a timer is a network request of its own, and it tells that server an install
+  exists, what version it is, and roughly when it is used.
+* An install that cannot find out about a security fix is the problem **F12**
+  exists to solve.
+
+The resolution is not a compromise between them:
+
+| | |
+|---|---|
+| **No channel configured → no requests, ever.** | The default, and what a freshly installed `.deb` does. There is no `/etc/multiprofile/update.conf`, so nothing is asked of anybody. |
+| **Writing that file is the opt-in.** | It says where this install should look. Once it exists, checking on a schedule is the thing the operator asked for; a second switch would be ceremony. |
+| **Checking is not installing.** | `GET /api/update`, `POST /api/update/check` and the `update` block in `/api/health` carry the answer. Nothing is replaced. |
+
+Checking runs daily (`MULTIPROFILE_UPDATE_CHECK_INTERVAL_S`) on a background
+thread started with the API server, and is silent when there is no channel.
+
+### Automatic installing is off by default, deliberately
+
+`update_auto_install` defaults to **false**, and even when enabled an install
+is **refused while any profile is running**.
+
+This product's job is keeping browser sessions alive and separate. Replacing
+the binary under a running fleet risks exactly what the operator uses it to
+avoid, and *"your accounts were logged out because the app updated itself at
+3am"* is not a trade anyone offered them. An update that waits is still an
+update; one that interrupts a session is an incident.
+
+If the runtime table cannot be read, the answer is also "do not install" —
+not "assume the fleet is idle".
+
+```bash
+multiprofile-update --check        # exit 10 when an update exists
+sudo multiprofile-update --install # explicit, and what /api/update/apply calls
+sudo multiprofile-update --rollback
+```
+
+`POST /api/update/apply` does not require the auto-install setting: pressing a
+button *is* the request, and refusing it because a config flag is off would be
+a control that reaches nothing — which is what these three endpoints used to
+be (`{"status": "disabled"}`).
+
+---
 
 ## 3. Running it now
 
@@ -159,7 +214,8 @@ Stated plainly, because "signed builds are done" would not be true.
 | **Upgrade across a genuine code change** | The two versions in the lifecycle differ only in their version markers, because that is enough to exercise the mechanism. A real upgrade also has to survive `postinst` against changed files and a running instance. |
 | **Anything but amd64, and anything but Debian/Ubuntu** | `Architecture: amd64` is hard-coded; there is no arm64 build and no `.rpm` or AppImage. |
 | **Key rotation and revocation** | No procedure is written. This matters before the two-year expiry, not after. |
-| **Unattended updates** | Deliberately absent. `multiprofile-update` never installs without being asked, and a timer that upgrades a desktop app mid-session is a decision to make on purpose. |
+| **Unattended installing in the field** | Implemented and off by default (§2b). It has been exercised against a throwaway channel in CI, never against a real one, and never on a machine doing real work. |
+| **The daily checker against a live host** | The schedule, the signature gate and the refusals are tested; what is untested is a year of a real server answering, including the day it returns a 500 or a stale index. |
 
 ---
 

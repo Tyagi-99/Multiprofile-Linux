@@ -91,7 +91,7 @@ engineering draft rather than legal advice.
 | **F9** | ✅ Medium | UX | Listing got **quadratically slower**; the whole store was materialised per page — **SQL paging + one-page fleet** | done |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
 | **F11** | ✅ Medium | Code quality | Failure-swallowing handlers — every site classified, four that cost the operator something fixed, and `BLE001`/`S110` now **enforced** | done |
-| **F12** | 🟡 Medium | Distribution | Build now runs anywhere; signed channel, deltas, updater and rollback **built and tested in CI** — no real key and nothing published yet | partial |
+| **F12** | 🟡 Medium | Distribution | Build runs anywhere; signed channel, deltas, automatic checking, updater and rollback **green in CI end to end** — no real key and nothing published | partial |
 | **F13** | ✅ Medium | Reliability | Window tiling was X11-bound; dead on the Wayland host it is developed on | done |
 | **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
 | **F15** | ✅ Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | done |
@@ -124,6 +124,8 @@ engineering draft rather than legal advice.
 | **F42** | ✅ **High** | Fingerprint | **Every profile claimed Windows whatever you picked** — `userAgentId` reached nothing | done |
 | **F43** | ✅ **High** | Fingerprint | **A profile with no proxy announced New York from the host's own address** — F31 reached every route except the one with no proxy on it | done |
 | **F44** | ✅ **High** | Fingerprint | **`navigator.deviceMemory` reported 16 and 6**, values no Chrome build can return — found by F3's shape diff | done |
+| **F45** | ✅ **High** | Storage | **Schema v7 broke every existing database** — an index over a column the migration had not yet added | done |
+| **F46** | ✅ **High** | Fingerprint | **No WebGL at all on a GPU-less host**, and `DISPLAY` was mistaken for a graphics device | done |
 
 ---
 
@@ -2713,6 +2715,79 @@ including 160 generated profiles across four platforms.
 
 ---
 
+### F46 — ✅ HIGH: a host with no GPU had no WebGL, and a display was mistaken for one — **FIXED**
+
+**File:** [`browser/launcher.py`](../src/multiprofile/browser/launcher.py)
+
+Found by making the `live-browser` CI job run at all. Two defects in a chain,
+and the second hid the first.
+
+**The flag.** On any machine without `/dev/dri`, the product launched with
+`--disable-gpu --use-gl=swiftshader`. Chrome has gated SwiftShader behind
+`--enable-unsafe-swiftshader` since 121, and without it WebGL does not fall
+back to software — it is absent. Measured on Chromium 151:
+
+```
+--disable-gpu --use-gl=swiftshader
+    canvas.getContext('webgl')  ->  null
+...plus --enable-unsafe-swiftshader
+    ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...), SwiftShader driver)
+```
+
+A profile claiming an *"NVIDIA GeForce RTX 4060"* whose `getContext('webgl')`
+returns **null** is a contradiction no real browser produces. It is **F26**'s
+shape again — the GPU story disagreeing with itself — except by not existing,
+which is louder than a mismatched string. Every GPU-related spoof was inert
+on those hosts.
+
+**The probe.** `_probe_gpu_available()` returned True whenever `DISPLAY` or
+`WAYLAND_DISPLAY` was set, commented *"at minimum Xvfb may work with ANGLE"*.
+It does not: Xvfb is a window server, not a graphics device, so ANGLE has
+nothing to bind — and because the probe claimed hardware, the software path
+was never taken and the flag above could not have helped. A guess recorded as
+a fact, which is the recurring shape of this audit.
+
+Both affect any headless server or VM with a virtual display, which is a large
+share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F45 — ✅ HIGH: schema v7 broke every database that already existed — **FIXED**
+
+**File:** [`storage/db.py`](../src/multiprofile/storage/db.py)
+
+Found by migrating a copy of a real install, because the operator asked for
+that before trusting **F20**. It would not have been found otherwise.
+
+v7 put `CREATE INDEX idx_jobs_batch ON jobs(batch_id)` in the base schema.
+`_ensure_schema` runs `_SCHEMA_SQL` **before** `_migrate`, and on an existing
+database every `CREATE TABLE IF NOT EXISTS` there is a no-op — so the `jobs`
+table is still the old one and the column does not exist yet:
+
+```
+sqlite3.OperationalError: no such column: batch_id
+```
+
+**Every install with an existing control database would have failed to open it
+on the first launch after the update.** A fresh one was fine, which is exactly
+why 2,200 tests passed: every one of them starts from an empty directory,
+which is the case that works.
+
+Indexes over migrated columns now run in `_ensure_late_indexes`, after
+`_migrate` and unconditionally — a database already marked v7 may still be
+missing one if a startup died between the ALTER and the CREATE INDEX, and the
+version marker means migrations would never run again to fix it.
+
+16 tests build databases at v1–v6 and open them with current code, plus a
+static check over `_SCHEMA_SQL` for indexes over migrated columns so the next
+one is caught at the point it is written. Verified by reintroducing the bug:
+all 16 fail.
+
+**The lesson is the gap, not the fix.** The suite tested creation and never
+upgrade. That is now the first thing `test_schema_migration.py` does.
+
+---
+
 ### F12 — 🟡 MEDIUM: distribution is not production-ready — **BUILT AND TESTED, NOT PUBLISHED**
 
 No signing, no auto-update, no crash reporting, Debian-only, and `build-deb.sh`
@@ -2763,9 +2838,29 @@ security-sensitive, unsigned unverifiable binaries are a hard blocker.
 > `apt update` against a live repository, upgrade across a genuine code change,
 > anything but amd64, and key rotation.
 >
-> Verified: 28 tests in `tests/test_update_channel.py` covering the builder,
-> the signature chain, three kinds of tampering, a signature from the wrong key,
-> delta reconstruction, and the client's fallback behaviour.
+> **Automatic, and the part that deliberately is not.** The matrix row says
+> *auto*-update. Checking is automatic: a daily background check, started with
+> the API server, reporting through `/api/update` and `/api/health`. It makes
+> **no network request at all** until `/etc/multiprofile/update.conf` exists,
+> which keeps **F14**'s promise — this product does not phone home — and makes
+> configuring a channel the opt-in rather than a second switch.
+>
+> Automatic *installing* is off by default and refused while any profile is
+> running even when enabled. Replacing the binary under a running fleet risks
+> exactly what the operator uses this product to avoid. The three
+> `/api/update/*` endpoints that returned `{"status": "disabled"}` now reach
+> the real updater; they were the **F16** shape.
+>
+> **Green in CI.** The `release-lifecycle` job runs the whole thing on every
+> push: build two versions, sign with a key generated for that run, publish,
+> install, update **across the delta** (12–18% of the bytes), verify 16/16,
+> refuse a rewritten index *and* an unsigned one, roll back, and confirm the
+> rolled-back install still serves its API.
+>
+> Verified: 44 tests in `tests/test_update_channel.py` covering the builder,
+> the signature chain, four kinds of tampering, a signature from the wrong
+> key, delta reconstruction, the client's fallback behaviour, the automatic
+> checker and the auto-install refusals.
 
 ---
 
