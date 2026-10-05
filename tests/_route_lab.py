@@ -404,3 +404,83 @@ class Socks5Proxy(_BaseProxy):
         client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0")
                        + struct.pack("!H", 0))
         _Tunnel(client, upstream).start()
+
+
+class TlsObserver:
+    """Records the TLS ClientHello of whatever connects, then hangs up.
+
+    No certificate, and therefore no completed handshake: the ClientHello is
+    the first flight and is sent before the server says anything, which is
+    both what makes it a fingerprint and what makes it observable without a
+    certificate the browser would have to be made to trust.
+
+    The page load fails, visibly, and that is fine -- the measurement is the
+    first flight, not the response. Observing HTTP/2 SETTINGS or HTTP/3 needs
+    a completed handshake and therefore a trusted certificate, which is a
+    separate and larger piece of work.
+    """
+
+    def __init__(self) -> None:
+        self.hellos: list = []
+        self.raw: list[bytes] = []
+        self.errors: list[str] = []
+        self._stop = threading.Event()
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(16)
+        self.port = int(self._listener.getsockname()[1])
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        from multiprofile.diagnostics.transport_probe import (
+            ClientHelloError,
+            parse_client_hello,
+        )
+
+        while not self._stop.is_set():
+            try:
+                client, _ = self._listener.accept()
+            except OSError:
+                return
+            try:
+                client.settimeout(5)
+                buffer = b""
+                # One record is enough, and a ClientHello can span TCP
+                # segments, so read until the record length is satisfied.
+                while len(buffer) < 5:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk
+                if len(buffer) >= 5:
+                    want = 5 + struct.unpack_from("!H", buffer, 3)[0]
+                    while len(buffer) < want:
+                        chunk = client.recv(8192)
+                        if not chunk:
+                            break
+                        buffer += chunk
+                if buffer:
+                    self.raw.append(buffer)
+                    try:
+                        self.hellos.append(parse_client_hello(buffer))
+                    except ClientHelloError as e:
+                        self.errors.append(str(e))
+            except OSError as e:
+                self.errors.append(f"socket error: {e}")
+            finally:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+
+    @property
+    def url(self) -> str:
+        return f"https://127.0.0.1:{self.port}/tls"
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._listener.close()
+        except OSError:
+            pass
