@@ -5,7 +5,7 @@ after §2 branches on it, so the roadmap is written as a fork rather than as a
 single line. Presenting one path as settled would be the same failure this
 audit spent its length fixing — an artefact that looks complete and is not.
 
-Where the product stands: **50 findings, 48 fixed, 2 open** — and both of the
+Where the product stands: **51 findings, 49 fixed, 2 open** — and both of the
 two are open only at the part that needs something outside this repository:
 F3 at its architectural ceiling, F12 at a signing key and a host. P0, P1, P2 and P3
 are complete. The fingerprint vectors reachable from
@@ -199,7 +199,7 @@ changes the distribution model entirely.
 ## 7. Sequencing, independent of the fork
 
 ```
-DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F50
+DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F51
          └─ F3's JavaScript surface
 
 NOW      ├─ Publish the channel                  ← needs a key + a host
@@ -230,7 +230,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 48 of 50 findings
+The product is in good shape below the fingerprint layer: 49 of 51 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

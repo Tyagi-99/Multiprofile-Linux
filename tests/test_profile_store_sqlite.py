@@ -116,9 +116,10 @@ def test_create_read_update_delete_round_trip():
     assert updated["name"] == "Trip"
     assert get_profile(pid)["name"] == "Trip"
 
-    assert delete_profile(pid, purge_storage=False) is True
+    report = delete_profile(pid, purge_storage=False)
+    assert report is not None and report["leftBehind"] == []
     assert get_profile(pid) is None
-    assert delete_profile(pid, purge_storage=False) is False
+    assert delete_profile(pid, purge_storage=False) is None
 
 
 def test_updating_a_missing_profile_returns_none():

@@ -266,7 +266,7 @@ If asked today, the honest answers are:
 - **Is data encrypted in transit?** There is no transit — nothing leaves the machine. Remote API access has no TLS and needs a tunnel.
 - **Is there an audit log?** Yes, local, not tamper-evident.
 - **Is access controlled?** Yes for remote API callers, with scopes. There are no user accounts, so there is no per-person access control.
-- **Can we export/delete our data?** Yes, both, with documented omissions.
+- **Can we export/delete our data?** Yes, both, with documented omissions. A permanent delete now reports whether the on-disk profile was actually removed, and names what it could not remove — F51 was the case where it claimed success and left the cookies.
 - **Is it penetration tested?** No.
 - **Are builds signed?** The mechanism is built, tested and verified in CI; there is no production key yet, so what ships today is not signed with one. F12.
 - **Is it undetectable?** No. See F3.

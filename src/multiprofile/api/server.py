@@ -809,11 +809,25 @@ def create_app() -> Flask:
         if permanent:
             purge = request.args.get("purgeStorage", "1")
             purge_storage = str(purge).lower() not in ("0", "false", "no")
-            if not delete_profile(profile_id, purge_storage=purge_storage):
+            report = delete_profile(profile_id, purge_storage=purge_storage)
+            if report is None:
                 return jsonify({"error": "not found"}), 404
+            # `purgeStorage` is the outcome, not the request. It used to echo
+            # the query parameter back, so a purge that left the whole Chrome
+            # directory behind still answered `purgeStorage: true` (F51).
+            body = {
+                "ok": True,
+                "permanent": True,
+                "purgeStorage": report["purged"],
+                "purgeRequested": report["purgeRequested"],
+            }
+            if report["leftBehind"]:
+                body["warnings"] = [
+                    "could not remove " + path for path in report["leftBehind"]
+                ]
             audit_log("delete", profile_id=profile_id, ok=True,
-                      detail={"permanent": True, "purgeStorage": purge_storage})
-            return jsonify({"ok": True, "permanent": True, "purgeStorage": purge_storage})
+                      detail={"permanent": True, **report})
+            return jsonify(body)
 
         # A running profile has Chrome writing into the directory the trash is
         # supposed to preserve, so trashing it would capture a torn copy.

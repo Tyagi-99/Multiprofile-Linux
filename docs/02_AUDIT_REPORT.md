@@ -132,6 +132,7 @@ engineering draft rather than legal advice.
 | **F48** | ✅ **Medium** | Distribution | The updater looked for the delta's **base package under the client's configured architecture**, so on an arch-independent package every update silently downloaded in full | done |
 | **F49** | ✅ **High** | Routing | **`POST /api/profiles/switch-all-direct` returned `ok: true` and switched nothing** — a routing control that lied about where every profile's traffic leaves from | done |
 | **F50** | ✅ Low | Security / Config | **`MULTIPROFILE_PREFER_SANDBOX` was read into a field nothing used** — a security-adjacent setting that looked honoured and was not | done |
+| **F51** | ✅ **High** | Privacy / Storage | **A permanent delete could leave every cookie and login on disk and report `purgeStorage: true`** — the response echoed the request, not the outcome | done |
 
 ---
 
@@ -2755,6 +2756,80 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F51 — ✅ HIGH: a permanent delete could leave the identity on disk and report success — **FIXED**
+
+**Files:** [`storage/profiles.py`](../src/multiprofile/storage/profiles.py)
+(`delete_profile`, `purge_profile`) · [`api/server.py`](../src/multiprofile/api/server.py)
+(`profiles_delete`)
+
+`delete_profile(purge_storage=True)` removed the row, then tried to remove the
+profile's Chrome directory and its cookie jar:
+
+```python
+try:
+    shutil.rmtree(chrome_root)
+except Exception:  # noqa: BLE001,S110
+    pass
+try:
+    ...
+    cp.unlink(missing_ok=True)
+except Exception:  # noqa: BLE001,S110
+    pass
+return True
+```
+
+Both failures swallowed, the first **without even a log line**, and `True`
+returned either way. The endpoint then answered:
+
+```json
+{"ok": true, "permanent": true, "purgeStorage": true}
+```
+
+where `purgeStorage` was **the query parameter echoed back**. Nothing in the
+response, the audit log or the logs described what had actually happened to
+the files.
+
+So a permanent delete could leave `chrome-profiles/<id>` standing — every
+cookie, every logged-in session, the history and the cache — and tell the
+operator the storage was purged.
+
+**Why this is High.** It is F11's shape, but on the one call whose entire
+purpose is destruction. An operator permanently deleting a profile is
+destroying an identity; there is no other reason to use it. It is also the
+operation [`07`](07_SECURITY_AND_COMPLIANCE.md) §6 points at when it answers
+*"can we export/delete our data?"* with **yes, both** — a claim that was not
+true of a delete that silently left the data.
+
+And `shutil.rmtree` failing part-way is the ordinary case, not an exotic one:
+a file still held open by a Chrome that was not stopped, a read-only mount,
+`ENOSPC`, a changed permission. It leaves *part* of the tree, and what remains
+is as likely to be `Cookies` and `Login Data` as anything else. Which is why
+the purge now **asks the filesystem afterwards** instead of trusting that no
+exception was raised — an exception is not the only way `rmtree` leaves work
+undone.
+
+**The fix.** One `purge_profile_files()` shared by both permanent-delete
+paths, returning the paths it could not remove. `delete_profile` returns a
+report — `{"purgeRequested", "purged", "leftBehind"}` — and `None` for "no
+such profile", so `if not delete_profile(...)` still reads correctly. The
+endpoint reports `purgeStorage` as the **outcome**, adds `purgeRequested`
+alongside it, and carries a `warnings` list naming what was left. The audit
+log records the report rather than the request.
+
+`purge_profile` (emptying the trash) already logged its failures, which is
+how this survived: the two permanent-delete paths had drifted, and the one
+that had been reviewed was not the one an operator reaches with
+`?permanent=1`. They share an implementation now, with a test that fails if
+they stop sharing it.
+
+**Tests:** `tests/test_permanent_delete_reports_truth.py` — six, including a
+purge made to fail the way a real one does (a read-only parent directory, so
+`rmtree` leaves the tree), checked both through the store and through the
+endpoint, and asserting the cookies are **still on disk** afterwards. Both
+confirmed to fail against the restored swallow.
 
 ---
 

@@ -479,37 +479,77 @@ def get_profile(profile_id: str) -> dict[str, Any] | None:
     return _decorate([record])[0]
 
 
-def delete_profile(profile_id: str, *, purge_storage: bool = True) -> bool:
+def purge_profile_files(profile_id: str) -> list[str]:
+    """Remove a profile's Chrome directory and cookie jar.
+
+    Returns the paths it could **not** remove, so a caller can say so. This
+    used to be two swallowing handlers inside :func:`delete_profile`, one of
+    them without even a log line, and the function returned ``True`` either
+    way -- so a permanent delete could leave the entire Chrome profile
+    directory, with every cookie and every logged-in session in it, and
+    report success (F51).
+
+    `shutil.rmtree` failing part-way is the realistic case, not the exotic
+    one: a file still held open by a Chrome that was not stopped, a
+    read-only mount, ENOSPC, or a permission change. It leaves *some* of the
+    tree, and what is left is as likely to be `Cookies` and `Login Data` as
+    anything else.
+    """
+    chrome_root, cookies = _profile_files(profile_id)
+    left: list[str] = []
+    if chrome_root.exists():
+        try:
+            shutil.rmtree(chrome_root)
+        except OSError as e:
+            log.warning("could not remove %s: %s", chrome_root, e)
+        # rmtree can fail part-way, so ask the filesystem rather than
+        # trusting the absence of an exception.
+        if chrome_root.exists():
+            left.append(str(chrome_root))
+    if cookies is not None and cookies.exists():
+        try:
+            cookies.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("could not remove %s: %s", cookies, e)
+        if cookies.exists():
+            left.append(str(cookies))
+    return left
+
+
+def delete_profile(profile_id: str, *, purge_storage: bool = True) -> dict[str, Any] | None:
     """Remove a profile permanently.
 
     This is the irreversible one, and it is no longer what a delete from the
     console reaches: that goes to :func:`trash_profile`. Permanent deletion is
     what emptying the trash does, and what a caller asks for explicitly.
+
+    Returns ``None`` when there was no such profile -- so ``if not
+    delete_profile(...)`` still reads as "not found" -- and otherwise a
+    report of what actually happened:
+
+        {"purgeRequested": bool, "purged": bool, "leftBehind": [str, ...]}
+
+    ``purged`` is the **outcome**, not the request. The operator deleting a
+    profile permanently is usually doing it to destroy an identity, so being
+    told the storage went when it did not is the one answer that cannot be
+    allowed here.
     """
     _ensure_ready()
     if not db.delete_profile_row(profile_id):
-        return False
+        return None
     with _lock:
         runtime = _read_json(runtime_state_path(), {})
         if profile_id in runtime:
             runtime.pop(profile_id, None)
             _write_json(runtime_state_path(), runtime)
+    left: list[str] = []
     if purge_storage:
-        from .xdg import data_dir
-        chrome_root = data_dir() / "chrome-profiles" / profile_id
-        if chrome_root.exists():
-            try:
-                shutil.rmtree(chrome_root)
-            except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
-                pass
-        try:
-            from ..cookies_store import cookies_path
-            cp = cookies_path(profile_id)
-            if cp.exists():
-                cp.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
-            pass
-    return True
+        left = purge_profile_files(profile_id)
+    return {
+        "purgeRequested": purge_storage,
+        "purged": purge_storage and not left,
+        "leftBehind": left,
+    }
 
 
 def _profile_files(profile_id: str) -> tuple[Path, Path | None]:
@@ -602,21 +642,17 @@ def list_trash() -> list[dict[str, Any]]:
 
 
 def purge_profile(profile_id: str) -> bool:
-    """Delete a trashed profile for good, including its files."""
+    """Delete a trashed profile for good, including its files.
+
+    Shares :func:`purge_profile_files` with :func:`delete_profile` so the two
+    permanent-delete paths cannot drift: this one logged its failures and the
+    other did not, which is how F51 stayed invisible on the path an operator
+    is more likely to use.
+    """
     _ensure_ready()
     if not db.purge_trash_row(profile_id):
         return False
-    chrome_root, cookies = _profile_files(profile_id)
-    if chrome_root.exists():
-        try:
-            shutil.rmtree(chrome_root)
-        except OSError as e:
-            log.warning("could not remove %s: %s", chrome_root, e)
-    if cookies is not None and cookies.exists():
-        try:
-            cookies.unlink(missing_ok=True)
-        except OSError as e:
-            log.warning("could not remove %s: %s", cookies, e)
+    purge_profile_files(profile_id)
     return True
 
 
