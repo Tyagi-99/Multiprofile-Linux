@@ -2643,7 +2643,7 @@ bug hunt.
 > |---|---|
 > | `backup.restore_backup` | swallowed every cookie member failure and returned `ok: True` with no mention of cookies. **Restoring a profile is usually done for the logins**, and the one thing the operator was checking for was the one thing not reported. Now returns `restoredCookies` and `cookieFailures`, always both — 0 with no failures is "this backup had none", 0 with failures is "it had some and you did not get them". |
 > | `cookies_store.load_cookies` | returned `[]` for no jar, an empty jar and *a corrupt one* alike, so a profile with a truncated jar was indistinguishable from one never logged into. It launched signed out of everything, silently. Now logged, and the file is left in place because the operator may be able to recover it. |
-> | `POST /api/profiles/<id>/open-folder` | swallowed the `xdg-open` failure and returned `ok: True` regardless. On a host without it the console said the folder had opened and opened nothing. Two lines from the console's own button. |
+> | `POST /api/profiles/<id>/open-folder` | swallowed the `xdg-open` failure and returned `ok: True` regardless. On a host without it the caller was told the folder had opened and nothing opened. *(Correction, re-checked during the F49 sweep: this endpoint has no caller in the current console — `frontend/src` has no folder action. It is API-only, so the fix stands but the reachability claim was wrong.)* |
 > | `GET /api/health` | reported an empty fleet when the profile store could not be read — the endpoint whose entire job is to say whether something is wrong, reporting a healthy install with zero profiles. Now `ok: false` with `profilesError`. |
 >
 > Two more on the identity path now record a structured fault: a generated
