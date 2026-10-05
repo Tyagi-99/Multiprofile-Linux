@@ -53,7 +53,7 @@ before and is still not "undetectable".
 | Feature | Multiprofile | AdsPower | GoLogin | Multilogin | Pri | Effort |
 |---|---|---|---|---|---|---|
 | UA + Client Hints, fully consistent | ✅ F1, measured on the wire | ✅ | ✅ | ✅ | P0 | — |
-| OS emulation (Win/mac/Linux/Android/iOS) | ✅ 10 presets, F42 | ✅ | ✅ | ✅ | P0 | — |
+| OS emulation (Win/mac/Linux/Android/iOS) | 🟡 **native Linux supported; cross-OS experimental** — 10 presets, F42, see §3b | ✅ | ✅ | ✅ | P0 | — |
 | Canvas noise | ✅ per-seed | ✅ | ✅ | ✅ | P0 | — |
 | WebGL vendor/renderer + noise | ✅ | ✅ | ✅ | ✅ | P0 | — |
 | WebGL2 | ✅ | ✅ | ✅ | ✅ | P0 | — |
@@ -200,6 +200,61 @@ The API is this product's strongest column and is ahead of where the UI is:
 91 routes with scoped tokens, a durable job queue and an event bus. The
 missing SDKs are thin wrappers over it — a week each, and the highest
 ratio of parity-per-effort on this page.
+
+---
+
+## 3b. The supported identity matrix
+
+Added 5 October 2026, enforced in `fingerprint/identity_matrix.py` and
+reported by `/api/health`, by each profile's detail endpoint and by a launch
+note.
+
+| Claim | Status | What contradicts it on this host |
+|---|---|---|
+| **Linux** (native) | ✅ **supported** | nothing — no surface has to be emulated |
+| Windows | 🟡 experimental | fonts |
+| macOS | 🟡 experimental | fonts |
+| Android | 🟡 experimental | engine build |
+| iOS | 🟡 experimental | engine build |
+
+**Why cross-OS is experimental and not supported.** Measured on this host
+against a stock Chromium control in the same session, a Windows claim fails
+font coherence in *both* directions at once:
+
+- **0 of 10** Windows-exclusive faces are present (Calibri, Cambria,
+  Consolas, Georgia, Segoe UI, Tahoma, Trebuchet MS, Verdana, Impact,
+  Microsoft Sans Serif). Fixing this needs the actual font files, which is a
+  licensing question rather than an engineering one.
+- **`Liberation Mono` is present.** This is the direction that is a
+  *contradiction* rather than an absence: **no Windows machine has it.** It
+  cannot be hidden by renaming, because Chrome reads the font file's internal
+  name table and `fontconfig` cannot rewrite it — which is why
+  `browser/fontconfig.py` records it every launch as
+  `font_backer_name_visible`.
+
+Width-based font probing cannot see metric-compatible substitution at all, by
+construction: `Liberation Sans` and `Liberation Serif` read as *absent* only
+because they resolve to the same width as the generic they were tested
+against. That is an accident, not the masking working, and it is why this row
+rests on the recorded fault rather than on a probe result.
+
+**Experimental is a label, not a refusal.** An operator who asks for Windows
+gets Windows, on every surface the product controls, and is told which
+surface disagrees. What changed is the **default**: a new profile now claims
+the host's platform. The previous default claimed Windows — a profile with
+neither `userAgent` nor `userAgentId` fell through to the Windows pool — so
+the configuration most likely to ship was the one that cannot pass.
+
+**Existing profiles are untouched.** The choice is written onto new profiles
+as `userAgentId`; the derivation fallback is unchanged, so a profile created
+before this keeps the identity it has. Re-identifying a profile that holds
+live logged-in sessions would be the opposite of what a profile manager is
+for.
+
+**What a `supported` verdict does and does not mean.** It means no surface
+this product measures is known to contradict the claim on this host. It is a
+quality gate. It is **not** a detection guarantee, and it says nothing about
+whether any particular site accepts the browser.
 
 ---
 

@@ -1058,7 +1058,12 @@ def create_app() -> Flask:
         profile = get_profile(profile_id)
         if not profile:
             return jsonify({"error": "not found"}), 404
-        return jsonify(fingerprint_report(profile))
+        report = fingerprint_report(profile)
+        # The matrix verdict travels with the report the console renders, so
+        # the inspector does not need a second fetch to say whether this
+        # profile's claim can be backed on this host.
+        report["identity"] = _identity_verdict_for_row(dict(profile))
+        return jsonify(report)
 
     @app.post("/api/profiles/<profile_id>/backup")
     def profiles_backup(profile_id: str):

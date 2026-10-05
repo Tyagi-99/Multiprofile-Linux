@@ -321,6 +321,23 @@ export interface FingerprintReport {
   components?: FpComponent[];
   summary?: string;
   generated_at?: string;
+  /** Whether this host can back the platform this profile claims. */
+  identity?: IdentityVerdict;
+}
+
+/**
+ * One claimed platform, judged against this host.
+ *
+ * `supported` means no surface the product measures is known to contradict
+ * the claim here. It is a quality gate, not a detection guarantee, and it
+ * says nothing about whether a given site accepts the browser.
+ */
+export interface IdentityVerdict {
+  claim?: string;
+  status?: "supported" | "experimental" | "unsupported" | "unknown";
+  native?: boolean;
+  reasons?: string[];
+  contradicts?: string[];
 }
 
 export function useFingerprint(id: string) {
