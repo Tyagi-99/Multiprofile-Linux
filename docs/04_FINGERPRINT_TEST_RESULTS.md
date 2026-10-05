@@ -493,6 +493,54 @@ but the files' internal name tables do not change, and twelve expected faces
 are absent. Installing metric-compatible files would change the first fault,
 not the second.
 
+### 11.5 Open and unexplained: a Linux profile shows fewer Liberation faces than stock
+
+Found by the comparison harness after the default claim moved to native
+Linux. **Not fixed, not dismissed, and recorded here because it is
+reproducible.**
+
+| probe | product (claims Linux) | stock Chromium |
+|---|---|---|
+| `Arial`, `Times New Roman`, `Liberation Sans`, `Helvetica`, `Courier New`, `Noto Color Emoji` | present | present |
+| **`Liberation Serif`** | **absent** | present |
+| **`Liberation Mono`** | **absent** | present |
+| generic baseline widths | `mono [821,95] sans [957,82] serif [911,83]` | **identical** |
+
+The identical baselines matter: a face whose metrics equal the generic it is
+tested against measures the same and reads as absent, so a differing baseline
+would have explained this away. It does not.
+
+**What has been ruled out.** The font *view* is correct at the fontconfig
+layer. Running `fc-list` under the profile's own generated config:
+
+```
+$ FONTCONFIG_FILE=<profile>/fonts.conf fc-list --format '%{family}\n' | sort -u
+595 families
+Liberation Mono, Liberation Sans, Liberation Serif     <- all three present
+(no Arial, no Times New Roman)                          <- correct: a Linux
+                                                           claim has no renames
+```
+
+and `plan_for_platform` puts 4 of 4 files for each of the three families into
+the plan. So neither the plan nor the rendered config is hiding them.
+
+**What that leaves.** The difference is in how Chromium resolved the names
+under a restricted config, not in what the config offered it. That is a
+browser-side fallback question and it is unexplained.
+
+**Why it is worth reporting rather than shrugging at.** A Linux desktop with
+`Liberation Sans` but neither `Liberation Serif` nor `Liberation Mono` is an
+unusual machine — the three ship in one package. So the font restriction may
+now be making the *native* claim less ordinary than an unmodified browser,
+which is the opposite of its purpose, and the native claim is the new default.
+It is a **divergence, not a contradiction**: nothing here is impossible, and
+the harness classifies it that way.
+
+**Reproduction:** `python3 scripts/identity_parity.py` and compare
+`observations.fonts.present` between the two manifests.
+
+---
+
 ### 11.4 What this section does not establish
 
 - **One host, one profile, one route.** No proxy, no device preset, no second

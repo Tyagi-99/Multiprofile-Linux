@@ -168,8 +168,19 @@ _PAGE_PROBE = r"""
       try { checkApi[font] = document.fonts.check(`72px '${font}'`); }
       catch (e) { checkApi[font] = null; }
     }
+    // What the generics actually resolve to, as widths. Without this a
+    // "font absent" result is unreadable: a face whose metrics equal the
+    // generic it was tested against measures identical and reads as absent,
+    // which is exactly what metric-compatible substitution is for. If the
+    // product changes what `serif` resolves to, the same face can read
+    // present in one browser and absent in another with nothing installed or
+    // removed -- so the baseline is reported next to the verdict.
+    const genericWidths = base;
     span.remove();
-    return {present, absent, measured: FONTS.length, checkApi};
+    return {present, absent, measured: FONTS.length, checkApi, genericWidths,
+            method: "offsetWidth/offsetHeight against three generics; cannot "
+                    + "distinguish a metric-compatible face from the generic "
+                    + "it matches"};
   });
 
   // ---- iframe ---------------------------------------------------------
