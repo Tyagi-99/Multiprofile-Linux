@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Ubuntu-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)]()
-[![Tests](https://img.shields.io/badge/tests-2257%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-2267%20passed-brightgreen.svg)](tests/)
 [![Coverage](https://img.shields.io/badge/coverage-76.6%25-brightgreen.svg)](tests/)
 
 A robust, enterprise-grade, clean-room native Linux platform for managing isolated browser profiles. Designed for software verification, testing laboratories, automation engineers, and multi-tenant environments requiring real per-profile network isolation, storage segregation, and deterministic hardware identities.

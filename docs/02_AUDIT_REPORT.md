@@ -3577,7 +3577,7 @@ for the dead fingerprint step beside it.
 | Dead code | ✅ | F2 fixed — the extension staging path is deleted, not just documented |
 | TODOs/FIXMEs | ✅ | **zero** |
 | Type safety | 🟡 | frontend TS strict & clean; Python has annotations but **no type checker in CI** |
-| Tests | ✅ | 1,317 functions across 90 files; **2,257 passing**, 5 skipped; **76.6% coverage** against a 70% gate |
+| Tests | ✅ | 1,327 functions across 91 files; **2,267 passing**, 5 skipped; **76.6% coverage** against a 70% gate |
 | CI | ✅ | lint + 3-version matrix + coverage gate + isolated live-browser job |
 
 ## 4.2 Security
