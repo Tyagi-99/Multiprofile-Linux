@@ -133,6 +133,7 @@ engineering draft rather than legal advice.
 | **F49** | ✅ **High** | Routing | **`POST /api/profiles/switch-all-direct` returned `ok: true` and switched nothing** — a routing control that lied about where every profile's traffic leaves from | done |
 | **F50** | ✅ Low | Security / Config | **`MULTIPROFILE_PREFER_SANDBOX` was read into a field nothing used** — a security-adjacent setting that looked honoured and was not | done |
 | **F51** | ✅ **High** | Privacy / Storage | **A permanent delete could leave every cookie and login on disk and report `purgeStorage: true`** — the response echoed the request, not the outcome | done |
+| **F52** | ✅ Low | Security | **The audit log's `chmod(0600)` failed in silence** — the last one in the tree that did not reach `/api/health` | done |
 
 ---
 
@@ -2756,6 +2757,45 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F52 — ✅ LOW: the audit log could be created world-readable in silence — **FIXED**
+
+**File:** [`audit.py`](../src/multiprofile/audit.py)
+
+```python
+try:
+    os.chmod(path, 0o600)
+except OSError:
+    pass
+```
+
+`xdg.py`'s own docstring names this exact pattern as the quietest version of
+**F4**, and routes every other `chmod(0o600)` in the tree through
+`record_permission_fault`, which reaches `/api/health` and the console. This
+one did not. `audit.jsonl` is the file
+[`07`](07_SECURITY_AND_COMPLIANCE.md) §3 documents as `0600` and the record
+of who launched, exported and deleted what, so a world-readable one looked
+exactly like a correct one for the whole session that created it.
+
+`harden_data_dir()` does cover `audit_path()`, so it is tightened — and the
+fault recorded — at the **next** startup. That is no help to the session in
+which the file was written, which is the session whose entries are most
+likely to still matter.
+
+Now recorded. **Tests:** two, in
+`tests/test_permanent_delete_reports_truth.py` — a refused `chmod` must
+produce a fault naming `audit.jsonl`, and a successful write must produce
+none. The first is confirmed to fail against the restored `pass`.
+
+This was found by listing every `except` handler in `src/multiprofile` whose
+only statement is `pass`, `continue` or `break` — 56 of them — and checking
+which sit on a path where a swallow costs the operator something. The rest
+are **F11**'s documented policy residual and are deliberately left: a launch
+path must not crash a browser over a non-essential step. F51 and F52 both
+came out of that list, which is the argument for keeping it written down
+rather than closing it.
 
 ---
 

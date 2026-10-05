@@ -38,8 +38,16 @@ def audit_log(
             # record, not the machine's. Create it owner-only.
             try:
                 os.chmod(path, 0o600)
-            except OSError:
-                pass
+            except OSError as e:
+                # Recorded, not swallowed (F52). This was the last chmod(0600)
+                # in the codebase that failed in silence, and it is on the one
+                # file 07 §3 documents as owner-only -- the record of who
+                # launched, exported and deleted what. harden_data_dir() picks
+                # it up at the next startup, which does nothing for the
+                # session in which it was created world-readable.
+                from .storage.xdg import record_permission_fault
+
+                record_permission_fault(path, f"could not create owner-only: {e}")
 
 
 def read_audit(limit: int = 100) -> list[dict[str, Any]]:

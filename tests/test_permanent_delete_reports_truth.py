@@ -209,3 +209,44 @@ def test_an_account_deletion_that_leaves_a_profile_says_so():
         assert (data_dir() / "chrome-profiles").is_dir()
     finally:
         os.chmod(inner, original)
+
+
+# --------------------------------------------------------------------------
+# 5. F52 — the last silent chmod
+# --------------------------------------------------------------------------
+
+def test_an_audit_log_that_cannot_be_made_owner_only_is_reported(monkeypatch):
+    """`audit.py` created `audit.jsonl` and tried to chmod it 0600, swallowing
+    the failure with a bare `except OSError: pass`.
+
+    `07_SECURITY_AND_COMPLIANCE.md` §3 documents that file as `0600`, and it
+    is the record of who launched, exported and deleted what. Every other
+    `chmod(0o600)` in the tree routes its failure to
+    `record_permission_fault`, which reaches `/api/health`; this one did not,
+    so a world-readable audit log looked exactly like a correct one for the
+    whole session. `harden_data_dir()` catches it at the *next* startup,
+    which is no help to the session that wrote it.
+    """
+    import multiprofile.audit as audit_mod
+    from multiprofile.storage.xdg import permission_faults
+
+    def refuse(*_a, **_k):
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(audit_mod.os, "chmod", refuse)
+    before = len(permission_faults())
+    audit_mod.audit_log("launch", profile_id="p1", ok=True)
+
+    faults = permission_faults()
+    assert len(faults) > before, "the failed chmod was not recorded"
+    assert any("audit.jsonl" in f["path"] for f in faults), faults[-3:]
+
+
+def test_a_successful_audit_write_records_no_fault():
+    """The positive control: the recorder must not fire on the happy path."""
+    from multiprofile.audit import audit_log
+    from multiprofile.storage.xdg import permission_faults
+
+    before = len(permission_faults())
+    audit_log("launch", profile_id="p2", ok=True)
+    assert len(permission_faults()) == before
