@@ -80,7 +80,9 @@ which was the blocker underneath the blocker.
 is published, so no install anywhere can yet receive an update.
 [`UPDATES.md`](UPDATES.md) §4 is the exact procedure and §5 is what stays
 unverified until it is followed — an hour of work once there is a key and a
-host, and impossible before.
+host, and impossible before. §4.6 now covers rotating the key as well, with
+the overlap window tested and the one way to get it wrong caught by
+`verify_release.py` before a release ships.
 
 *Depends on:* your signing identity and somewhere to serve static files.
 

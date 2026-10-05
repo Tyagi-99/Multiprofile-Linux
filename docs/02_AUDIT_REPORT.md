@@ -91,7 +91,7 @@ engineering draft rather than legal advice.
 | **F9** | ✅ Medium | UX | Listing got **quadratically slower**; the whole store was materialised per page — **SQL paging + one-page fleet** | done |
 | **F10** | ✅ Medium | Reliability | Supervisor restart budget never bound crash loops — **fixed this session** | done |
 | **F11** | ✅ Medium | Code quality | Failure-swallowing handlers — every site classified, four that cost the operator something fixed, and `BLE001`/`S110` now **enforced** | done |
-| **F12** | 🟡 Medium | Distribution | Build runs anywhere; signed channel, deltas, automatic checking, updater and rollback **green in CI end to end** — no real key and nothing published | partial |
+| **F12** | 🟡 Medium | Distribution | Build runs anywhere; signed channel, deltas, automatic checking, updater, rollback and **key rotation** green in CI end to end — no real key and nothing published | partial |
 | **F13** | ✅ Medium | Reliability | Window tiling was X11-bound; dead on the Wayland host it is developed on | done |
 | **F14** | ✅ Low | Privacy | Next.js build-time telemetry enabled by default | done |
 | **F15** | ✅ Low | Build | `rewrites` in `next.config.ts` ignored under `output: export` | done |
