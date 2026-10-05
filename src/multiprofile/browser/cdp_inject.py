@@ -92,6 +92,18 @@ def _first_request_hints_enabled() -> bool:
 
 _WORKER_TARGET_TYPES = frozenset({"service_worker", "shared_worker", "worker"})
 
+#: Worker target types that do NOT inherit the owner document's UA override.
+#:
+#: A dedicated worker runs in its owner document's renderer, so
+#: ``Network.setUserAgentOverride`` applied to the page target covers it for
+#: free. A shared worker and a service worker each get their own target and
+#: their own process, and inherit nothing -- which is exactly the split a
+#: CreepJS run on this host measured (see ``_identify_worker``).
+_OWN_PROCESS_WORKER_TYPES = frozenset({"service_worker", "shared_worker"})
+
+#: Error label for a UA override sent to a worker target. See ``_send``.
+_WORKER_UA_LABEL = "Network.setUserAgentOverride[worker]"
+
 
 def build_worker_identity_script(fingerprint: dict[str, Any]) -> str:
     """The identity a worker realm gets, as a self-contained script.
@@ -371,6 +383,8 @@ class InjectionStatus:
     geolocation_applied: bool = False
     targets_seen: int = 0
     workers_identified: int = 0
+    workers_ua_applied: int = 0
+    workers_ua_failed: int = 0
     error: str | None = None
     detail: list[str] = field(default_factory=list)
 
@@ -386,6 +400,8 @@ class InjectionStatus:
             "geolocationApplied": self.geolocation_applied,
             "targetsSeen": self.targets_seen,
             "workersIdentified": self.workers_identified,
+            "workersUaApplied": self.workers_ua_applied,
+            "workersUaFailed": self.workers_ua_failed,
             "error": self.error,
             "detail": list(self.detail),
         }
@@ -457,15 +473,21 @@ class IdentityInjector:
     # -- wire ------------------------------------------------------------
 
     def _send(self, method: str, params: dict[str, Any] | None = None,
-              session_id: str | None = None) -> int:
-        """Fire a command. Responses are handled by the receive loop."""
+              session_id: str | None = None, label: str | None = None) -> int:
+        """Fire a command. Responses are handled by the receive loop.
+
+        ``label`` is what the error branch reports and matches on. It exists
+        so the same method sent to two kinds of target can fail
+        independently: a UA override rejected on a shared-worker target must
+        not be read as the page's override having died.
+        """
         with self._lock:
             self._id += 1
             msg_id = self._id
             msg: dict[str, Any] = {"id": msg_id, "method": method, "params": params or {}}
             if session_id:
                 msg["sessionId"] = session_id
-            self._pending[msg_id] = method
+            self._pending[msg_id] = label or method
             self._ws.send(json.dumps(msg))
         return msg_id
 
@@ -635,6 +657,13 @@ class IdentityInjector:
                 # An unmasked wire identity is not a detail to swallow.
                 self.status.ua_override_applied = False
                 self.status.ok = False
+            if label == _WORKER_UA_LABEL:
+                # The page's override is unaffected, so ua_override_applied
+                # stays as it was -- but a worker whose userAgentData reports
+                # the host beside a page claiming another OS is an identity
+                # contradiction, not a cosmetic gap, so `ok` does drop.
+                self.status.workers_ua_failed += 1
+                self.status.ok = False
             log.warning("CDP injection command failed for %s — %s", self.profile_id, detail)
             return
         if "id" in msg:
@@ -725,6 +754,7 @@ class IdentityInjector:
         # and the shared and service workers all hashed 414750390 -- the
         # realms disagreeing again, in the surface meant to make them agree.
         target_id = target.get("targetId") or ""
+        target_type = target.get("type") or ""
         # The decision is made under the lock; the send happens outside it.
         # _send takes the same lock, and threading.Lock is not re-entrant, so
         # releasing a duplicate from inside this block deadlocked the receive
@@ -746,6 +776,36 @@ class IdentityInjector:
                             "awaitPromise": False, "returnByValue": True},
                            session_id=session_id)
                 self.status.workers_identified += 1
+            if self.ua_override is not None and target_type in _OWN_PROCESS_WORKER_TYPES:
+                # `navigator.userAgentData`, natively, in the two realms that
+                # do not inherit it. Measured on this host against CreepJS,
+                # product profile, no device preset:
+                #
+                #   page           userAgentData: Google Chrome 151, Windows 11
+                #   service worker userAgentData: Chromium 151, Linux
+                #
+                # and then narrowed with a probe that asks each realm
+                # separately (tests/test_worker_realms_live.py):
+                #
+                #   worker_blob / worker_url / worker_module  Windows   ok
+                #   shared / service                          Linux     leak
+                #
+                # A dedicated worker runs in its owner document's renderer,
+                # so the page's override already covers it. A shared or
+                # service worker is its own target in its own process and
+                # inherits nothing, so the override has to be sent here.
+                #
+                # Sent rather than shimmed on purpose. The worker script
+                # could have defined a fake NavigatorUAData, and that is the
+                # F3 trade the rest of this file keeps losing: a shim has a
+                # shape. `Network.setUserAgentOverride` makes the engine
+                # answer, so there is nothing to find. It also fixes
+                # `getHighEntropyValues()`, which a shim would have had to
+                # reimplement -- including the platformVersion that tells
+                # Windows 10 from Windows 11.
+                self._send(UA_OVERRIDE_METHOD, self.ua_override,
+                           session_id=session_id, label=_WORKER_UA_LABEL)
+                self.status.workers_ua_applied += 1
             if self.timezone_id:
                 # Cheap and harmless: the worker inherits TZ from the process,
                 # but a worker started after a timezone change would not.
