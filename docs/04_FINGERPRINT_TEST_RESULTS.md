@@ -493,51 +493,110 @@ but the files' internal name tables do not change, and twelve expected faces
 are absent. Installing metric-compatible files would change the first fault,
 not the second.
 
-### 11.5 Open and unexplained: a Linux profile shows fewer Liberation faces than stock
+### 11.5 Open: two font families the profile's own fontconfig will not match
 
-Found by the comparison harness after the default claim moved to native
-Linux. **Not fixed, not dismissed, and recorded here because it is
-reproducible.**
+**Still open. Not fixed, and three hypotheses eliminated rather than one
+asserted.** Investigated 6 October 2026; the characterisation below is much
+sharper than the first version of this section, which only recorded that
+stock showed more fonts than the product.
 
-| probe | product (claims Linux) | stock Chromium |
+#### What it is
+
+A profile claiming Linux cannot resolve `Liberation Serif` or
+`Liberation Mono` by name, although both are installed on the host and both
+appear in the profile's own font list. Measured as widths of one string under
+each generic — a family that resolves changes the width, a family that does
+not falls through to the generic:
+
+| requested | product | stock Chromium | reading |
+|---|---|---|---|
+| `Liberation Sans` | `957/957/957` | `957/957/957` | resolves in both |
+| **`Liberation Serif`** | **`821/957/911`** | `911/911/911` | **unresolved** in the product |
+| **`Liberation Mono`** | **`821/957/911`** | `821/821/821` | **unresolved** in the product |
+| `Calibri` (genuinely absent) | `821/957/911` | `821/957/911` | unresolved in both |
+| generics `mono/sans/serif` | `821/957/911` | `821/957/911` | identical baselines |
+
+`821/957/911` *is* the generic triple, so the two families measure exactly
+like `Calibri`, which is not installed at all. The baselines are identical in
+both browsers, which removes the obvious explanation — a face whose metrics
+match the generic it is tested against.
+
+#### What has been ruled out
+
+**The product.** Stock Chromium reproduces it exactly when pointed at the
+profile's own config:
+
+```
+stock Chromium, HOST fontconfig:     Serif resolved,   Mono resolved
+stock Chromium, PROFILE fontconfig:  Serif UNRESOLVED, Mono UNRESOLVED
+```
+
+So nothing else the product does — CDP overrides, the injected script, the
+launch flags — is involved. It is the generated `fonts.conf`.
+
+**Chromium.** `fontconfig` fails the same way on its own, so the browser is
+only reporting it:
+
+```
+$ FONTCONFIG_FILE=<profile>/fonts.conf fc-match 'Liberation Serif'
+  -> Liberation Sans          (fallback, not a match)
+$ ... fc-match 'Liberation Mono'
+  -> Liberation Sans          (fallback, not a match)
+```
+
+**"Matching is broken in general."** It is not. Under the same config:
+
+| requested | matched |
+|---|---|
+| `Liberation Sans` | ✅ |
+| `Noto Color Emoji` | ✅ |
+| `JetBrainsMono Nerd Font` | ✅ |
+| `Noto Naskh Arabic` | ✅ |
+| `Liberation Serif` | ❌ |
+| `Liberation Mono` | ❌ |
+
+**The plan and the file set.** `plan_for_platform` puts 4 of 4 files for each
+of the three Liberation families into the plan, the private directory
+contains all twelve, and `fc-list` under the profile config enumerates all
+three families with their correct primary names. So the files are there and
+fontconfig can *see* them; it will not *match* two of them.
+
+#### Hypotheses tested and rejected
+
+| hypothesis | test | result |
 |---|---|---|
-| `Arial`, `Times New Roman`, `Liberation Sans`, `Helvetica`, `Courier New`, `Noto Color Emoji` | present | present |
-| **`Liberation Serif`** | **absent** | present |
-| **`Liberation Mono`** | **absent** | present |
-| generic baseline widths | `mono [821,95] sans [957,82] serif [911,83]` | **identical** |
+| the missing host `conf.d` metric-alias rules weaken exact matching | added `30-metric-aliases.conf` to the config | **no change** |
+| a stale or partial per-profile font cache | cleared `<cachedir>` and re-matched | **no change** |
+| the `<rejectfont><glob>/usr/share/fonts/*` rules also match the private directory's **symlink targets**, which do point there | removed the whole `rejectfont` block | **no change** |
 
-The identical baselines matter: a face whose metrics equal the generic it is
-tested against measures the same and reads as absent, so a differing baseline
-would have explained this away. It does not.
+The third was the most promising — the private entries really are symlinks
+into `/usr/share/fonts`, and the config really does reject that glob — which
+is exactly why it is recorded as tested rather than left as a plausible
+cause.
 
-**What has been ruled out.** The font *view* is correct at the fontconfig
-layer. Running `fc-list` under the profile's own generated config:
+#### Why it matters, and why it is not a gate
 
-```
-$ FONTCONFIG_FILE=<profile>/fonts.conf fc-list --format '%{family}\n' | sort -u
-595 families
-Liberation Mono, Liberation Sans, Liberation Serif     <- all three present
-(no Arial, no Times New Roman)                          <- correct: a Linux
-                                                           claim has no renames
-```
+The three Liberation faces ship in one package, so a Linux desktop with one
+of them is an unusual machine. The restriction may therefore be making the
+**native** claim less ordinary than an unmodified browser, which is the
+opposite of its purpose — and native is now the default.
 
-and `plan_for_platform` puts 4 of 4 files for each of the three families into
-the plan. So neither the plan nor the rendered config is hiding them.
-
-**What that leaves.** The difference is in how Chromium resolved the names
-under a restricted config, not in what the config offered it. That is a
-browser-side fallback question and it is unexplained.
-
-**Why it is worth reporting rather than shrugging at.** A Linux desktop with
-`Liberation Sans` but neither `Liberation Serif` nor `Liberation Mono` is an
-unusual machine — the three ship in one package. So the font restriction may
-now be making the *native* claim less ordinary than an unmodified browser,
-which is the opposite of its purpose, and the native claim is the new default.
 It is a **divergence, not a contradiction**: nothing here is impossible, and
-the harness classifies it that way.
+`compare_manifests` classifies it that way, so it does not fail the identity
+gate.
 
-**Reproduction:** `python3 scripts/identity_parity.py` and compare
-`observations.fonts.present` between the two manifests.
+#### The next concrete step
+
+`FC_DEBUG=4 fc-match 'Liberation Serif'` under the profile config, to see
+which matching stage discards the candidate. Everything above was reached
+without it; it is the obvious next instrument.
+
+**Reproduction, without the product at all:**
+
+```bash
+FONTCONFIG_FILE=<profile>/fonts.conf fc-match 'Liberation Serif'   # -> Liberation Sans
+FONTCONFIG_FILE=<profile>/fonts.conf fc-list  | grep 'Liberation Serif'  # -> present
+```
 
 ---
 
