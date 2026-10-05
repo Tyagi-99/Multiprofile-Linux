@@ -209,7 +209,61 @@ assert body["version"] == "1.9.0", body["version"]
 PY
 echo "the installed package serves its API: ok"
 
+step "13. apt, against the same signed channel"
+# docs/UPDATES.md 4.4 gives operators an apt sources line. Until now that
+# line was written from the format's requirements and had never been run,
+# so a wrong option name or a missing index would have been found by the
+# first operator to paste it. apt is a second, independent client of the
+# same signature: it rejects what gpgv rejects, for its own reasons.
+pkill -f "multiprofile --server-only --port 8777" || true
+sleep 2
+cat > /etc/apt/sources.list.d/multiprofile.list <<APTSRC
+deb [signed-by=/usr/share/keyrings/multiprofile-archive-keyring.gpg] http://127.0.0.1:8099 stable main
+APTSRC
+apt-get update -o Dir::Etc::sourcelist=sources.list.d/multiprofile.list \
+  -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 2>&1 | tail -5
+echo "apt accepted the signed channel: ok"
+
+# The candidate must come from the channel, not from the installed copy.
+apt-cache policy multiprofile-native | tee "$WORK/policy.log"
+grep -q "Candidate: 1.9.1" "$WORK/policy.log" || {
+  echo "FAIL: apt does not offer 1.9.1 from the channel"; exit 1; }
+echo "apt offers 1.9.1 as the candidate: ok"
+
+# And the upgrade itself, driven by apt rather than by our updater.
+# --no-install-recommends matters: the package Recommends chromium, and
+# apt installs Recommends by default.
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  --no-install-recommends multiprofile-native >/dev/null
+test "$(dpkg-query --showformat='${Version}' --show multiprofile-native)" = "1.9.1" \
+  || { echo "FAIL: apt did not upgrade to 1.9.1"; exit 1; }
+echo "apt upgraded 1.9.0 -> 1.9.1: ok"
+
+# apt must refuse an unsigned channel too. Not the one from step 10b:
+# that copy only overwrote InRelease, and apt falls back to Release plus
+# the detached Release.gpg, which was still the valid signature over an
+# unmodified Release -- so apt would have accepted it and the step would
+# have passed for the wrong reason, the way step 10 did once before.
+# Remove both signatures, which is what an unsigned repository actually
+# looks like.
+rm -rf "$WORK/apt-nosig"; cp -r "$WORK/repo" "$WORK/apt-nosig"
+rm -f "$WORK/apt-nosig/dists/stable/InRelease" "$WORK/apt-nosig/dists/stable/Release.gpg"
+( cd "$WORK/apt-nosig" && nohup python3 -m http.server 8096 >/dev/null 2>&1 & )
+sleep 2
+sed -i "s|:8099|:8096|" /etc/apt/sources.list.d/multiprofile.list
+set +e
+apt-get update -o Dir::Etc::sourcelist=sources.list.d/multiprofile.list \
+  -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 > "$WORK/apt-unsigned.log" 2>&1
+rc=$?
+set -e
+tail -5 "$WORK/apt-unsigned.log"
+if [ "$rc" = "0" ] && ! grep -qiE "not signed|no_pubkey|no longer signed|badsig|does not have a Release file" "$WORK/apt-unsigned.log"; then
+  echo "FAIL: apt accepted a channel with no signature"; exit 1
+fi
+echo "apt refused the unsigned channel: ok"
+rm -f /etc/apt/sources.list.d/multiprofile.list
 printf '\n%s\n' "===================================================================="
 echo "LIFECYCLE PASSED: build -> sign -> publish -> install -> delta update"
 echo "                  -> verify -> refuse tampering -> rollback -> runs"
+echo "                  -> apt update, apt upgrade, apt refuses unsigned"
 printf '%s\n' "===================================================================="

@@ -198,6 +198,11 @@ Or through apt, which verifies the same signature:
 deb [signed-by=/usr/share/keyrings/multiprofile-archive-keyring.gpg] https://YOURHOST stable main
 ```
 
+This line is exercised in CI against the local channel — apt accepts it,
+offers the newer version as the candidate, performs the upgrade, and refuses
+the same channel with its signatures removed. What CI cannot cover is HTTPS
+against a real host.
+
 ### 4.5 CI signing, when there is a real key
 
 The lifecycle job uses a key generated per run and discarded with the
@@ -289,7 +294,7 @@ Stated plainly, because "signed builds are done" would not be true.
 |---|---|
 | **A real signing key** | None exists. Every signature so far is from a throwaway key generated inside a test. |
 | **A real host** | Nothing is published. The channel has only ever been served from a local directory or a container. |
-| **`apt update` / `apt install` against a live repository** | The lifecycle installs with `dpkg -i` from a local HTTP repo. The apt sources line in §4.4 is written from the format's requirements, not from a run. |
+| **apt against a *remote* repository** | The sources line in §4.4 is now run, not merely written: the lifecycle points apt at the signed channel, checks that apt accepts it, that it offers the new version as the candidate, that `apt-get install` performs the upgrade, and that apt refuses the same channel with its signatures removed. What is untested is apt over HTTPS against a real host, with a real certificate and a real cache in front of it. |
 | **Upgrade across a *substantial* code change** | The lifecycle's two versions now differ in the packaged Python, not only in the control fields, and the updated install is asked through `/api/health` which version it is actually running — so an update that rewrote the dpkg record without replacing the files would fail the step. What is still untested is an upgrade across a real release's worth of change, and one applied to an instance that is **busy** rather than idle. |
 | **Anything but Debian/Ubuntu** | There is no `.rpm` and no AppImage. The package is now `Architecture: all` and is published for amd64 and arm64, since it contains nothing compiled — Python, a static export and icons. The arm64 index, and a client configured as arm64 finding the package in it, are tested; an **actual arm64 machine** is not, because CI has none. |
 | **Key rotation, in the field** | The procedure is written (§4.6) and the mechanism is tested — both keys published, either signature accepted, an unpublished signing key refused before it ships. What is untested is a real fleet re-running the keyring step, which is the part that depends on operators rather than on code. |

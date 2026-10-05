@@ -212,7 +212,9 @@ jobs:
     # sign a repository with a key generated for this run and discarded with
     # the container, publish deltas, install, update across the delta, verify
     # the signature chain, prove a tampered channel is refused, roll back,
-    # and confirm the rolled-back install still serves its API.
+    # and confirm the rolled-back install still serves its API. Then the same
+    # channel again through apt, so the sources line docs/UPDATES.md hands
+    # operators is verified by running it rather than by reading the format.
     #
     # No production secret is involved. The signing key is disposable by
     # construction: it is generated inside the container and never leaves it.
