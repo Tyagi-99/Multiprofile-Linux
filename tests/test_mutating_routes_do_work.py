@@ -148,3 +148,49 @@ def test_every_mutating_route_actually_does_something():
         "work, which is F49's shape -- implement them or remove them:\n  "
         + "\n  ".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------
+# 3. The same policy for settings — F50
+# --------------------------------------------------------------------------
+
+CONFIG = pathlib.Path(__file__).resolve().parents[1] / "src/multiprofile/config.py"
+SRC = CONFIG.parent
+
+
+def test_every_setting_is_read_somewhere():
+    """A setting nothing reads is the same defect in a different vocabulary.
+
+    `prefer_sandbox` was declared, defaulted to True and populated from
+    `MULTIPROFILE_PREFER_SANDBOX`, and no code outside `config.py` ever
+    looked at it. An operator setting it to 0 to opt out of the sandbox got
+    nothing -- the real knob is `MULTIPROFILE_FORCE_NO_SANDBOX` -- and one
+    setting it to 1 to insist on the sandbox got no guarantee either, since
+    `probe_sandbox` falls back to `--no-sandbox` on a host that cannot
+    provide one. A security-adjacent setting that reads as honoured and is
+    not is worse than no setting at all.
+
+    Whether a host with no usable sandbox should *refuse to launch* rather
+    than fall back is a genuine product question, flagged in F50 rather than
+    decided here. What is not a question is a field nobody reads.
+    """
+    tree = ast.parse(CONFIG.read_text())
+    fields: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    fields.append(stmt.target.id)
+    assert fields, "no settings fields found; has config.py been restructured?"
+
+    sources = [
+        path.read_text()
+        for path in SRC.rglob("*.py")
+        if path.name != "config.py"
+    ]
+    unread = [f for f in sorted(set(fields))
+              if not any(f".{f}" in text for text in sources)]
+    assert not unread, (
+        "these settings are declared and populated but never read outside "
+        "config.py, so setting them does nothing:\n  " + "\n  ".join(unread)
+    )

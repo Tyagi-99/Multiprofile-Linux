@@ -129,6 +129,7 @@ engineering draft rather than legal advice.
 | **F47** | ✅ Low | Distribution | The package **declared `Architecture: amd64`** while containing nothing compiled, so `dpkg -i` refused it on arm64 for no reason | done |
 | **F48** | ✅ **Medium** | Distribution | The updater looked for the delta's **base package under the client's configured architecture**, so on an arch-independent package every update silently downloaded in full | done |
 | **F49** | ✅ **High** | Routing | **`POST /api/profiles/switch-all-direct` returned `ok: true` and switched nothing** — a routing control that lied about where every profile's traffic leaves from | done |
+| **F50** | ✅ Low | Security / Config | **`MULTIPROFILE_PREFER_SANDBOX` was read into a field nothing used** — a security-adjacent setting that looked honoured and was not | done |
 
 ---
 
@@ -2752,6 +2753,40 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F50 — ✅ LOW: a sandbox setting nothing read — **FIXED**
+
+**File:** [`config.py`](../src/multiprofile/config.py)
+
+`prefer_sandbox` was declared, defaulted to `True`, and populated from
+`MULTIPROFILE_PREFER_SANDBOX`. Nothing outside `config.py` ever read it.
+
+Two operators could be misled in opposite directions. One setting it to `0`
+to opt out of the sandbox gets nothing — the knob that works is
+`MULTIPROFILE_FORCE_NO_SANDBOX=1`. One setting it to `1` to insist on the
+sandbox gets no guarantee either: `probe_sandbox` falls back to
+`--no-sandbox` on a host with neither a SUID `chrome-sandbox` nor
+unprivileged user namespaces, and that fallback is a `log.warning` an
+operator is unlikely to be reading.
+
+The field is removed. `probe_sandbox` already prefers the sandbox
+unconditionally, and `force_no_sandbox` is the only override, so nothing is
+lost.
+
+**Left as a question rather than decided:** whether a host that cannot
+provide a sandbox should **refuse to launch** instead of falling back. That
+is the fail-closed posture this codebase takes everywhere else — F17 made an
+unresolvable route block rather than launch — and the inconsistency is real.
+It is not changed here because it would stop launches working on hosts where
+they work today, which is the operator's call, not mine. `/api/health`
+reports `sandbox.ok` and `sandbox.reason`, so the state is at least visible.
+
+**Test:** `test_every_setting_is_read_somewhere` in
+`tests/test_mutating_routes_do_work.py` — every field declared in
+`config.py` must be read somewhere in `src/multiprofile`. Confirmed to fail
+against the restored field, naming it.
 
 ---
 
