@@ -1652,10 +1652,6 @@ def create_app() -> Flask:
             }), 500
         return jsonify({"ok": True, "path": str(path)})
 
-    @app.post("/api/profiles/switch-all-direct")
-    def switch_all_direct():
-        return jsonify({"ok": True})
-
     # These three were stubs -- "Updater disabled in native build",
     # {"status": "disabled"}, {"ok": false} -- which is the F16 shape: a
     # control the console can call that reaches nothing. Now they reach the

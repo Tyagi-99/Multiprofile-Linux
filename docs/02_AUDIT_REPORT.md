@@ -128,6 +128,7 @@ engineering draft rather than legal advice.
 | **F46** | ✅ **High** | Fingerprint | **No WebGL at all on a GPU-less host**, and `DISPLAY` was mistaken for a graphics device | done |
 | **F47** | ✅ Low | Distribution | The package **declared `Architecture: amd64`** while containing nothing compiled, so `dpkg -i` refused it on arm64 for no reason | done |
 | **F48** | ✅ **Medium** | Distribution | The updater looked for the delta's **base package under the client's configured architecture**, so on an arch-independent package every update silently downloaded in full | done |
+| **F49** | ✅ **High** | Routing | **`POST /api/profiles/switch-all-direct` returned `ok: true` and switched nothing** — a routing control that lied about where every profile's traffic leaves from | done |
 
 ---
 
@@ -2751,6 +2752,70 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F49 — ✅ HIGH: an endpoint claimed to move every profile to direct egress and moved none — **FIXED**
+
+**File:** [`api/server.py`](../src/multiprofile/api/server.py)
+
+The whole handler:
+
+```python
+@app.post("/api/profiles/switch-all-direct")
+def switch_all_direct():
+    return jsonify({"ok": True})
+```
+
+Measured, not read — two profiles created with a SOCKS5 proxy, the endpoint
+called, the profiles read back:
+
+```
+BEFORE  profile_cab3a837  socks5 10.0.0.1:1080
+        profile_b7a6eb96  socks5 10.0.0.2:1080
+
+POST /api/profiles/switch-all-direct -> 200 {"ok": true}
+
+AFTER   profile_cab3a837  socks5 10.0.0.1:1080
+        profile_b7a6eb96  socks5 10.0.0.2:1080
+```
+
+**Why this is High and not Low.** It is **F16's shape pointed at the routing
+layer**, which is the one place in this product where a wrong belief is
+expensive. Every other control that reached nothing cost the operator a
+setting. This one cost them their model of where their traffic leaves from:
+an operator who runs it believes every profile is now on the host's own IP —
+which is what they would do before working on something they do not want
+associated with a proxy — and acts on that belief. The answer `ok: true` is
+what makes it dangerous; a 500 would have been safe.
+
+It is the inverse of **F17**, and worth putting next to it. F17 was *an
+unresolvable route launched on the host IP and reported success*. F49 is
+*a request to use the host IP reported success and kept the proxies*. Both
+are the routing layer answering `ok` for a state it is not in, which is why
+`network.py` fails closed with a `blocked_reason` everywhere else.
+
+**Removed rather than implemented.** Nothing called it — not the console, not
+the built static bundle in `src/static`, not the test suite, not
+[`API.md`](API.md). A one-click bulk switch of every profile onto the host's
+own address is not a control this product should acquire by accident; if it
+is wanted it should be built deliberately, with a confirmation and an
+audit-log entry, like every other destructive bulk operation here. A 404 is
+a better answer than a false `ok`.
+
+**Tests:** `tests/test_mutating_routes_do_work.py`. The first is the
+regression, and it holds whether the route stays absent or is reimplemented:
+if it answers 200 it must actually clear the proxies. The second is the
+policy, so the next endpoint of this shape fails a test rather than waiting
+to be measured — every `POST`/`PUT`/`PATCH`/`DELETE` handler in `server.py`
+whose entire body is a literal response is reported by name. Both confirmed
+to fail against the restored stub.
+
+**How it was found.** By listing every route handler whose body is a single
+`return` and asking which of them mutate. Fourteen matched; thirteen were
+`GET`s returning a computed value. The fourteenth was this. Reading
+`server.py` top to bottom had not surfaced it in any earlier pass, and
+neither had 2,200 tests — nothing exercised a route nothing calls.
 
 ---
 
