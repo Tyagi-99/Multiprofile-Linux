@@ -93,7 +93,7 @@ class _Page:
         self._srv.server_close()
 
 
-def _probe(seed: int, tmp_path) -> dict:
+def _probe(seed: int, tmp_path, ua_id: str = "win_chrome") -> dict:
     import websocket
     from _pytest.monkeypatch import MonkeyPatch
 
@@ -109,8 +109,16 @@ def _probe(seed: int, tmp_path) -> dict:
     mp.setenv("MULTIPROFILE_PROXY_CHECK_ENABLED", "0")
 
     page = _Page()
+    # `userAgentId` is explicit. This file is about the voices a *Windows*
+    # profile presents (F29), and its Win32 platform used to come from
+    # `_detect_pool("")`'s default. That default is now the host's own
+    # platform, so the Windows claim has to be made rather than inherited --
+    # and a Linux profile reporting zero voices is correct, because a Linux
+    # desktop without speech-dispatcher has none. See
+    # `fingerprint/identity_matrix.py`.
     pid = create_profile({
         "name": f"v{seed}", "proxyType": "none", "startUrl": page.url, "seed": seed,
+        "userAgentId": ua_id,
     })["id"]
     try:
         assert L.launch_profile(pid, url=page.url, direct=True).get("ok") is True
@@ -205,3 +213,27 @@ def test_the_core_voices_are_shared_and_the_optional_ones_vary(two_profiles):
             "Microsoft Zira - English (United States)"}
     assert core <= set(a["names"]) and core <= set(b["names"])
     assert set(a["names"]) != set(b["names"]), "no optional pack varied"
+
+
+# --------------------------------------------------------------------------
+# The other direction, which matters more now that Linux is the default
+# --------------------------------------------------------------------------
+
+def test_a_linux_profile_does_not_present_windows_voices(tmp_path_factory):
+    """A Windows voice list on a Linux claim would be a contradiction.
+
+    `speechSynthesis.getVoices()` is OS-shaped: a Windows machine has
+    Microsoft David and friends, and a Linux desktop without
+    speech-dispatcher installed has **none at all**. So zero voices is the
+    correct and ordinary answer for a Linux claim, and "Microsoft David on a
+    Linux navigator" would be the F29 contradiction pointed the other way.
+
+    Worth asserting rather than assuming, because the Windows voice list is
+    injected and an injection that ignores the claim would be invisible until
+    someone measured it -- which is how the three contradictions of
+    5 October 2026 survived.
+    """
+    probe = _probe(333, tmp_path_factory.mktemp("v-linux"), ua_id="linux_chrome")
+    joined = " ".join(probe["names"])
+    assert "Microsoft" not in joined, probe["names"]
+    assert "Microsoft David" not in joined, probe["names"]
