@@ -126,6 +126,7 @@ engineering draft rather than legal advice.
 | **F44** | ✅ **High** | Fingerprint | **`navigator.deviceMemory` reported 16 and 6**, values no Chrome build can return — found by F3's shape diff | done |
 | **F45** | ✅ **High** | Storage | **Schema v7 broke every existing database** — an index over a column the migration had not yet added | done |
 | **F46** | ✅ **High** | Fingerprint | **No WebGL at all on a GPU-less host**, and `DISPLAY` was mistaken for a graphics device | done |
+| **F47** | ✅ Low | Distribution | The package **declared `Architecture: amd64`** while containing nothing compiled, so `dpkg -i` refused it on arm64 for no reason | done |
 
 ---
 
@@ -2749,6 +2750,55 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F47 — ✅ LOW: the package declared an architecture it does not have — **FIXED**
+
+**File:** [`packaging/debian/control`](../packaging/debian/control)
+
+`Architecture: amd64` had been in the control file since the first commit, and
+nothing in the package is compiled:
+
+| Shipped | What it is |
+|---|---|
+| `usr/lib/multiprofile/` | Python source |
+| `usr/share/multiprofile/static/` | the console's static export |
+| `usr/share/multiprofile/extension/` | JavaScript |
+| `usr/bin/multiprofile-update` | Python |
+| `usr/share/icons/`, `applications/`, `doc/` | PNG, SVG, text |
+
+`Depends:` names `python3`, `python3-flask`, `python3-pkg-resources` and
+`python3-websocket` — all of them `Architecture: all` or available on every
+Debian port. The field was a copied default, and its only effect was that
+`dpkg -i` refuses the package on arm64.
+
+This is worth writing down for a reason beyond the one word. **`UPDATES.md`
+§5 listed "no arm64 build" as remaining work**, and that was wrong in a
+specific way: it recorded a limitation as if it were an unbuilt feature. An
+honest unverified-list is the point of §5, and an entry that overstates the
+work is the same failure as an entry that understates it.
+
+An `Architecture: all` package still has to be *indexed* once per
+architecture, because an apt client fetches `binary-<its own arch>/Packages`
+and nothing else. So `release.py` takes `--arch` repeatably and publishes
+`amd64` and `arm64` by default, the `Release` names both, and
+`verify_release.py` now checks **every architecture the `Release` claims**
+rather than defaulting to `amd64` — a published-but-broken arm64 index would
+otherwise have been found by an arm64 operator after release and by nobody
+before it.
+
+The filename is now derived from the control field in both `build-deb.sh` and
+the CI comparison step instead of being written twice. That is the same
+mistake the pool naming already made once (§F12): a filename that disagrees
+with the control fields produces a repository whose indices are all correct
+and whose package cannot be located.
+
+**Tests:** four, driven as far as an amd64 host can drive them — both indices
+carry the package, the `Release` hashes both, a client configured as `arm64`
+finds the update, and a corrupted arm64 index fails verification. **An actual
+arm64 machine stays untested**, because CI has none; that is now what §5 says,
+instead of claiming the build does not exist.
 
 ---
 
