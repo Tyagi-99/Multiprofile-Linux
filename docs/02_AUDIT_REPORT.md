@@ -1,7 +1,9 @@
 # 02 — Full Audit Report (Phase 1)
 
-**Commit:** `f4b342d` + uncommitted supervisor fix from this session
-**Date:** 27 September 2026
+**Opened:** 27 September 2026 against `f4b342d`
+**Last maintained:** 5 October 2026 — F43–F50 were found and fixed after the
+original pass, so the finding list below runs past the 42 of Phase 1. Numbers
+quoted in §4 are re-measured at that date unless a row says otherwise.
 **Machine:** Arch Linux 7.1.9-arch1-2, Hyprland/Wayland, Chromium 151.0.7922.173
 **Method:** static read + **live execution** — real profiles launched, real browsers
 driven over CDP, real HTTP headers captured off the wire by a local echo server.
@@ -3449,7 +3451,7 @@ for the dead fingerprint step beside it.
 | Dead code | ✅ | F2 fixed — the extension staging path is deleted, not just documented |
 | TODOs/FIXMEs | ✅ | **zero** |
 | Type safety | 🟡 | frontend TS strict & clean; Python has annotations but **no type checker in CI** |
-| Tests | ✅ | 558 functions, 1123 passing, 72% coverage |
+| Tests | ✅ | 1,317 functions across 90 files; **2,257 passing**, 5 skipped; **76.6% coverage** against a 70% gate |
 | CI | ✅ | lint + 3-version matrix + coverage gate + isolated live-browser job |
 
 ## 4.2 Security
@@ -3462,7 +3464,7 @@ for the dead fingerprint step beside it.
 | CSRF / DNS rebinding | ✅ | 4/4 attack shapes blocked (§7) |
 | CDP exposure | ✅ | origin lockdown **verified** — my own connection was refused 403 |
 | Auth model | 🟡 | one shared static token; **no user model, no roles, no sessions** |
-| Auto-updater integrity | ❌ | no updater at all |
+| Auto-updater integrity | 🟡 | F12 — signed `.deb`, apt channel with zstd deltas, daily checking, updater and rollback, all green in CI end to end. **No production key and nothing published**, so no install can yet receive an update |
 | Input validation | 🟡 | F8 — unknown fields persisted |
 | Supply chain | ✅ | 2 runtime deps; 0 vulns both ecosystems |
 
@@ -3470,12 +3472,23 @@ for the dead fingerprint step beside it.
 
 Tested: real Chromium 151, profile `os=windows`, `tz=America/New_York`, `en-US`.
 
+> **Re-checked 5 October 2026.** The engine majors in this table said **131**
+> while the heading said 151 — the rows were measured on an earlier Chromium
+> and not updated when the host's browser moved. Corrected to 151, which is
+> what the running install emits: `/api/health` reports
+> `engine.uaVersion: 151.0.0.0` from `Chromium 151.0.7922.173`, and a stored
+> profile's `fingerprint.userAgent` reads `… Windows NT 10.0; Win64; x64 …
+> Chrome/151.0.0.0 …`. A table claiming 131 on a 151 engine describes exactly
+> the contradiction **F1** exists to prevent, which is why it could not be
+> left standing. The screen and core-count figures are preset-specific and
+> are left as originally measured.
+
 | Vector | No preset (default) | With `deviceId` | Notes |
 |---|---|---|---|
-| `User-Agent` header | ✅ Windows/131 (was ⚠️ real host) | ✅ Windows/131 | F1 fixed |
+| `User-Agent` header | ✅ Windows/151 (was ⚠️ real host) | ✅ Windows/151 | F1 fixed |
 | `sec-ch-ua*` headers | ✅ consistent (was ⚠️ real host) | ✅ consistent | F1 fixed; first request of a NEW tab still leaks the platform — Gate 2 |
 | `navigator.platform` | ✅ Win32 — agrees with UA | ✅ Win32 | |
-| `userAgentData` | ✅ Windows/131 — agrees with UA | ✅ consistent | |
+| `userAgentData` | ✅ Windows/151 — agrees with UA | ✅ consistent | |
 | Screen / DPR | ✅ 1366×768 | ✅ 1366×768 | host is 2560×1440 |
 | `hardwareConcurrency` | ✅ spoofed | ✅ | host has 12 |
 | `deviceMemory` | ✅ spoofed | ✅ | |
