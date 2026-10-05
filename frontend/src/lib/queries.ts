@@ -8,15 +8,21 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { get } from "./api";
-import { auditKeys, devicesKeys, jobsKeys, profilesKeys, systemKeys } from "./query-keys";
+import { auditKeys, devicesKeys, jobsKeys, profilesKeys, systemKeys, trashKeys, usageKeys } from "./query-keys";
 import type {
   AuditPage,
   DeviceSummary,
   HealthResponse,
   JobsPage,
+  FleetCapacity,
   MetricsSummary,
   Profile,
   ProfilesPage,
+  ApiToken,
+  PlanInfo,
+  TrashPage,
+  UsageSession,
+  UsageSummary,
 } from "./types";
 
 export function useSystemHealth() {
@@ -93,6 +99,71 @@ export function useRecentAudit(limit = 8) {
   });
 }
 
+/** Deleted profiles, still recoverable. Also drives the sidebar badge. */
+export function useTrash() {
+  return useQuery({
+    queryKey: trashKeys.list(),
+    queryFn: () => get<TrashPage>("/api/trash"),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/**
+ * How full the fleet is. Shown before a bulk create so the operator learns
+ * there is room for twelve more while choosing a number, not after
+ * submitting one.
+ */
+export function useFleetCapacity() {
+  return useQuery({
+    queryKey: profilesKeys.capacity(),
+    queryFn: () => get<{ fleet: FleetCapacity }>("/api/profiles/capacity"),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** What the fleet actually ran. Measured, never estimated. */
+export function useUsage(period: string) {
+  return useQuery({
+    queryKey: usageKeys.summary(period),
+    queryFn: () => get<UsageSummary>("/api/usage", { period }),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** The sessions behind the totals: a number nobody can drill into is one
+ * that has to be taken on trust. */
+export function useUsageSessions(period: string) {
+  return useQuery({
+    queryKey: usageKeys.sessions(period),
+    queryFn: () => get<{ items: UsageSession[] }>("/api/usage/sessions", { period, limit: 500 }),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
+/** The limits this installation runs under, and usage against them. */
+export function usePlan() {
+  return useQuery({
+    queryKey: usageKeys.plan,
+    queryFn: () => get<PlanInfo>("/api/plan"),
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+/** Named API tokens. Never their secrets — the API does not have them either. */
+export function useApiTokens() {
+  return useQuery({
+    queryKey: usageKeys.tokens,
+    queryFn: () => get<{ items: ApiToken[]; scopes: string[] }>("/api/tokens"),
+    staleTime: 15_000,
+    retry: 1,
+  });
+}
+
 /** Honest point-in-time resource measurements; UNAVAILABLE, never fabricated. */
 export function useMetricsSummary() {
   return useQuery({
@@ -108,9 +179,12 @@ export function useProfileDetail(id: string) {
   return useQuery({
     queryKey: profilesKeys.detail(id),
     queryFn: async () => {
-      // No GET /api/profiles/<id> endpoint; find in the list like the old UI.
-      const page = await get<ProfilesPage>("/api/profiles", { limit: 500 });
-      return page.items.find((p) => p.id === id) ?? null;
+      // One profile, one request. This used to fetch /api/profiles?limit=500
+      // and search the page -- but the list clamps limit to 100, so with more
+      // than a hundred profiles the console could not open any of them past
+      // the first hundred: the request succeeded, the page rendered, and the
+      // answer was "not found" for a profile sitting in the store.
+      return get<Profile>(`/api/profiles/${encodeURIComponent(id)}`);
     },
     staleTime: 10_000,
     retry: 1,

@@ -199,6 +199,99 @@ export interface AuditItem {
   [key: string]: unknown;
 }
 
+/** A profile in the trash: the whole profile, plus what it is still holding. */
+export interface TrashItem extends Profile {
+  deletedAt: string;
+  /** Size of the retained chrome-profiles/<id> directory. */
+  diskBytes: number;
+}
+
+export interface TrashPage {
+  ok: boolean;
+  items: TrashItem[];
+  count: number;
+  diskBytes: number;
+  /** Days before a trashed profile is purged automatically; 0 = never. */
+  retentionDays: number;
+}
+
+export interface FleetCapacity {
+  stored: number;
+  capacity: number;
+  free: number;
+}
+
+export interface UsageBucket {
+  sessions: number;
+  seconds: number;
+  open: number;
+  name?: string | null;
+  profileId?: string;
+  clientId?: string | null;
+}
+
+export interface UsageSummary {
+  ok: boolean;
+  period: string;
+  since: string | null;
+  total: { sessions: number; seconds: number; open: number };
+  byProfile: UsageBucket[];
+  byClient: UsageBucket[];
+}
+
+export interface UsageSession {
+  id: number;
+  profile_id: string;
+  profileName?: string | null;
+  client_id?: string | null;
+  started_at: string;
+  ended_at: string | null;
+  seconds: number;
+  end_reason: string | null;
+  open: boolean;
+}
+
+/** One limit, and whether anything actually enforces it. */
+export interface PlanLimit {
+  value: number | null;
+  planValue: number | null;
+  source: "plan" | "env";
+  enforced: boolean;
+}
+
+export interface PlanInfo {
+  ok: boolean;
+  plan: { id: string; name: string; [key: string]: unknown };
+  limits: Record<string, PlanLimit>;
+  recognised: boolean;
+  warning?: string;
+  usage: {
+    profiles: number | null;
+    profilesFree?: number | null;
+    running: number | null;
+    runtimeHoursThisMonth: number | null;
+    sessionsThisMonth?: number | null;
+  };
+}
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  scopes: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface DeletionPreview {
+  profiles: number | null;
+  trashed: number | null;
+  usageSessions: number | null;
+  apiTokens: number | null;
+  browserDirectories: number;
+  confirmation: string;
+}
+
 export interface AuditPage {
   items: AuditItem[];
   next_cursor: string | null;

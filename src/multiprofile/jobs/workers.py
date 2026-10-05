@@ -32,7 +32,8 @@ from ..api import events
 from ..audit import audit_log
 from ..config import get_settings
 from ..storage import db as _db
-from .handlers import DISPATCH, HandlerContext, JobHandlerError
+from . import batches
+from .handlers import DISPATCH, HandlerContext, JobCancelled, JobHandlerError
 
 log = logging.getLogger("multiprofile.jobs.workers")
 
@@ -53,8 +54,15 @@ class JobWorker:
         on_job_done: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         settings = get_settings()
-        self.max_workers = max_workers or settings.jobs_max_workers
-        self.max_concurrent_launches = max_concurrent_launches or settings.jobs_max_concurrent_launches
+        # 0 means "follow the profile concurrency cap" -- see config.py. The
+        # cap is the authoritative gate (`browser_manager.acquire_slot`), so a
+        # narrower worker pool would only serialise launches behind it and
+        # undo F33 without changing how many browsers can exist.
+        cap = max(1, int(settings.max_concurrent_profiles))
+        self.max_workers = max_workers or settings.jobs_max_workers or cap
+        self.max_concurrent_launches = (
+            max_concurrent_launches or settings.jobs_max_concurrent_launches or cap
+        )
         self.poll_interval_s = poll_interval_s
         self._launch_semaphore = threading.Semaphore(self.max_concurrent_launches)
         self._ctx = HandlerContext(
@@ -144,9 +152,15 @@ class JobWorker:
                 except json.JSONDecodeError:
                     record[key.replace("_json", "")] = None
         job_type = record.get("job_type")
+        batch_id = (record.get("payload") or {}).get("batchId")
+        # A batch goes 'running' when its first member does, not when it is
+        # created: the operator's progress bar should start moving when work
+        # starts, and a batch sitting behind the concurrency cap has not.
+        batches.on_member_started(batch_id)
         events.publish(
             "job.progress",
-            {"job_id": job_id, "status": "running", "detail": {"type": job_type}},
+            {"job_id": job_id, "status": "running",
+             "detail": {"type": job_type, "batchId": batch_id}},
         )
         handler = DISPATCH.get(job_type)
         if handler is None:
@@ -154,6 +168,14 @@ class JobWorker:
             return
         try:
             result = handler(record, self._ctx)
+        except JobCancelled:
+            # Not a failure and not retryable: the operator asked for this.
+            _db.update_job_record(job_id, status="cancelled", error=None)
+            events.publish(
+                "job.progress",
+                {"job_id": job_id, "status": "cancelled",
+                 "detail": {"type": job_type, "batchId": batch_id}},
+            )
         except JobHandlerError as e:
             self._finish_job(record, ok=False, error=str(e))
         except Exception:  # noqa: BLE001 - unexpected handler crash
@@ -162,6 +184,10 @@ class JobWorker:
             )
         else:
             self._finish_job(record, ok=True, result=result)
+        # After the member has settled, and outside the try: the batch may now
+        # be complete, which is where tiling and the final status happen. A
+        # failure here must not be reported as a handler failure.
+        batches.on_member_finished(batch_id)
 
     def _finish_job(
         self,

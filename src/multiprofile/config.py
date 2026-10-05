@@ -27,11 +27,36 @@ def _env_bool(name: str, default: bool) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _plan_limit(field: str, fallback: int) -> int:
+    """The active plan's value for a limit, or the historical default.
+
+    Imported lazily: `plans` reads settings, so a module-level import here
+    would be a cycle. A plan that cannot be resolved falls back to the number
+    this product shipped with rather than to zero -- a limit that reads as
+    "you may store nothing" would be a far worse failure than a stale default.
+    """
+    try:
+        from .plans import active_plan
+
+        return int(getattr(active_plan(), field, fallback))
+    except Exception:  # noqa: BLE001 - config must resolve even if plans does not
+        return fallback
+
+
 @dataclass(frozen=True)
 class Settings:
     """Process-wide settings (immutable snapshot)."""
 
     max_concurrent_profiles: int = 20
+    # How many profiles may be *stored*. Distinct from the concurrency
+    # limit above: the fleet is the address book, concurrency is how many
+    # of them are running. 150 is the size this product is built and
+    # measured for; raise MAX_PROFILES to grow it.
+    max_profiles: int = 150
+    # How long a trashed profile is kept before it is purged for good.
+    # 0 disables the automatic purge, so the trash only empties when the
+    # operator says so.
+    trash_retention_days: int = 30
     # DEFAULT FALSE — AdsPower-class anti-detect exclusivity.
     allow_webstore_extensions: bool = False
     force_no_sandbox: bool = False
@@ -51,16 +76,89 @@ class Settings:
     proxy_check_enabled: bool = True       # set False to skip in offline/dev environments
     # GPU settings: "auto" = probe at launch, "angle" = force angle, "software" = force swiftshader
     gpu_mode: str = "auto"
+    # Launch-time wire-identity assertion. The launcher makes the browser
+    # fetch a loopback probe and compares the headers it really sent against
+    # the identity it was given; a PROVEN mismatch fails the launch. Default
+    # ON: shipping a profile whose headers contradict its JavaScript is worse
+    # than shipping no profile, and this bug (F1) was silent for months
+    # precisely because nothing checked. Set False only to diagnose the
+    # assertion itself.
+    identity_assert_enabled: bool = True
+    # Rewrite client hints on a new tab's FIRST document request, which the
+    # browser process forms before any renderer exists (F1's residual). Costs
+    # ~0.5s per launch, measured: arming Fetch at browser scope drops a
+    # Chromium navigation fast-path, and the cost is the same whether or not a
+    # request is actually paused. On by default -- an identity that
+    # contradicts itself once per tab is the defect this product exists to
+    # avoid -- but switchable for anyone who needs the launch budget more.
+    first_request_hints: bool = True
+    # evasion.js diagnostics. OFF by default: the script used to log
+    # "[Evasion] evasion.js active on: <url>" on every page and in every frame,
+    # which is a plain-text confession in any DevTools session, screen share or
+    # support screenshot. Turning it on is how you count the script's
+    # executions per document — the measurement that catches double injection.
+    evasion_debug: bool = False
     # Supervisor: watches running browsers, bounded-restarts dead ones
     supervisor_enabled: bool = True
     supervisor_interval_s: int = 10
     supervisor_max_restart_attempts: int = 3
+    # A relaunched browser must stay alive this long before its restart counts
+    # as a recovery. Deaths inside the window continue the same crash episode
+    # and keep spending the same restart budget.
+    supervisor_restart_stability_s: int = 60
     # Durable job queue
-    jobs_max_workers: int = 4
-    jobs_max_concurrent_launches: int = 2
+    # Job worker width. Both default to the profile concurrency cap, because
+    # since F20 ordinary bulk launches run on this queue and the cap is the
+    # thing that decides how many browsers may exist at once (`acquire_slot`).
+    # The previous defaults of 4 and 2 were sized for background parking and
+    # health-check jobs; leaving them would have quietly undone F33, which
+    # made a batch of 8 take ~3 s instead of ~13 s by overlapping the waiting.
+    # A value of 0 means "follow max_concurrent_profiles".
+    jobs_max_workers: int = 0
+    jobs_max_concurrent_launches: int = 0
+    # Updates ([update])
+    #
+    # Checking is enabled, and inert until a channel is configured. Those two
+    # facts together are the product decision, and they are not a compromise:
+    #
+    #   * F14 established that this product makes no network requests of its
+    #     own. An install that was handed a .deb and nothing else has no
+    #     /etc/multiprofile/update.conf, so it asks nobody anything, ever.
+    #   * Writing that file is the opt-in. It says where this install should
+    #     look, and once it exists, checking on a schedule is the thing the
+    #     operator asked for.
+    #
+    # Installing is a separate decision and defaults OFF. This product's job
+    # is keeping browser sessions alive and separate; replacing the binary
+    # under a running fleet risks exactly what the operator uses it to avoid.
+    # When it is turned on it is still refused while any profile is running --
+    # an update that waits is an update, one that interrupts a session is an
+    # incident.
+    update_check_enabled: bool = True
+    update_check_interval_s: int = 86400   # daily; an update is never urgent to the second
+    update_auto_install: bool = False
     # Idle parking ([parking])
-    parking_enabled: bool = True           # park idle profiles (graceful stop, data kept)
+    #
+    # **Default OFF, and that is the decision F20 asked for.**
+    #
+    # This read True for the whole of the audit and parked nothing, because
+    # `park_profile` was only reachable from a job handler and nothing ever
+    # enqueued one -- the finding itself. Wiring the producer while leaving
+    # the default True would have changed what the product *does* on every
+    # existing install: browsers the operator left open would start
+    # disappearing after 30 minutes, silently, on upgrade. A setting that has
+    # never done anything is not a setting anyone has opted into.
+    #
+    # So the default matches what installs have actually been doing since the
+    # feature shipped, and turning it on is now a choice that works rather
+    # than a checkbox that reaches nothing. Parking stops the browser and
+    # keeps the profile's data; nothing is lost but the open window and
+    # whatever was unsaved in it, which is exactly why it should be asked for.
+    parking_enabled: bool = False          # park idle profiles (graceful stop, data kept)
     parking_idle_timeout_s: int = 1800     # idle seconds before a profile may be parked
+    # How often the sweeper looks for idle profiles. Only runs when
+    # `parking_enabled`; a sweep is a cheap read of the runtime table.
+    parking_sweep_interval_s: int = 300
     # Health-check staggering ([health])
     health_stagger: bool = True            # jitter health checks so N profiles don't fire at once
     health_max_concurrent: int = 4         # max health checks in flight per wave
@@ -76,7 +174,17 @@ class Settings:
 
 def get_settings() -> Settings:
     return Settings(
-        max_concurrent_profiles=_env_int("MAX_CONCURRENT_PROFILES", 20, minimum=1, maximum=64),
+        max_concurrent_profiles=_env_int(
+            "MAX_CONCURRENT_PROFILES", _plan_limit("max_concurrent", 20),
+            minimum=1, maximum=64,
+        ),
+        max_profiles=_env_int(
+            "MAX_PROFILES", _plan_limit("max_profiles", 150),
+            minimum=1, maximum=10_000,
+        ),
+        trash_retention_days=_env_int(
+            "MULTIPROFILE_TRASH_RETENTION_DAYS", 30, minimum=0, maximum=3650
+        ),
         allow_webstore_extensions=_env_bool("MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", False),
         force_no_sandbox=_env_bool("MULTIPROFILE_FORCE_NO_SANDBOX", False),
         prefer_sandbox=_env_bool("MULTIPROFILE_PREFER_SANDBOX", True),
@@ -90,20 +198,34 @@ def get_settings() -> Settings:
         proxy_check_timeout=_env_int("MULTIPROFILE_PROXY_CHECK_TIMEOUT", 8, minimum=2, maximum=60),
         proxy_check_enabled=_env_bool("MULTIPROFILE_PROXY_CHECK_ENABLED", True),
         gpu_mode=(os.environ.get("MULTIPROFILE_GPU_MODE") or "auto").strip().lower(),
+        identity_assert_enabled=_env_bool("MULTIPROFILE_IDENTITY_ASSERT", True),
+        first_request_hints=_env_bool("MULTIPROFILE_FIRST_REQUEST_HINTS", True),
+        evasion_debug=_env_bool("MULTIPROFILE_EVASION_DEBUG", False),
         # [supervisor]
         supervisor_enabled=_env_bool("MULTIPROFILE_SUPERVISOR_ENABLED", True),
         supervisor_interval_s=_env_int("MULTIPROFILE_SUPERVISOR_INTERVAL_S", 10, minimum=2, maximum=3600),
         supervisor_max_restart_attempts=_env_int(
             "MULTIPROFILE_SUPERVISOR_MAX_RESTARTS", 3, minimum=0, maximum=10
         ),
+        supervisor_restart_stability_s=_env_int(
+            "MULTIPROFILE_SUPERVISOR_STABILITY_S", 60, minimum=0, maximum=3600
+        ),
         # [jobs]
-        jobs_max_workers=_env_int("MULTIPROFILE_JOBS_MAX_WORKERS", 4, minimum=1, maximum=32),
+        jobs_max_workers=_env_int("MULTIPROFILE_JOBS_MAX_WORKERS", 0, minimum=0, maximum=128),
         jobs_max_concurrent_launches=_env_int(
-            "MULTIPROFILE_JOBS_MAX_LAUNCHES", 2, minimum=1, maximum=16
+            "MULTIPROFILE_JOBS_MAX_LAUNCHES", 0, minimum=0, maximum=128
         ),
         # [parking]
-        parking_enabled=_env_bool("MULTIPROFILE_PARKING_ENABLED", True),
+        update_check_enabled=_env_bool("MULTIPROFILE_UPDATE_CHECK_ENABLED", True),
+        update_check_interval_s=_env_int(
+            "MULTIPROFILE_UPDATE_CHECK_INTERVAL_S", 86400, minimum=3600, maximum=2592000
+        ),
+        update_auto_install=_env_bool("MULTIPROFILE_UPDATE_AUTO_INSTALL", False),
+        parking_enabled=_env_bool("MULTIPROFILE_PARKING_ENABLED", False),
         parking_idle_timeout_s=_env_int("MULTIPROFILE_PARKING_IDLE_TIMEOUT_S", 1800, minimum=1, maximum=86400),
+        parking_sweep_interval_s=_env_int(
+            "MULTIPROFILE_PARKING_SWEEP_INTERVAL_S", 300, minimum=10, maximum=86400
+        ),
         # [health]
         health_stagger=_env_bool("MULTIPROFILE_HEALTH_STAGGER", True),
         health_max_concurrent=_env_int("MULTIPROFILE_HEALTH_MAX_CONCURRENT", 4, minimum=1, maximum=64),
@@ -117,3 +239,11 @@ def get_settings() -> Settings:
 
 def max_concurrent_profiles() -> int:
     return get_settings().max_concurrent_profiles
+
+
+def max_profiles() -> int:
+    return get_settings().max_profiles
+
+
+def trash_retention_days() -> int:
+    return get_settings().trash_retention_days

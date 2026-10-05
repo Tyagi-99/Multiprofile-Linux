@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from .storage.xdg import data_dir, secure_write_json
+
+log = logging.getLogger("multiprofile.cookies")
 
 
 def cookies_dir() -> Path:
@@ -21,17 +24,40 @@ def cookies_path(profile_id: str) -> Path:
 
 
 def load_cookies(profile_id: str) -> list[dict[str, Any]]:
+    """This profile's cookies, or an empty list.
+
+    F11: the empty list used to mean three different things -- no jar, an
+    empty jar, and *a jar that could not be read* -- and the caller could not
+    tell them apart. A profile whose cookie file was truncated or
+    half-written therefore looked exactly like a profile that had never been
+    logged into, so it launched signed out of everything with nothing said
+    anywhere.
+
+    Returning [] on damage is still right: refusing to launch over a cookie
+    file would be worse than launching without cookies. Doing it silently was
+    not. The file is left in place, because the operator may be able to
+    recover it and this function deleting it would remove that chance.
+    """
     path = cookies_path(profile_id)
     if not path.exists():
         return []
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and isinstance(data.get("cookies"), list):
-            return data["cookies"]
-    except Exception:
-        pass
+    except Exception as e:  # noqa: BLE001 - a bad jar must not stop a launch
+        log.warning(
+            "cookie jar for %s could not be read (%s); the profile will start "
+            "with no cookies and the file is left in place at %s",
+            profile_id, e, path,
+        )
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("cookies"), list):
+        return data["cookies"]
+    log.warning(
+        "cookie jar for %s is valid JSON but not a cookie list (%s); the "
+        "profile will start with no cookies", profile_id, type(data).__name__,
+    )
     return []
 
 

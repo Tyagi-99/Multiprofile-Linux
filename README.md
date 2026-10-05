@@ -1,10 +1,10 @@
 # Multiprofile Linux
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Ubuntu-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)]()
-[![Tests](https://img.shields.io/badge/tests-835%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-1906%20passed-brightgreen.svg)](tests/)
 
 A robust, enterprise-grade, clean-room native Linux platform for managing isolated browser profiles. Designed for software verification, testing laboratories, automation engineers, and multi-tenant environments requiring real per-profile network isolation, storage segregation, and deterministic hardware identities.
 
@@ -12,9 +12,9 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 
 ---
 
-## Key Capabilities (v1.7.0)
+## Key Capabilities (v1.9.0)
 
-### New in 1.7.0
+### New in 1.7.0 *(kept for history; see [CHANGELOG](CHANGELOG.md) for 1.8 and 1.9)*
 - **Browser Supervisor**: crash watchdog with bounded restart (max 3, backoff) and full CDP grid re-tile; exhaustion stays in `error` with a reason.
 - **Durable Jobs**: SQLite WAL-backed queue that survives restarts; `recover()` at every boot re-queues orphaned jobs and marks stuck profiles `error`.
 - **State Machine**: validated profile transitions (`stopped/starting/running/stopping/idle/parked/error`) with audit notes.
@@ -39,8 +39,9 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 - **Complete Browser Surface**: Desktop profiles provide standard Chrome PDF plugins (`navigator.plugins.length === 3`), realistic `window.chrome` objects (`loadTimes`, `csi`, `app`, `runtime`), and stable seeded media device IDs.
 
 ### 3. Edge-to-Edge Window Tiling
-- **Pure-Math Grid Calculator**: Partitions the detected display work area (`_NET_WORKAREA`) into balanced grids (e.g. 2×2 for 4 profiles, 3×3 for 9 profiles, 5×4 for 20 profiles).
+- **Pure-Math Grid Calculator**: Partitions the detected display work area into balanced grids (e.g. 2×2 for 4 profiles, 3×3 for 9 profiles, 5×4 for 20 profiles).
 - **Zero Gap & Zero Margin**: Remainder pixels are distributed across columns and rows to ensure 100% work-area coverage with zero overlapping geometry.
+- **Compositor-Aware Work Area**: The display work area is read from the compositor that is actually running — `hyprctl`, `swaymsg` or `wlr-randr` on Wayland, `xrandr` / `_NET_WORKAREA` / `xdpyinfo` on X11 — and reserved edges such as a status bar are subtracted. When nothing can answer, tiling declines rather than guessing a size: a wrong work area puts windows off-screen, which is worse than not tiling.
 - **X11 / Wayland Bridge**: Launches with `--ozone-platform=x11` so Chromium's native window handles strictly respect CDP `Browser.setWindowBounds`.
 
 ### 4. Encrypted Backups & Manifest V2
@@ -66,7 +67,7 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 ```
 +───────────────────────────────────────────────────────────────────────+
 |                         Web SPA / Desktop UI                          |
-|             (Vanilla JS, Tailwind CSS, Local Storage Token)           |
+|      (Next.js 16 static export, React 19, Tailwind 4, TypeScript)     |
 +───────────────────────────────────────────────────────────────────────+
                                    │
                             HTTP / REST API
@@ -165,8 +166,11 @@ python3 -m multiprofile
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MAX_CONCURRENT_PROFILES` | `20` | Maximum simultaneous Chromium processes |
-| `MULTIPROFILE_API_TOKEN` | unset | If set, mandates `Authorization: Bearer <token>` on API endpoints |
+| `MULTIPROFILE_PLAN` | `self-hosted` | Named set of limits (`self-hosted`, `solo`, `team`). Sets the defaults for the two below. |
+| `MAX_PROFILES` | `150` | Maximum profiles **stored**. Creating past it answers `409 fleet_full`. Trashed profiles do not count. |
+| `MAX_CONCURRENT_PROFILES` | `20` | Maximum profiles **running** at once |
+| `MULTIPROFILE_TRASH_RETENTION_DAYS` | `30` | Days a deleted profile stays recoverable. `0` never purges automatically. |
+| `MULTIPROFILE_API_TOKEN` | unset | Legacy single bearer token for **non-loopback** callers; carries every scope. Loopback never needs a token. Prefer scoped tokens from `POST /api/tokens`. |
 | `MULTIPROFILE_PROXY_CHECK_TIMEOUT` | `8` | Timeout in seconds for pre-launch proxy reachability probes |
 | `MULTIPROFILE_PROXY_CHECK_ENABLED` | `true` | Set to `false` to disable pre-launch health gates |
 | `MULTIPROFILE_GPU_MODE` | `auto` | GPU mode: `auto` (probe `/dev/dri`), `angle` (force HW), or `software` (SwiftShader) |

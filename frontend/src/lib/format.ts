@@ -26,3 +26,17 @@ export function absoluteTime(iso: string | null | undefined): string | undefined
   const t = new Date(iso).getTime();
   return Number.isNaN(t) ? undefined : new Date(t).toLocaleString();
 }
+
+/** "1.4 GB" for a byte count. Sizes here are disk, so decimal units. */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || Number.isNaN(bytes)) return "—";
+  if (bytes < 1000) return `${bytes} B`;
+  const units = ["kB", "MB", "GB", "TB"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}

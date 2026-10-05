@@ -29,7 +29,7 @@ def _read() -> list[dict[str, Any]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, list) else []
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return []
 
 
@@ -100,7 +100,7 @@ def verify_github_token(token: str) -> dict[str, Any]:
         return {"ok": False, "error": f"GitHub API error: HTTP {e.code}"}
     except URLError as e:
         return {"ok": False, "error": f"Could not reach GitHub: {e.reason}"}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return {"ok": False, "error": str(e)}
 
     login = (body.get("login") or "").strip()

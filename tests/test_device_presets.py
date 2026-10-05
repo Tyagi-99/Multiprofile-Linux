@@ -59,6 +59,20 @@ HINT_KEYS = {
 }
 
 
+#: Every test here depends on `validation_results`, which launches a real
+#: Chromium for each preset, so the whole module needs a browser environment
+#: -- not just the tests that assert on the runtime check.
+#:
+#: It was unmarked, so it ran in the `python` matrix jobs. Those have no
+#: display, and a GitHub runner has Chrome preinstalled, so the validator
+#: found a browser, launched it without an X server, and the viewport
+#: round-trip came back scaled: "applied 411x918, page reports 980x2189". It
+#: failed on one Python version and passed on the other two in the same run,
+#: which is the worst way for a test to be wrong -- it reads as a flake and
+#: gets re-run rather than read.
+pytestmark = pytest.mark.network
+
+
 @pytest.fixture(scope="module")
 def validation_results():
     """Validate every preset once per test module (runtime check is cached)."""

@@ -16,6 +16,8 @@ export type Route =
   | { name: "jobs"; id?: string }
   | { name: "gateways" }
   | { name: "extensions" }
+  | { name: "usage" }
+  | { name: "trash" }
   | { name: "audit" }
   | { name: "settings" };
 
@@ -50,6 +52,10 @@ export function parseHash(hash: string): Route {
       return { name: "gateways" };
     case "extensions":
       return { name: "extensions" };
+    case "usage":
+      return { name: "usage" };
+    case "trash":
+      return { name: "trash" };
     case "audit":
       return { name: "audit" };
     case "settings":

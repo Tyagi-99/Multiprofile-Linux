@@ -13,6 +13,7 @@ import {
   MoreHorizontal,
   Pause,
   Play,
+  Layers,
   Plus,
   RotateCcw,
   Search,
@@ -51,7 +52,21 @@ import { Select } from "../ui/select";
 import { Skeleton } from "../ui/skeleton";
 import { Table, TBody, TD, TH, THead, TR } from "../ui/table";
 
-const PAGE_SIZE = 25;
+// One page holds the whole fleet at the size this product is designed for
+// (150 profiles), so the operator scrolls rather than pages, "select all"
+// really does mean all of them, and bulk actions are not bounded by a page
+// boundary that no longer exists.
+//
+// 25 was chosen when a list row carried its generated fingerprint -- 2,795
+// bytes, of which the table read none. A row is 663 bytes now, so a full
+// page is about 130 KB and the database returns it in roughly a millisecond.
+//
+// Deliberately NOT virtualized. 200 rows of a plain table is not a rendering
+// problem, and a windowed list is machinery with no benefit until the design
+// target moves. If it does, the API is already the part that would have been
+// hard: it pages, filters and sorts in SQL, and /api/profiles/ids resolves a
+// whole filter for select-all.
+const PAGE_SIZE = 200;
 
 function useDebounced<T>(value: T, ms: number): T {
   const [v, setV] = useState(value);
@@ -537,6 +552,9 @@ export function ProfilesPage() {
         >
           <Download size={14} aria-hidden /> Export
         </Button>
+        <Button variant="secondary" size="sm" onClick={() => openDialog("bulkCreate")}>
+          <Layers size={14} aria-hidden /> Bulk create
+        </Button>
         <Button variant="primary" size="sm" onClick={() => openDialog("wizard")}>
           <Plus size={14} aria-hidden /> New profile
         </Button>
@@ -547,6 +565,16 @@ export function ProfilesPage() {
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-brand-500/30 bg-brand-500/10 px-3 py-2">
           <span className="text-[13px] font-medium text-ink-1">
             {selectedProfiles.length} selected
+            {/* Selection is per page. At the size this is designed for the
+                page holds everything, so the two numbers agree -- but if a
+                filter ever matches more than one page, saying so is the
+                difference between an operator acting on all of it and
+                believing they did. */}
+            {nextCursor && total != null && total > selectedProfiles.length && (
+              <span className="ml-1 font-normal text-ink-3">
+                of {total} matching — this page only
+              </span>
+            )}
           </span>
           <Button variant="ghost" size="sm" onClick={() => setRowSelection({})}>
             Clear
@@ -638,7 +666,7 @@ export function ProfilesPage() {
         open={deleteTargets !== null}
         onClose={() => setDeleteTargets(null)}
         title={`Delete ${deleteTargets?.length ?? 0} profile${(deleteTargets?.length ?? 0) === 1 ? "" : "s"}?`}
-        description="Browser storage will be purged. This cannot be undone."
+        description="Moves them to the trash. Their browser storage is kept, so they can be restored."
         footer={
           <>
             <Button variant="secondary" onClick={() => setDeleteTargets(null)}>
@@ -790,7 +818,7 @@ function RowActions({
         open={deleteOpen}
         onClose={() => setDeleteOpen(false)}
         title={`Delete “${profile.name}”?`}
-        description="Browser storage will be purged. This cannot be undone."
+        description="Moves it to the trash. Its browser storage is kept, so you can restore it."
         footer={
           <>
             <Button variant="secondary" onClick={() => setDeleteOpen(false)}>
@@ -809,8 +837,11 @@ function RowActions({
         }
       >
         <p className="text-sm text-ink-2">
-          Profile <span className="font-medium text-ink-1">{profile.name}</span> and its browser
-          storage will be permanently removed.
+          Profile <span className="font-medium text-ink-1">{profile.name}</span> moves to the{" "}
+          <a href="#/trash" className="text-brand-600 hover:underline dark:text-brand-400">
+            trash
+          </a>
+          . Its cookies and logins stay on disk until the trash is emptied.
         </p>
       </Dialog>
     </>

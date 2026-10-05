@@ -45,13 +45,20 @@ DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 
 
-def parse_limit(value: Any) -> int:
-    """Parse the ``limit`` query param: default 25, clamp silently to 1..100."""
+def parse_limit(value: Any, *, maximum: int = MAX_LIMIT) -> int:
+    """Parse the ``limit`` query param: default 25, clamped silently to 1..max.
+
+    ``maximum`` is per-endpoint because the cap is about the size of one
+    response, not the cost of one query. The profile list raises it, having
+    earned it: a row there is 663 bytes rather than 2,795 since the
+    fingerprint stopped being sent with every one. Other collections have not
+    been measured that way and keep the conservative default.
+    """
     try:
         limit = int(value if value is not None else DEFAULT_LIMIT)
     except (TypeError, ValueError):
         limit = DEFAULT_LIMIT
-    return max(1, min(limit, MAX_LIMIT))
+    return max(1, min(limit, maximum))
 
 
 def encode_cursor(sort_key: Any, item_id: Any) -> str:

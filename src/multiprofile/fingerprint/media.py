@@ -15,16 +15,36 @@ from ._core import _hex_id, _rng, resolve_context
 def build(seed: int | None, profile: dict[str, Any], device_preset: Any = None) -> dict[str, Any]:
     ctx = resolve_context(profile, device_preset, seed)
     seed = ctx["seed"]
-    rng_dev = _rng(seed, 20)
+    # One salt per kind. All three used to share ``_rng(seed, 20)`` and
+    # therefore the same 64-char id -- a microphone, a camera and a speaker
+    # with one identifier between them, which no real browser has ever
+    # produced. Distinct salts, so the three differ the way real ones do.
     return {
         "status": "STABLE",
         "seed": seed,
         "deviceIds": {
-            "audioinput": _hex_id(rng_dev),
-            "audiooutput": _hex_id(rng_dev),
-            "videoinput": _hex_id(rng_dev),
+            "audioinput": _hex_id(_rng(seed, 20)),
+            "audiooutput": _hex_id(_rng(seed, 21)),
+            "videoinput": _hex_id(_rng(seed, 22)),
         },
-        "mechanism": "extension replaces enumerateDevices IDs with these stable seeded values",
-        "note": "identical values to legacy fingerprint.mediaDeviceIds",
+        # Chrome groups devices that belong to the same physical unit -- a
+        # webcam's camera and microphone share a groupId. Two groups is the
+        # ordinary shape: the audio pair together, the camera apart.
+        "groupIds": {
+            "audioinput": _hex_id(_rng(seed, 23)),
+            "audiooutput": _hex_id(_rng(seed, 23)),
+            "videoinput": _hex_id(_rng(seed, 24)),
+        },
+        "mechanism": (
+            "evasion.js replaces enumerateDevices ids with these stable seeded "
+            "values -- but ONLY when the browser is already exposing real ones"
+        ),
+        "note": (
+            "Substituting unconditionally was worse than not spoofing: with no "
+            "media permission Chrome returns deviceId='' for every device, so a "
+            "profile handing out a stable 64-char id beside an empty label and "
+            "an empty groupId announced itself as modified, and handed every "
+            "site the same persistent identifier"
+        ),
         "source": ctx["source"],
     }

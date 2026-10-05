@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""Check for, fetch, install and roll back Multiprofile updates.
+
+**F12's client half.** Signing a repository is only half an update channel;
+something has to use it, and it has to be possible to go back when a release
+is bad. This is that, and it is deliberately small and readable, because an
+updater is the one program a user cannot inspect after it has gone wrong.
+
+Rules it follows:
+
+* **Nothing is installed without being asked.** `--check` reports and exits.
+  A desktop app that silently replaces itself is a desktop app that replaces
+  itself at a bad moment.
+* **The signature is verified before anything else is believed.** The
+  `InRelease` file is checked against a pinned keyring; its hashes cover
+  `Packages`; `Packages` carries the SHA-256 of each `.deb`. One signature,
+  whole chain.
+* **A delta is an optimisation, never a trust boundary.** When one is
+  available it is applied to the currently installed `.deb`, and the *result*
+  is checked against the hash in the signed `Packages`. If that disagrees for
+  any reason the delta is discarded and the full package downloaded. A
+  corrupt or hostile delta therefore costs a download, not an install.
+* **The package you are replacing is kept**, so `--rollback` is a local
+  operation that works when the network or the new release does not.
+
+Configuration lives in /etc/multiprofile/update.conf (INI):
+
+    [update]
+    url = https://updates.example.com/multiprofile
+    suite = stable
+    component = main
+    arch = amd64
+    keyring = /usr/share/keyrings/multiprofile-archive-keyring.gpg
+"""
+from __future__ import annotations
+
+import argparse
+import configparser
+import gzip
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PACKAGE = "multiprofile-native"
+CONFIG_PATH = Path(os.environ.get("MULTIPROFILE_UPDATE_CONF", "/etc/multiprofile/update.conf"))
+STATE_DIR = Path(os.environ.get("MULTIPROFILE_UPDATE_STATE", "/var/lib/multiprofile/updates"))
+
+
+class UpdateError(RuntimeError):
+    pass
+
+
+# --------------------------------------------------------------------------
+# Small helpers
+# --------------------------------------------------------------------------
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch(url: str, dest: Path, timeout: int = 60) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310 - the URL is operator-configured
+            dest.write_bytes(response.read())
+    except urllib.error.URLError as e:
+        raise UpdateError(f"could not fetch {url}: {e}") from e
+    return dest
+
+
+def _read_config() -> dict[str, str]:
+    if not CONFIG_PATH.is_file():
+        raise UpdateError(
+            f"no update channel configured at {CONFIG_PATH}. This build was "
+            "installed without one; see docs/UPDATES.md."
+        )
+    parser = configparser.ConfigParser()
+    parser.read(CONFIG_PATH)
+    if not parser.has_section("update"):
+        raise UpdateError(f"{CONFIG_PATH} has no [update] section")
+    cfg = dict(parser["update"])
+    for required in ("url", "keyring"):
+        if not cfg.get(required):
+            raise UpdateError(f"{CONFIG_PATH}: [update] {required} is required")
+    cfg.setdefault("suite", "stable")
+    cfg.setdefault("component", "main")
+    cfg.setdefault("arch", "amd64")
+    return cfg
+
+
+def installed_version() -> str | None:
+    """The version dpkg believes is installed, or None."""
+    if shutil.which("dpkg-query") is None:
+        return None
+    proc = subprocess.run(
+        ["dpkg-query", "--showformat=${Version}", "--show", PACKAGE],
+        capture_output=True, text=True,
+    )
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def _compare_versions(a: str, b: str) -> int:
+    """-1, 0 or 1. Uses dpkg when it is there, a tuple compare when it is not."""
+    if shutil.which("dpkg") is not None:
+        for op, result in (("lt", -1), ("eq", 0), ("gt", 1)):
+            if subprocess.run(["dpkg", "--compare-versions", a, op, b]).returncode == 0:
+                return result
+    def parts(v: str) -> tuple:
+        return tuple(int(x) if x.isdigit() else x for x in v.replace("-", ".").split("."))
+    pa, pb = parts(a), parts(b)
+    return (pa > pb) - (pa < pb)
+
+
+# --------------------------------------------------------------------------
+# The signed chain
+# --------------------------------------------------------------------------
+
+def _verify_inrelease(inrelease: Path, keyring: Path, work: Path) -> str:
+    """Verify InRelease against the pinned keyring and return its payload."""
+    if not keyring.is_file():
+        raise UpdateError(f"keyring not found: {keyring}")
+    if shutil.which("gpgv") is None and shutil.which("gpg") is None:
+        raise UpdateError("neither gpgv nor gpg is installed; cannot verify the update")
+
+    payload = work / "Release.verified"
+    if shutil.which("gpgv") is not None:
+        # gpgv is the right tool: it verifies against a keyring and has no
+        # concept of a trust database to be confused by.
+        proc = subprocess.run(
+            ["gpgv", "--keyring", str(keyring), "--output", str(payload), str(inrelease)],
+            capture_output=True, text=True,
+        )
+    else:
+        proc = subprocess.run(
+            ["gpg", "--batch", "--no-default-keyring", "--keyring", str(keyring),
+             "--output", str(payload), "--yes", "--decrypt", str(inrelease)],
+            capture_output=True, text=True,
+        )
+    if proc.returncode != 0:
+        raise UpdateError(
+            "the update index is not signed by the expected key — refusing to "
+            f"continue.\n{proc.stderr.strip()}"
+        )
+    return payload.read_text(encoding="utf-8")
+
+
+def _release_hashes(release_text: str) -> dict[str, tuple[str, int]]:
+    out: dict[str, tuple[str, int]] = {}
+    in_sha = False
+    for line in release_text.splitlines():
+        if line.startswith("SHA256:"):
+            in_sha = True
+            continue
+        if in_sha and line.startswith(" "):
+            digest, size, name = line.split()
+            out[name] = (digest, int(size))
+        elif in_sha and line.strip():
+            break
+    return out
+
+
+def _parse_packages(text: str) -> list[dict[str, str]]:
+    stanzas = []
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        fields: dict[str, str] = {}
+        for line in block.splitlines():
+            if ":" in line and not line.startswith((" ", "\t")):
+                k, _, v = line.partition(":")
+                fields[k.strip()] = v.strip()
+        if fields:
+            stanzas.append(fields)
+    return stanzas
+
+
+def fetch_index(cfg: dict[str, str], work: Path) -> list[dict[str, str]]:
+    """Fetch and verify the index, returning the package stanzas."""
+    base = cfg["url"].rstrip("/")
+    dist = f"{base}/dists/{cfg['suite']}"
+    inrelease = _fetch(f"{dist}/InRelease", work / "InRelease")
+    release_text = _verify_inrelease(inrelease, Path(cfg["keyring"]), work)
+    hashes = _release_hashes(release_text)
+
+    rel = f"{cfg['component']}/binary-{cfg['arch']}/Packages.gz"
+    if rel not in hashes:
+        rel = f"{cfg['component']}/binary-{cfg['arch']}/Packages"
+    if rel not in hashes:
+        raise UpdateError("the signed Release does not index a Packages file")
+    packages = _fetch(f"{dist}/{rel}", work / Path(rel).name)
+
+    digest, size = hashes[rel]
+    if _sha256(packages) != digest or packages.stat().st_size != size:
+        raise UpdateError(f"{rel} does not match the signed Release — refusing to continue")
+
+    raw = packages.read_bytes()
+    text = gzip.decompress(raw).decode() if rel.endswith(".gz") else raw.decode()
+    return _parse_packages(text)
+
+
+def _fetch_delta_manifest(cfg: dict[str, str], work: Path,
+                          hashes: dict[str, tuple[str, int]]) -> list[dict]:
+    rel = "../../deltas/deltas.json"
+    if rel not in hashes:
+        return []
+    base = cfg["url"].rstrip("/")
+    path = _fetch(f"{base}/deltas/deltas.json", work / "deltas.json")
+    digest, _size = hashes[rel]
+    if _sha256(path) != digest:
+        # Not fatal: deltas are an optimisation, so a bad manifest costs a
+        # full download rather than an update.
+        print("warning: the delta manifest does not match the signed Release; "
+              "ignoring deltas", file=sys.stderr)
+        return []
+    return json.loads(path.read_text()).get("deltas") or []
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+def _candidate(stanzas: list[dict[str, str]]) -> dict[str, str] | None:
+    ours = [s for s in stanzas if s.get("Package") == PACKAGE]
+    if not ours:
+        return None
+    best = ours[0]
+    for s in ours[1:]:
+        if _compare_versions(s.get("Version", "0"), best.get("Version", "0")) > 0:
+            best = s
+    return best
+
+
+def cmd_check(cfg: dict[str, str]) -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        stanzas = fetch_index(cfg, Path(tmp))
+    candidate = _candidate(stanzas)
+    if candidate is None:
+        print(f"no {PACKAGE} in the channel")
+        return 1
+    current = installed_version()
+    latest = candidate["Version"]
+    print(f"installed: {current or 'not installed'}")
+    print(f"available: {latest}")
+    if current and _compare_versions(latest, current) <= 0:
+        print("up to date")
+        return 0
+    print(f"update available: {current or 'none'} -> {latest}")
+    return 10  # distinct from 0/1 so a script can branch on "there is one"
+
+
+def _download(cfg: dict[str, str], work: Path, verbose: bool = True) -> tuple[Path, str]:
+    """The new .deb, by delta when possible, verified either way."""
+    base = cfg["url"].rstrip("/")
+    dist = f"{base}/dists/{cfg['suite']}"
+    inrelease = _fetch(f"{dist}/InRelease", work / "InRelease")
+    release_text = _verify_inrelease(inrelease, Path(cfg["keyring"]), work)
+    hashes = _release_hashes(release_text)
+    stanzas = fetch_index(cfg, work)
+    candidate = _candidate(stanzas)
+    if candidate is None:
+        raise UpdateError(f"no {PACKAGE} in the channel")
+    version = candidate["Version"]
+    want_sha = candidate["SHA256"]
+    target = work / Path(candidate["Filename"]).name
+
+    current = installed_version()
+    local_old = STATE_DIR / f"{PACKAGE}_{current}_{cfg['arch']}.deb" if current else None
+    if (local_old and local_old.is_file() and shutil.which("zstd") is not None):
+        for entry in _fetch_delta_manifest(cfg, work, hashes):
+            if entry.get("package") != PACKAGE or entry.get("to") != version:
+                continue
+            if entry.get("from") != current:
+                continue
+            delta = work / "update.zst"
+            try:
+                _fetch(f"{base}/{entry['path']}", delta)
+            except UpdateError as e:
+                print(f"delta unavailable ({e}); falling back to the full package",
+                      file=sys.stderr)
+                break
+            if _sha256(delta) != entry.get("sha256"):
+                print("delta hash does not match the signed manifest; "
+                      "falling back to the full package", file=sys.stderr)
+                break
+            proc = subprocess.run(
+                ["zstd", "-q", "-d", "--patch-from", str(local_old),
+                 str(delta), "-o", str(target)],
+                capture_output=True, text=True,
+            )
+            # The check that makes deltas safe: the reconstruction must equal
+            # the package the *signed index* vouches for, not merely the hash
+            # the delta manifest claims.
+            if proc.returncode == 0 and _sha256(target) == want_sha:
+                if verbose:
+                    saved = 100 - (delta.stat().st_size * 100 // max(1, int(candidate["Size"])))
+                    print(f"applied a delta: {delta.stat().st_size} bytes "
+                          f"instead of {candidate['Size']} ({saved}% less transferred)")
+                return target, version
+            print("the delta did not reconstruct the published package; "
+                  "falling back to the full download", file=sys.stderr)
+            target.unlink(missing_ok=True)
+            break
+
+    _fetch(f"{base}/{candidate['Filename']}", target)
+    if _sha256(target) != want_sha:
+        raise UpdateError("the downloaded package does not match the signed index")
+    if verbose:
+        print(f"downloaded the full package ({candidate['Size']} bytes)")
+    return target, version
+
+
+def cmd_download(cfg: dict[str, str], keep: Path | None = None) -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        deb, version = _download(cfg, Path(tmp))
+        dest = (keep or STATE_DIR) / deb.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(deb, dest)
+    print(f"verified {PACKAGE} {version} at {dest}")
+    return 0
+
+
+def cmd_install(cfg: dict[str, str], assume_yes: bool) -> int:
+    if os.geteuid() != 0:
+        raise UpdateError("installing requires root; re-run with sudo")
+    current = installed_version()
+    with tempfile.TemporaryDirectory() as tmp:
+        deb, version = _download(cfg, Path(tmp))
+        if current and _compare_versions(version, current) <= 0:
+            print(f"already at {current}; nothing to do")
+            return 0
+        if not assume_yes:
+            answer = input(f"install {PACKAGE} {current or 'none'} -> {version}? [y/N] ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("cancelled")
+                return 1
+        # Keep what is being replaced *before* replacing it. A rollback that
+        # needs the network is not a rollback.
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if current:
+            previous = _installed_deb_path(current, cfg)
+            if previous and previous.is_file():
+                shutil.copy2(previous, STATE_DIR / f"rollback_{PACKAGE}_{current}.deb")
+        new_local = STATE_DIR / deb.name
+        shutil.copy2(deb, new_local)
+        proc = subprocess.run(["dpkg", "--install", str(new_local)])
+        if proc.returncode != 0:
+            raise UpdateError(
+                f"dpkg failed to install {version}. The previous package is kept "
+                f"in {STATE_DIR}; run `multiprofile-update --rollback`."
+            )
+    print(f"installed {PACKAGE} {version}")
+    return 0
+
+
+def _installed_deb_path(version: str, cfg: dict[str, str]) -> Path | None:
+    candidate = STATE_DIR / f"{PACKAGE}_{version}_{cfg['arch']}.deb"
+    return candidate if candidate.is_file() else None
+
+
+def cmd_rollback(cfg: dict[str, str], assume_yes: bool) -> int:
+    if os.geteuid() != 0:
+        raise UpdateError("rolling back requires root; re-run with sudo")
+    kept = sorted(STATE_DIR.glob(f"rollback_{PACKAGE}_*.deb"))
+    if not kept:
+        raise UpdateError(
+            f"no kept package to roll back to in {STATE_DIR}. A rollback is "
+            "only possible for an update this tool installed."
+        )
+    target = kept[-1]
+    version = target.stem.replace(f"rollback_{PACKAGE}_", "")
+    if not assume_yes:
+        answer = input(f"roll back to {version}? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("cancelled")
+            return 1
+    # --force-downgrade: dpkg refuses to go backwards by default, and going
+    # backwards is the entire point here.
+    proc = subprocess.run(["dpkg", "--force-downgrade", "--install", str(target)])
+    if proc.returncode != 0:
+        raise UpdateError(f"dpkg failed to reinstall {version}")
+    print(f"rolled back to {version}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(
+        prog="multiprofile-update", description=__doc__.split("\n\n")[0],
+    )
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--check", action="store_true",
+                       help="report whether an update exists; install nothing")
+    group.add_argument("--download", action="store_true",
+                       help="fetch and verify, but do not install")
+    group.add_argument("--install", action="store_true", help="install the latest version")
+    group.add_argument("--rollback", action="store_true",
+                       help="reinstall the package this tool replaced")
+    ap.add_argument("-y", "--yes", action="store_true", help="do not prompt")
+    ap.add_argument("--keep", type=Path, help="directory for --download")
+    args = ap.parse_args(argv[1:])
+
+    try:
+        cfg = _read_config()
+        if args.check:
+            return cmd_check(cfg)
+        if args.download:
+            return cmd_download(cfg, args.keep)
+        if args.install:
+            return cmd_install(cfg, args.yes)
+        return cmd_rollback(cfg, args.yes)
+    except UpdateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

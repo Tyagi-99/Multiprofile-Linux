@@ -14,6 +14,7 @@ export const profilesKeys = {
   detail: (id: string) => [...profilesKeys.details(), id] as const,
   health: (id: string) => [...profilesKeys.all, id, "health"] as const,
   fingerprint: (id: string) => [...profilesKeys.all, id, "fingerprint"] as const,
+  capacity: () => [...profilesKeys.all, "capacity"] as const,
 };
 
 export const devicesKeys = {
@@ -39,6 +40,19 @@ export const networkKeys = {
 export const auditKeys = {
   all: ["audit"] as const,
   list: (filters: { limit?: number } = {}) => [...auditKeys.all, filters] as const,
+};
+
+export const trashKeys = {
+  all: ["trash"] as const,
+  list: () => [...trashKeys.all, "list"] as const,
+};
+
+export const usageKeys = {
+  all: ["usage"] as const,
+  summary: (period: string) => [...usageKeys.all, "summary", period] as const,
+  sessions: (period: string) => [...usageKeys.all, "sessions", period] as const,
+  plan: ["plan"] as const,
+  tokens: ["tokens"] as const,
 };
 
 export const systemKeys = {

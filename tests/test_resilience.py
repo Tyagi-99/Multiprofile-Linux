@@ -11,7 +11,6 @@ reason.
 """
 from __future__ import annotations
 
-import json
 import threading
 
 import pytest
@@ -93,54 +92,57 @@ def test_network_loss_mid_probe_is_a_block_not_a_crash(xdg, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_disk_full_leaves_the_previous_file_intact(xdg):
-    """ENOSPC during a save must not truncate what was already there.
+def test_a_failed_write_leaves_the_previous_store_intact(xdg):
+    """A write that fails part-way must not damage what was already there.
 
-    NB: patched with mock.patch, not monkeypatch. monkeypatch.undo() would
-    also undo the xdg fixture's setenv calls -- they share one instance --
-    and the rest of the test would then read the operator's real home
-    directory instead of tmp_path.
+    The store moved from a JSON file to SQLite, so the failure mode changed
+    shape -- there is no rename to interrupt any more -- but the standard did
+    not: the operation may be lost, the data may not.
     """
+    import sqlite3
     from unittest import mock
 
+    from multiprofile.storage import db
     from multiprofile.storage.profiles import create_profile, load_profiles
-    from multiprofile.storage.xdg import profiles_path
 
     create_profile({"name": "Survivor"})
-    before = json.loads(profiles_path().read_text())
+    before = [p["id"] for p in load_profiles()]
 
-    def no_space(*a, **k):
-        raise OSError(28, "No space left on device")
+    def disk_full(*a, **k):
+        raise sqlite3.OperationalError("database or disk is full")
 
-    with mock.patch("pathlib.Path.write_text", no_space), pytest.raises(OSError):
+    with mock.patch.object(db, "insert_profiles", disk_full), \
+            pytest.raises(sqlite3.OperationalError, match="disk is full"):
         create_profile({"name": "Doomed"})
 
-    after = json.loads(profiles_path().read_text())
-    assert [p["id"] for p in after] == [p["id"] for p in before], (
-        "a failed write damaged the store"
-    )
-    names = [p["name"] for p in load_profiles()]
+    after = load_profiles()
+    assert [p["id"] for p in after] == before, "a failed write damaged the store"
+    names = [p["name"] for p in after]
     assert "Survivor" in names
     assert "Doomed" not in names
 
 
-def test_a_failed_write_leaves_no_temp_file_masquerading_as_data(xdg):
+def test_a_failed_write_leaves_no_debris_that_reads_as_data(xdg):
+    """After a failed write the store must still be readable, and the
+    half-finished row must not be visible to the next reader."""
+    import sqlite3
     from unittest import mock
 
-    from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import data_dir
+    from multiprofile.storage import db
+    from multiprofile.storage.profiles import create_profile, load_profiles
 
     create_profile({"name": "One"})
 
-    def no_space(*a, **k):
-        raise OSError(28, "No space left on device")
+    def disk_full(*a, **k):
+        raise sqlite3.OperationalError("database or disk is full")
 
-    with mock.patch("pathlib.Path.write_text", no_space), pytest.raises(OSError):
+    with mock.patch.object(db, "insert_profiles", disk_full), \
+            pytest.raises(sqlite3.OperationalError, match="disk is full"):
         create_profile({"name": "Two"})
 
-    # A leftover .tmp is harmless only because nothing reads it; assert the
-    # real file is still the one being read.
-    assert json.loads((data_dir() / "profiles.json").read_text())
+    names = [p["name"] for p in load_profiles()]
+    assert "One" in names
+    assert "Two" not in names
 
 
 # ---------------------------------------------------------------------------
@@ -201,11 +203,18 @@ def test_the_api_still_answers_with_a_corrupted_store(xdg):
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_writes_do_not_interleave_into_a_broken_file(xdg):
-    """Twenty threads creating profiles must leave valid JSON."""
-    from multiprofile.storage.profiles import create_profile, load_profiles
-    from multiprofile.storage.xdg import profiles_path
+def test_concurrent_creates_all_survive(xdg):
+    """Twenty threads creating profiles must leave twenty profiles.
 
+    This test existed before and passed while the store was silently losing
+    writes, because it only asserted the names it *did* find were unique --
+    a lost create removes a name without duplicating one. Measured on the
+    JSON store, 20 concurrent updates kept 3. The count is the assertion
+    that would have caught it, so it is the one made here.
+    """
+    from multiprofile.storage.profiles import create_profile, load_profiles
+
+    before = len(load_profiles())
     errors: list[Exception] = []
 
     def worker(i: int):
@@ -221,9 +230,41 @@ def test_concurrent_writes_do_not_interleave_into_a_broken_file(xdg):
         t.join(timeout=30)
 
     assert not errors, f"concurrent creates raised: {errors[:3]}"
-    json.loads(profiles_path().read_text())  # must still parse
     names = [p["name"] for p in load_profiles()]
+    assert len(names) == before + 20, f"lost {before + 20 - len(names)} creates"
     assert len(names) == len(set(names)), "a concurrent write clobbered another"
+
+
+def test_concurrent_updates_do_not_overwrite_each_other(xdg):
+    """The bug the storage move exists to fix.
+
+    The JSON store rewrote the whole list on every change from a snapshot
+    taken before it, so two updates to *different* profiles raced and the
+    later writer discarded the earlier one's change. Every call still
+    returned success. Measured before the move: 3 of 20 survived.
+    """
+    from multiprofile.storage.profiles import create_profile, get_profile, update_profile
+
+    ids = [create_profile({"name": f"p{i}"})["id"] for i in range(20)]
+    errors: list[Exception] = []
+
+    def worker(index: int, profile_id: str):
+        try:
+            update_profile(profile_id, {"notes": f"written-by-{index}"})
+        except Exception as e:  # noqa: BLE001 - collected and asserted below
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i, pid))
+               for i, pid in enumerate(ids)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"concurrent updates raised: {errors[:3]}"
+    kept = [i for i, pid in enumerate(ids)
+            if (get_profile(pid) or {}).get("notes") == f"written-by-{i}"]
+    assert len(kept) == 20, f"lost {20 - len(kept)} of 20 concurrent updates"
 
 
 def test_one_profile_cannot_hold_two_pool_assignments(xdg):
@@ -256,30 +297,42 @@ def test_one_profile_cannot_hold_two_pool_assignments(xdg):
 # ---------------------------------------------------------------------------
 
 
-def test_writes_are_atomic_so_a_kill_cannot_leave_half_a_file(xdg):
-    """The store is replaced by rename, never written in place.
+def test_a_kill_mid_write_cannot_leave_half_a_store(xdg):
+    """Every write is one transaction, so a kill loses it whole or not at all.
 
-    A process killed between open() and the last write would otherwise leave
-    a truncated profiles.json and lose every profile.
+    The JSON store got this from write-to-temp-then-rename. SQLite gets it
+    from the write-ahead log: a transaction that never commits is not
+    replayed. What is asserted here is the property, not the mechanism --
+    an interrupted write leaves the previous state readable and complete.
     """
-    from multiprofile.storage.profiles import create_profile
-    from multiprofile.storage.xdg import profiles_path, secure_write_json
+    import sqlite3
+
+    from multiprofile.storage import db
+    from multiprofile.storage.profiles import create_profile, load_profiles
 
     create_profile({"name": "Before"})
-    original = profiles_path().read_text()
+    before = [p["id"] for p in load_profiles()]
 
-    # Simulate a kill partway through: the temp file exists with partial
-    # content, but the rename never happened.
-    tmp = profiles_path().with_suffix(profiles_path().suffix + ".tmp")
-    tmp.write_text('[{"id": "half', encoding="utf-8")
+    # A transaction opened and abandoned, the way a killed process leaves one.
+    conn = db._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO profiles (id, name, client_id, created_at, updated_at,"
+            " data_json) VALUES (?, ?, ?, ?, ?, ?)",
+            ("profile_halfwritten", "Half", None, "2025-01-01", "2025-01-01", "{"),
+        )
+        conn.rollback()
+    except sqlite3.Error:
+        conn.rollback()
 
-    assert profiles_path().read_text() == original, "the live file was touched"
-    json.loads(profiles_path().read_text())
+    after = load_profiles()
+    assert [p["id"] for p in after] == before, "an abandoned write became visible"
+    assert "profile_halfwritten" not in [p["id"] for p in after]
 
-    # And the next successful write still lands cleanly over the debris.
-    secure_write_json(profiles_path(), [{"id": "after", "name": "After"}])
-    assert json.loads(profiles_path().read_text())[0]["id"] == "after"
-    assert (profiles_path().stat().st_mode & 0o077) == 0
+    # And the store still takes writes afterwards.
+    create_profile({"name": "After"})
+    assert "After" in [p["name"] for p in load_profiles()]
 
 
 def test_a_partial_temp_file_is_never_loaded(xdg):

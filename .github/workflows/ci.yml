@@ -46,7 +46,15 @@ jobs:
       - name: Test
         env:
           PYTHONPATH: src
-        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q
+        # `-m "not network"` because this job installs no browser and no
+        # display. The live tests launch a real headful Chromium, so here they
+        # failed with "Chrome exited immediately with code 1" on every run,
+        # including on main -- a red light nobody could act on.
+        #
+        # They are not skipped: the `live-browser` job below exists for them
+        # and now has the display and session bus they actually need. This
+        # matches what the coverage job has always done.
+        run: uv run --python ${{ matrix.python-version }} pytest tests/ -q -m "not network"
 
   coverage:
     name: Coverage
@@ -84,12 +92,30 @@ jobs:
           enable-cache: true
       - name: Install Chrome
         uses: browser-actions/setup-chrome@v1
+      - name: Install a display and a session bus
+        # The product launches Chromium **headful** with --ozone-platform=x11,
+        # because window tiling is a real feature and CDP can only set bounds
+        # on a window that exists. Without an X server Chrome exits 1 before
+        # doing anything, and without a session bus it prints
+        #   Could not parse server address: Unknown address type
+        # which is what every live test in CI was actually hitting.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb dbus dbus-x11 fonts-liberation \
+            libasound2t64 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers || \
+          sudo apt-get install -y -qq --no-install-recommends \
+            xvfb dbus dbus-x11 fonts-liberation \
+            libasound2 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
       - name: Install the project
         run: uv sync --all-extras --dev
       - name: Isolation and live launch tests
         env:
           PYTHONPATH: src
-        run: uv run pytest tests/ -q -m network -p no:randomly
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- \
+              uv run pytest tests/ -q -m network -p no:randomly
 
   frontend:
     name: Console
@@ -112,17 +138,17 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: src/static must match a fresh build
-        # The .deb ships src/static, not the frontend source. If a console
-        # change is committed without re-running the export, the package
-        # silently ships the previous UI.
-        run: |
-          node scripts/sync-static.mjs
-          if ! git diff --quiet -- ../src/static; then
-            echo "::error::src/static is stale — run 'npm run publish' in frontend/ and commit the result"
-            git diff --stat -- ../src/static
-            exit 1
-          fi
+      - name: src/static must be built from the committed console source
+        # The .deb ships src/static, not the frontend source, so a console
+        # change committed without re-exporting silently ships the previous
+        # UI. That is what this guards.
+        #
+        # It compares source hashes, not build outputs. The previous version
+        # rebuilt here and diffed against the committed bundle -- two builds
+        # from two Node versions, whose Next.js output is not byte-identical,
+        # so it failed on every run including on main. A gate that is always
+        # red gets ignored, which is worse than not having one.
+        run: node scripts/check-static-fresh.mjs
 
   package:
     name: Build .deb
@@ -153,10 +179,54 @@ jobs:
           if len(set(found.values())) != 1 or None in found.values():
               sys.exit("version markers disagree")
           EOF
+      - name: The fallback builder must agree with dpkg-deb
+        # build-deb.sh prefers dpkg-deb where it exists and falls back to
+        # scripts/build_deb.py where it does not -- which is the development
+        # machine. If the two ever disagree, the package the developer tests
+        # is not the package CI ships, so they are compared on every build.
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oP '^VERSION=\K\S+' build-deb.sh)
+          STAGE="dist/multiprofile-native_${VERSION}_amd64"
+          DEB="dist/multiprofile-native_${VERSION}_amd64.deb"
+          python3 scripts/build_deb.py "$STAGE" /tmp/py.deb
+          dpkg-deb -I /tmp/py.deb > /dev/null
+          dpkg-deb -c /tmp/py.deb | awk '{print $6}' | sort > /tmp/py.list
+          dpkg-deb -c "$DEB"      | awk '{print $6}' | sort > /tmp/dpkg.list
+          diff /tmp/py.list /tmp/dpkg.list
+          echo "the fallback builder agrees with dpkg-deb"
+
       - uses: actions/upload-artifact@v4
         with:
           name: deb
           path: dist/*.deb
+
+  release-lifecycle:
+    name: Signed release lifecycle
+    runs-on: ubuntu-latest
+    needs: [package]
+    # F12. The finding was that the packaging path could not be exercised on
+    # the development machine and so shipped unverified. This runs the whole
+    # of it in a clean Debian container on every push: build two versions,
+    # sign a repository with a key generated for this run and discarded with
+    # the container, publish deltas, install, update across the delta, verify
+    # the signature chain, prove a tampered channel is refused, roll back,
+    # and confirm the rolled-back install still serves its API.
+    #
+    # No production secret is involved. The signing key is disposable by
+    # construction: it is generated inside the container and never leaves it.
+    container:
+      image: debian:bookworm-slim
+    steps:
+      - name: Install the tools the lifecycle needs
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            git ca-certificates python3 python3-flask python3-websocket \
+            gnupg gpgv zstd dpkg-dev binutils file curl
+      - uses: actions/checkout@v4
+      - name: Build, sign, publish, install, update, verify, roll back
+        run: bash scripts/release-lifecycle-inner.sh
 
   audit:
     name: Dependency audit

@@ -40,6 +40,43 @@ Deterministic PRNG Generator
 
 ---
 
+## 2.5 Claimed browser version (`engine.py`)
+
+The version a profile claims is derived from the engine that will run it, not
+from a literal in the source. `engine.py` asks the installed binary
+(`chromium --version`) once per process and rewrites the Chromium version
+tokens in the UA string and the client-hint brand lists to match. Audit
+finding F5: every pool, all seven presets and the UA picker said Chrome 131
+while the engine was 141–151, which is detectable both by probing an engine
+feature that shipped after 131 and by version cohort alone.
+
+Three rules:
+
+- **Ours is realigned, theirs is not.** Pool defaults and preset UAs are
+  templates and move with the engine. An explicit `profile.userAgent` is left
+  exactly as given — an operator may be matching a fingerprint bought
+  elsewhere — and the client hints then follow *that* UA, so the string and
+  the headers can never claim different browsers. The launch notes report the
+  disagreement.
+- **Nothing is invented.** If the binary cannot be asked, the literals stay
+  and the launch note reads `claimed Chrome version … is UNVERIFIED`. An
+  unchecked claim never reads as a pass — the same rule `identity_assert`
+  follows.
+- **Two claims, made differently.** The UA string carries the reduced
+  `<major>.0.0.0` form that Chrome has frozen since UA reduction;
+  `Sec-CH-UA-Full-Version-List` carries the real build (`141.0.7390.37`).
+  Publishing the reduced form in both claimed a patch version no Chrome
+  release has ever had.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MULTIPROFILE_ENGINE_VERSION` | unset | Pin the claimed version explicitly, e.g. `151.0.7654.32`. Wins over the binary. |
+| `MULTIPROFILE_CLAIM_ENGINE_VERSION` | `1` | `0` disables alignment entirely; pools, presets and the picker keep their own literals. |
+
+`GET /api/health` reports the resolved engine under `engine`;
+`GET /api/devices/<id>` reports `browser_version_resolved`. `null` in either
+means the claim was never checked.
+
 ## 3. Dual-Tier Identity Synchronization
 
 ### 3.1 Network / Wire Tier (`cdp_identity.py`)
@@ -85,7 +122,7 @@ Injected at `run_at: document_start` in the MAIN world. Configured via `__MP_INL
 - **Window.Chrome Supplementation**: Ensures `window.chrome.app`, `window.chrome.csi`, `window.chrome.loadTimes`, and `window.chrome.runtime` exist and present native function signatures (`toString()` yields `function () { [native code] }`).
 - **Connection Information**: Populates `navigator.connection` with realistic downlink, effectiveType, and RTT properties.
 - **Stable Media Device IDs**: Traps `navigator.mediaDevices.enumerateDevices` to return consistent, seeded 64-character hexadecimal IDs for audio/video inputs across page navigations.
-- **Silent Operation**: Extension operates strictly silently. No `console.log` statements are emitted in the browser console.
+- **Silent Operation**: the script emits no console output. This was not true until audit finding F7: `evasion.js` opened with `console.log("[Evasion] evasion.js active on:", location.href)`, which ran on every page and in every frame — a plain-text confession in any DevTools session, screen share, demo or support screenshot, twelve lines above the comment claiming there was no such logging. The line now runs only when `MULTIPROFILE_EVASION_DEBUG=1` puts `debug: true` in the injected config, because counting how many times it appears for one document is the only honest way to measure how many times the script ran (which is how F2's double injection was caught). Default off; the launch notes say so loudly when it is on.
 
 ---
 

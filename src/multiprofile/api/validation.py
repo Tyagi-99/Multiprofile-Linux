@@ -24,6 +24,10 @@ from typing import Any
 
 from flask import jsonify, request
 
+# network.py imports nothing from this package at module level, so this is
+# safe; it owns WebRTCPolicy and therefore owns the canonical vocabulary.
+from ..network import WEBRTC_ALIASES, WEBRTC_MODES, normalize_webrtc_mode
+
 log = logging.getLogger("multiprofile.api.validation")
 
 # Fields whose raw values must never appear in messages or logs.
@@ -35,6 +39,113 @@ PROXY_SCHEMES = ("http", "https", "socks5")
 JOB_TYPES = ("launch_profile", "stop_profile", "bulk_launch", "bulk_stop")
 PROXY_TYPES = ("none", "custom", "github", "http", "https", "socks5", "socks5h")
 NETWORK_MODES = ("DIRECT", "HTTP_PROXY", "HTTPS_PROXY", "SOCKS5", "REMOTE_GATEWAY")
+PROFILE_STATUSES = ("idle", "running", "queued", "failed", "parked")
+
+# --------------------------------------------------------------------------
+# The profile field registry (F8)
+#
+# ``create_profile`` does ``dict(payload)`` and ``update_profile`` merges
+# ``{**stored, **payload}``, so before this registry existed every key a
+# client sent was written to profiles.json and returned on every later read.
+# Unknown *values* were refused while unknown *keys* were not, which made a
+# typo in a field name indistinguishable from a working request -- the audit
+# lost a test to exactly that, sending ``devicePresetId`` for ``deviceId``
+# and watching the preset silently never apply.
+#
+# Three tiers, because "unknown" is three different situations:
+# --------------------------------------------------------------------------
+
+# 1. A client may set these, and the product honours them.
+PROFILE_FIELDS = frozenset({
+    "name", "userAgent", "userAgentId", "uaId", "startUrl", "notes", "color",
+    "clientId", "poolId", "pool_id", "tags", "seed", "timezone", "language",
+    "webrtcMode", "deviceId", "device_id", "status",
+    "proxyHost", "proxyPort", "proxyUser", "proxyPass", "proxyType", "customProxy",
+    "networkConfig", "networkMode", "gatewayId", "webglPolicy", "webgl", "isMobile",
+})
+
+# The console's own spelling of a route, which is what the wizard sends.
+# Resolved by ``network._requested_network_mode``; kept lower-case here
+# because that is the vocabulary the UI and the legacy proxyType share.
+REQUESTED_NETWORK_MODES = (
+    "direct", "none", "gateway", "remote_gateway",
+    "http", "http_proxy", "https", "https_proxy", "socks5", "socks5h", "custom",
+)
+
+# 2. The server owns these. There is no GET /api/profiles/<id>, so a
+#    read-modify-write client reads a row from GET /api/profiles and PUTs it
+#    back -- and that row is enriched with runtime truth (launch state, cdp
+#    port, proxy verdict, last launch). Refusing those keys would break the
+#    only way the API offers to edit a profile you have just read, so they
+#    are dropped, silently, because sending them back is not a mistake. What
+#    they must never do is let a client dictate them.
+#
+#    Keep in step with the enrichment in ``storage.profiles.load_profiles``
+#    and ``_with_launch_state``; anything either of them writes onto a row
+#    must appear here, or PUTting that row back becomes a 400.
+PROFILE_FIELDS_SERVER_OWNED = frozenset({
+    "id", "createdAt", "fingerprint",
+    # status/pid and the SPA compatibility flags
+    "pid", "isRunning", "isQueued", "isFailed",
+    # runtime registry and control.db projections
+    "launchState", "launchError", "launchErrorCode", "cdpPort", "state",
+    "proxyOk", "egressIp", "lastLaunch", "lastProxyCheck",
+    # written by the launch and network paths, never by a client
+    "allocatedIp", "lastNetworkDiagnostics", "noteEntries", "geoAuto",
+})
+
+# 3. Recognised, and honoured by nothing. These are sent by our own wizard
+#    and read by no backend code: ``fingerprintStrategy`` has zero references,
+#    ``networkMode`` is shadowed by the nested ``networkConfig.mode`` (whose
+#    enum is upper-case), and ``gatewayId`` is only ever read for a proxy
+#    pool's members, never for a profile. Refusing them would 400 every
+#    creation the wizard makes, so they are accepted, reported, and dropped --
+#    the drop is the point, since persisting a setting that cannot take effect
+#    is what let this gap survive. This tier is a defect list and should end
+#    up empty: either the feature lands and the key moves to tier 1, or the
+#    key leaves the wizard.
+# Empty, and that is the goal state: this tier is a defect list, not a design.
+# It held three keys when F8 landed. `networkMode` and `gatewayId` left it when
+# F16 wired the route up for real, and `fingerprintStrategy` left it when the
+# wizard step that sent it was removed -- the fingerprint is derived from the
+# profile seed and its device preset, so "stable" was the only one of its three
+# options that ever meant anything, and a selector offering three was a promise
+# the product could not keep.
+#
+# Keep it empty. A key added here is an admission that the console is sending
+# something nothing honours; the fix is to implement it or stop sending it.
+PROFILE_FIELDS_UNIMPLEMENTED: dict[str, str] = {}
+
+# What a "did you mean" suggestion may point at: only keys that do something.
+_PROFILE_SETTABLE = PROFILE_FIELDS | frozenset(PROFILE_FIELDS_UNIMPLEMENTED)
+
+
+def _check_profile_keys(payload: dict[str, Any]) -> list[str]:
+    """Refuse unknown keys; drop the ones that cannot take effect.
+
+    Mutates ``payload``: tier 2 and tier 3 keys are removed, so nothing a
+    client sends that the product does not honour is ever persisted. Returns
+    the warnings for tier 3.
+    """
+    import difflib
+
+    warnings: list[str] = []
+    for key in list(payload.keys()):
+        if key in PROFILE_FIELDS:
+            continue
+        if key in PROFILE_FIELDS_SERVER_OWNED:
+            payload.pop(key, None)
+            continue
+        if key in PROFILE_FIELDS_UNIMPLEMENTED:
+            payload.pop(key, None)
+            warnings.append(
+                f"ignored '{key}': {PROFILE_FIELDS_UNIMPLEMENTED[key]}"
+            )
+            continue
+        close = difflib.get_close_matches(key, sorted(_PROFILE_SETTABLE), n=1, cutoff=0.7)
+        hint = f"; did you mean '{close[0]}'?" if close else ""
+        raise ValidationError(key, f"unknown field{hint}")
+    return warnings
 
 
 class ValidationError(Exception):
@@ -74,11 +185,34 @@ def error_response(exc: ValidationError):
 
 def register_error_handlers(app) -> None:
     """Map ValidationError to the 400 envelope on the given Flask app."""
+    from ..storage.db import FleetFull
 
     @app.errorhandler(ValidationError)
     def _handle_validation_error(exc: ValidationError):
         log.info("invalid input: %s: %s", exc.field, exc.message)
         return error_response(exc)
+
+    @app.errorhandler(FleetFull)
+    def _handle_fleet_full(exc: FleetFull):
+        # 409, not 400: the request is well-formed, the fleet is the problem.
+        # The numbers are returned so the console can say "room for 12 more"
+        # instead of making the operator count.
+        log.info("fleet full: %s", exc)
+        return (
+            jsonify(
+                {
+                    "error": {
+                        "code": "fleet_full",
+                        "message": str(exc),
+                        "stored": exc.stored,
+                        "capacity": exc.capacity,
+                        "free": exc.free,
+                        "requested": exc.requested,
+                    }
+                }
+            ),
+            409,
+        )
 
 
 def require_json() -> dict[str, Any]:
@@ -199,31 +333,53 @@ def _known_device_ids() -> set[str] | None:
     """Known device preset ids, or None if the registry is unavailable."""
     try:
         from ..devices.registry import registry
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     try:
         return {p.id for p in registry.list()}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
 
 
-def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
+def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) -> list[str]:
     """Validate a profile create (partial=False) or update (partial=True) body.
 
-    Returns the payload unchanged; raises ValidationError on any violation.
-    Device preset selection is checked against the device registry when it
-    is available: unknown ``deviceId`` values are rejected at the door.
+    Raises ValidationError on any violation, including an unrecognised field
+    name -- see the field registry above. Device preset selection is checked
+    against the device registry when it is available: unknown ``deviceId``
+    values are rejected at the door.
+
+    ``payload`` is mutated: fields the server owns and fields nothing honours
+    are removed, so only settings that can actually take effect are persisted.
+    Returns the warnings to report to the client.
     """
     v_dict(payload, "_body")
+    warnings = _check_profile_keys(payload)
+    if "status" in payload:
+        v_enum(payload["status"], "status", PROFILE_STATUSES, case_insensitive=True)
     if "name" in payload:
         v_str(payload["name"], "name", min_len=1, max_len=120)
     if "userAgent" in payload:
         v_str(payload["userAgent"], "userAgent", min_len=1, max_len=4096)
-    if "userAgentId" in payload:
+    if "userAgentId" in payload and payload["userAgentId"] is not None:
         v_str(payload["userAgentId"], "userAgentId", min_len=1, max_len=128)
-    if "startUrl" in payload:
+        # Rejected rather than ignored. An unrecognised id used to be stored
+        # and silently do nothing, so a typo produced a profile claiming
+        # something the operator never picked.
+        from .user_agents import known_user_agent_ids, resolve_user_agent_id
+
+        if resolve_user_agent_id(payload["userAgentId"]) is None:
+            raise ValidationError(
+                "userAgentId",
+                f"unknown id; expected one of {', '.join(known_user_agent_ids())}",
+            )
+    # null means "clear this", which is what the profile edit dialog sends for
+    # an emptied field. Rejecting it made clearing a start URL or a note a hard
+    # 400 ("must be a string") with no way to do it from the console at all
+    # (F21). Storage coerces the cleared value to the field's default.
+    if payload.get("startUrl") is not None and "startUrl" in payload:
         v_str(payload["startUrl"], "startUrl", min_len=1, max_len=2048)
-    if "notes" in payload:
+    if payload.get("notes") is not None and "notes" in payload:
         v_str(payload["notes"], "notes", max_len=4096)
     if "color" in payload:
         v_str(payload["color"], "color", min_len=1, max_len=16)
@@ -240,7 +396,38 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
     if "language" in payload:
         v_str(payload["language"], "language", min_len=1, max_len=32)
     if "webrtcMode" in payload:
-        v_enum(payload["webrtcMode"], "webrtcMode", ("default", "disabled", "proxy"), case_insensitive=True)
+        # Accept both vocabularies and store the canonical one. This field
+        # used to be validated against ("default", "disabled", "proxy") while
+        # WebRTCPolicy, _map_webrtc, fingerprint/_core and evasion.js all
+        # spoke ("default", "disable", "disable_non_proxied_udp"). Nothing
+        # translated, so both non-default values a client could pass fell
+        # through to DEFAULT -- no Chrome flags, no JS hardening, a privacy
+        # control that reported itself set and did nothing. Worse after F8:
+        # the two words that work became 400s.
+        v_enum(
+            payload["webrtcMode"], "webrtcMode",
+            WEBRTC_MODES + tuple(WEBRTC_ALIASES), case_insensitive=True,
+        )
+        payload["webrtcMode"] = normalize_webrtc_mode(payload["webrtcMode"])
+    if "networkMode" in payload and payload["networkMode"] not in (None, ""):
+        v_enum(
+            payload["networkMode"], "networkMode",
+            REQUESTED_NETWORK_MODES, case_insensitive=True,
+        )
+    if "gatewayId" in payload and payload["gatewayId"] is not None:
+        v_str(payload["gatewayId"], "gatewayId", min_len=1, max_len=128)
+    # A gateway route with no gateway named cannot resolve, and the launch would
+    # be refused later with a less useful message. Say so at the door instead.
+    if str(payload.get("networkMode") or "").strip().lower() in ("gateway", "remote_gateway"):
+        named = payload.get("gatewayId") or (
+            (payload.get("networkConfig") or {}).get("gatewayId")
+            if isinstance(payload.get("networkConfig"), dict) else None
+        )
+        if not named:
+            raise ValidationError(
+                "gatewayId",
+                "required when networkMode is a gateway: name the gateway to route through",
+            )
 
     device_id = payload.get("deviceId", payload.get("device_id"))
     if device_id is not None and device_id != "":
@@ -270,7 +457,7 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
             v_enum(net["mode"], "networkConfig.mode", NETWORK_MODES)
         if "proxy" in net and net["proxy"] is not None:
             _validate_proxy_block(net["proxy"], "networkConfig.proxy")
-    return payload
+    return warnings
 
 
 def validate_job_payload(payload: dict[str, Any]) -> dict[str, Any]:

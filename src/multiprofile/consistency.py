@@ -12,14 +12,110 @@ Domains:
     mobile    mobile category <-> viewport <-> touch
     browser   browser family <-> Client Hints brands
     gpu_webgl expected webgl policy <-> runtime capability (when provided)
+    webgpu    WebGL renderer <-> WebGPU adapter vendor
+
+Each report also carries a **score** out of 100. The score exists so the
+console can rank profiles and so an operator can see a profile getting worse
+without reading six messages, but it is deliberately not a confidence rating
+about being undetected: it says how internally coherent the signals *we can
+see* are, and nothing about the surfaces nobody has checked yet.
+
+Two rules keep it honest. A domain that could not be evaluated -- no proxy, so
+no IP country to compare a timezone against -- is **excluded from the
+denominator** rather than scored as a pass or a fail. Scoring it as a pass
+would let a profile with nothing configured outrank one with a real setup, and
+scoring it as a fail would punish an operator for a check they never asked
+for. And any ERROR caps the total, because a single flat contradiction is not
+something four passes elsewhere should be able to average away.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 PASS = "PASS"
 WARNING = "WARNING"
 ERROR = "ERROR"
+
+#: Marker for a check that had nothing to compare. Messages already began with
+#: this prefix; the score needs it as data rather than prose.
+INSUFFICIENT_PREFIX = "insufficient data:"
+
+#: How much each domain is worth. Geo and platform carry the most because they
+#: are the contradictions a site checks first and the ones that are hardest to
+#: explain away: an IP in one country with a timezone in another, or a
+#: User-Agent that disagrees with its own Client Hints.
+_DOMAIN_WEIGHTS: dict[str, int] = {
+    "geo": 30,
+    "platform": 25,
+    "device": 15,
+    "mobile": 10,
+    "browser": 10,
+    "gpu_webgl": 5,
+    "webgpu": 5,
+}
+
+#: A profile with a flat contradiction cannot score above this, whatever else
+#: passes.
+_ERROR_CEILING = 40
+
+#: A WARNING keeps this fraction of its domain's weight: it is a real signal,
+#: not a pass, but it is not the same as a contradiction either.
+_WARNING_CREDIT = 0.4
+
+
+def _is_insufficient(check: dict[str, Any]) -> bool:
+    if check.get("insufficient") is True:
+        return True
+    return str(check.get("message") or "").startswith(INSUFFICIENT_PREFIX)
+
+
+def score_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Turn per-domain results into a 0-100 score and its explanation.
+
+    Returns the score, the domains that counted, and the ones that were
+    skipped for want of anything to compare -- so a low score can always be
+    traced to a specific check rather than appearing as a bare number.
+    """
+    earned = 0.0
+    possible = 0
+    skipped: list[str] = []
+    penalised: list[str] = []
+    for check in checks:
+        domain = str(check.get("domain") or "")
+        weight = _DOMAIN_WEIGHTS.get(domain, 0)
+        if not weight:
+            continue
+        if _is_insufficient(check):
+            skipped.append(domain)
+            continue
+        possible += weight
+        status = check.get("status")
+        if status == PASS:
+            earned += weight
+        elif status == WARNING:
+            earned += weight * _WARNING_CREDIT
+            penalised.append(domain)
+        else:
+            penalised.append(domain)
+
+    if not possible:
+        # Nothing could be evaluated. A score of 100 would be a lie and a 0
+        # would be a different one, so the report says so instead.
+        return {"score": None, "evaluated": [], "skipped": skipped,
+                "penalised": [], "reason": "nothing could be evaluated"}
+
+    score = round(100 * earned / possible)
+    if any(c.get("status") == ERROR and not _is_insufficient(c) for c in checks):
+        score = min(score, _ERROR_CEILING)
+    return {
+        "score": score,
+        "evaluated": [d for d in _DOMAIN_WEIGHTS if d not in skipped
+                      and any(c.get("domain") == d for c in checks)],
+        "skipped": skipped,
+        "penalised": penalised,
+        "reason": None,
+    }
 
 # ---------------------------------------------------------------------------
 # IANA timezone -> ISO country code (common zones; unknown zones are reported
@@ -45,7 +141,8 @@ TZ_COUNTRY: dict[str, str] = {
     # Asia
     "Asia/Dubai": "AE", "Asia/Kolkata": "IN", "Asia/Karachi": "PK",
     "Asia/Dhaka": "BD", "Asia/Colombo": "LK", "Asia/Kathmandu": "NP",
-    "Asia/Bangkok": "TH", "Asia/Jakarta": "ID", "Asia/Singapore": "SG",
+    "Asia/Bangkok": "TH", "Asia/Ho_Chi_Minh": "VN",
+    "Asia/Jakarta": "ID", "Asia/Singapore": "SG",
     "Asia/Kuala_Lumpur": "MY", "Asia/Manila": "PH", "Asia/Hong_Kong": "HK",
     "Asia/Shanghai": "CN", "Asia/Taipei": "TW", "Asia/Seoul": "KR",
     "Asia/Tokyo": "JP", "Asia/Jerusalem": "IL", "Asia/Riyadh": "SA",
@@ -115,6 +212,23 @@ def _ch_of(fp: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _host_locale_language() -> str | None:
+    """The language a real browser on this machine would send, or None.
+
+    Used only on a DIRECT route, where the host is the exit and so the host's
+    own locale is the honest reference. ``C`` and ``POSIX`` are not languages
+    and produce no answer.
+    """
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        raw = (os.environ.get(var) or "").strip()
+        if not raw or raw.split(".")[0] in ("C", "POSIX", ""):
+            continue
+        tag = raw.split(".")[0].split("@")[0].replace("_", "-")
+        if tag:
+            return tag
+    return None
+
+
 def _diag_value(diagnostics: Any, key: str) -> Any:
     if diagnostics is None:
         return None
@@ -165,6 +279,7 @@ class ProfileConsistencyEngine:
             self._check_mobile(profile, device_preset, fp),
             self._check_browser(profile, fp),
             self._check_gpu_webgl(profile, fp),
+            self._check_webgpu(fp),
         ]
         status = PASS
         for c in checks:
@@ -176,9 +291,12 @@ class ProfileConsistencyEngine:
                 if c["status"] == WARNING:
                     status = WARNING
                     break
+        scored = score_checks(checks)
         return {
             "profile_id": profile.get("id"),
             "status": status,
+            "score": scored["score"],
+            "score_detail": scored,
             "checks": checks,
         }
 
@@ -192,6 +310,13 @@ class ProfileConsistencyEngine:
 
         comparators = [v for v in (tz_cc, lang_cc) if v]
         if cc is None:
+            # "No proxy" is not "nothing knowable". On a DIRECT route the host
+            # is the exit, so there is a country to compare against after all,
+            # and excluding the domain let a no-proxy profile announce New
+            # York from this machine's address with a clean score (F43).
+            direct = self._check_geo_direct(profile)
+            if direct is not None:
+                return direct
             return {
                 "domain": domain, "status": WARNING,
                 "expected": "IP geolocation to compare against",
@@ -233,6 +358,157 @@ class ProfileConsistencyEngine:
                        "timezone_country": tz_cc, "language": profile.get("language"),
                        "language_country": lang_cc},
             "message": "IP country, timezone and language region are coherent",
+        }
+
+    def _check_geo_direct(self, profile: dict[str, Any]) -> dict[str, Any] | None:
+        """Score the geo domain for a profile with no proxy, or return None.
+
+        Returns None -- leaving the caller to report insufficient data -- when
+        the route is not DIRECT, when this host's own zone cannot be resolved,
+        or when the launch would claim no timezone at all. Those are the cases
+        where there genuinely is nothing to compare.
+
+        What is compared is the **effective** identity, taken from the same
+        :func:`geo.align_to_exit` the launch uses, not the stored fields. A
+        profile still carrying the creation default of ``America/New_York``
+        with ``geoAuto`` set will claim the host's zone when it launches, and
+        scoring the stored value would report a conflict that the launch
+        resolves -- a false alarm teaches an operator to ignore the score.
+
+        The language is compared against the **host's locale** rather than
+        against the country's majority language. ``en-US`` on an Indian
+        connection is what a great many real browsers there send; calling it a
+        conflict would be noise. Claiming ``pt-BR`` from an ``en-US`` host is
+        a different matter, and that is what this catches.
+        """
+        try:
+            from .geo import align_to_exit, host_timezone
+            from .network import NetworkMode, network_config_for_profile
+
+            if network_config_for_profile(profile).mode != NetworkMode.DIRECT:
+                return None
+        except Exception:  # noqa: BLE001 - the score must never break a page load
+            return None
+
+        host_cc = TZ_COUNTRY.get(host_timezone() or "")
+        if not host_cc:
+            return None
+
+        plan = align_to_exit(profile, None, None, direct=True)
+        eff_tz = (plan.get("timezone") or "").strip()
+        eff_tz_cc = TZ_COUNTRY.get(eff_tz)
+        if not eff_tz:
+            return None
+
+        eff_lang = plan.get("language") or profile.get("language") or None
+        host_lang = _host_locale_language()
+
+        actual = {
+            "country_code": host_cc, "timezone": eff_tz,
+            "timezone_country": eff_tz_cc, "language": eff_lang,
+            "language_country": _lang_region(eff_lang),
+            "source": "host (no proxy: this machine is the exit)",
+        }
+
+        conflicts: list[str] = []
+        if eff_tz_cc and eff_tz_cc != host_cc:
+            conflicts.append(
+                f"timezone {eff_tz} ({eff_tz_cc}) but with no proxy the traffic "
+                f"leaves from this machine, in {host_cc}"
+            )
+        elif not eff_tz_cc:
+            conflicts.append(
+                f"timezone {eff_tz} is not a zone this engine can place, so it "
+                f"cannot be checked against the host country {host_cc}"
+            )
+        if eff_lang and host_lang:
+            if eff_lang.split("-")[0].lower() != host_lang.split("-")[0].lower():
+                conflicts.append(
+                    f"language {eff_lang} but this host's locale is {host_lang}"
+                )
+
+        if conflicts:
+            # The stock warning is about the IP/timezone pair, so it only
+            # belongs here when the timezone is what disagrees. Appending it
+            # to a language-only conflict would describe the wrong problem.
+            tail = (
+                " A mismatched IP/timezone pair is a common detection signal."
+                if eff_tz_cc != host_cc else ""
+            )
+            return {
+                "domain": "geo", "status": WARNING,
+                "expected": f"claims coherent with a direct connection from {host_cc}",
+                "actual": actual,
+                "message": (
+                    "no proxy, so the exit IP is this machine's: "
+                    + "; ".join(conflicts) + "." + tail
+                ),
+            }
+        return {
+            "domain": "geo", "status": PASS,
+            "expected": host_cc,
+            "actual": actual,
+            "message": (
+                f"no proxy: timezone {eff_tz} and language {eff_lang or 'unset'} "
+                f"agree with a direct connection from {host_cc}"
+            ),
+        }
+
+    def _check_webgpu(self, fp: dict[str, Any] | None) -> dict[str, Any]:
+        """WebGL and WebGPU must name the same card.
+
+        A page can read both, and they use different vocabularies for the same
+        hardware. Measured before F26, a profile claimed an RTX 4060 in WebGL
+        while ``requestAdapter()`` returned null -- a combination no Windows
+        machine produces. This catches the same class of disagreement before
+        a launch rather than after.
+        """
+        domain = "webgpu"
+        gpu = (fp or {}).get("gpu") if isinstance(fp, dict) else None
+        if not isinstance(gpu, dict) or not gpu.get("renderer"):
+            return {
+                "domain": domain, "status": WARNING, "insufficient": True,
+                "expected": "a claimed WebGL renderer to compare against",
+                "actual": None,
+                "message": f"{INSUFFICIENT_PREFIX} no WebGL renderer claimed",
+            }
+        renderer = str(gpu.get("renderer") or "")
+        adapter = gpu.get("webgpu")
+        if not isinstance(adapter, dict) or not adapter.get("vendor"):
+            return {
+                "domain": domain, "status": WARNING,
+                "expected": "a WebGPU adapter identity for the claimed card",
+                "actual": {"renderer": renderer, "webgpu": adapter or None},
+                "message": (
+                    "the profile claims a GPU in WebGL but has no WebGPU adapter "
+                    "identity, so the two surfaces can disagree in the page"
+                ),
+            }
+        vendor = str(adapter.get("vendor") or "").lower()
+        expected = None
+        for needle, name in (("nvidia", "nvidia"), ("amd", "amd"), ("radeon", "amd"),
+                             ("intel", "intel"), ("apple", "apple"),
+                             ("qualcomm", "qualcomm"), ("adreno", "qualcomm"),
+                             ("mali", "arm"), ("arm", "arm")):
+            if needle in renderer.lower():
+                expected = name
+                break
+        if expected and vendor != expected:
+            return {
+                "domain": domain, "status": ERROR,
+                "expected": expected,
+                "actual": {"renderer": renderer, "webgpu_vendor": vendor},
+                "message": (
+                    f"WebGL names a {expected} card while the WebGPU adapter says "
+                    f"{vendor}. One page cannot have two different graphics cards."
+                ),
+            }
+        return {
+            "domain": domain, "status": PASS,
+            "expected": expected or vendor,
+            "actual": {"renderer": renderer, "webgpu_vendor": vendor,
+                       "architecture": adapter.get("architecture")},
+            "message": "WebGL and WebGPU describe the same card",
         }
 
     def _check_device(

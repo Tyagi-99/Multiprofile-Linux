@@ -1,7 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiMessage, del, post, put } from "./api";
-import { profilesKeys } from "./query-keys";
+import { profilesKeys, trashKeys } from "./query-keys";
+import { navigate } from "./router";
 import type { Profile } from "./types";
 
 /**
@@ -13,6 +14,11 @@ import type { Profile } from "./types";
 function invalidateProfiles(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: profilesKeys.lists() });
   qc.invalidateQueries({ queryKey: profilesKeys.details() });
+  qc.invalidateQueries({ queryKey: profilesKeys.capacity() });
+}
+
+function invalidateTrash(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: trashKeys.all });
 }
 
 export interface BlockedLaunch {
@@ -104,6 +110,11 @@ export function useProfileActions() {
     invalidateProfiles(qc);
   };
 
+  /**
+   * Move profiles to the trash. Reversible: the browser storage stays on
+   * disk until the trash is emptied, so the toast offers the way back rather
+   * than reporting a deletion the operator cannot undo.
+   */
   const remove = async (profiles: Profile[]) => {
     let ok = 0;
     for (const p of profiles) {
@@ -114,11 +125,57 @@ export function useProfileActions() {
         toast.error("Delete failed", { description: `${p.name}: ${apiMessage(e)}` });
       }
     }
-    if (ok > 0) toast.success(`Deleted ${ok} profile${ok === 1 ? "" : "s"}`);
+    if (ok > 0) {
+      toast.success(`Moved ${ok} profile${ok === 1 ? "" : "s"} to trash`, {
+        description: "Browser storage is kept until the trash is emptied.",
+        action: { label: "Open trash", onClick: () => navigate({ name: "trash" }) },
+      });
+    }
     invalidateProfiles(qc);
+    invalidateTrash(qc);
   };
 
-  return { launch, launchOne, stop, restart, park, remove };
+  const restore = async (ids: string[]) => {
+    let ok = 0;
+    for (const id of ids) {
+      try {
+        await post(`/api/profiles/${encodeURIComponent(id)}/restore`);
+        ok++;
+      } catch (e) {
+        toast.error("Restore failed", { description: apiMessage(e) });
+      }
+    }
+    if (ok > 0) toast.success(`Restored ${ok} profile${ok === 1 ? "" : "s"}`);
+    invalidateProfiles(qc);
+    invalidateTrash(qc);
+  };
+
+  /** The irreversible one. Removes chrome-profiles/<id> from disk. */
+  const purge = async (ids: string[]) => {
+    let ok = 0;
+    for (const id of ids) {
+      try {
+        await del(`/api/trash/${encodeURIComponent(id)}`);
+        ok++;
+      } catch (e) {
+        toast.error("Delete failed", { description: apiMessage(e) });
+      }
+    }
+    if (ok > 0) toast.success(`Deleted ${ok} profile${ok === 1 ? "" : "s"} permanently`);
+    invalidateTrash(qc);
+  };
+
+  const emptyTrash = async () => {
+    try {
+      const res = await post<{ purged: number }>("/api/trash/empty");
+      toast.success(`Deleted ${res.purged} profile${res.purged === 1 ? "" : "s"} permanently`);
+    } catch (e) {
+      toast.error("Couldn't empty the trash", { description: apiMessage(e) });
+    }
+    invalidateTrash(qc);
+  };
+
+  return { launch, launchOne, stop, restart, park, remove, restore, purge, emptyTrash };
 }
 
 /** Strip credential-bearing keys before export. */

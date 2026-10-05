@@ -33,7 +33,9 @@ class ProfileHealth:
     # Storage
     storage_accessible: bool = False
     user_data_dir: str | None = None
-    # Extension
+    # Identity script. Named extension_loaded for the console's sake; there is
+    # no extension any more (see launcher.extension_src) and what matters is
+    # whether the fingerprint script actually reached the browser over CDP.
     extension_loaded: bool | None = None
     # Fingerprint
     fingerprint_loaded: bool = False
@@ -85,7 +87,7 @@ def get_profile_health(profile_id: str) -> ProfileHealth:
     try:
         net = network_config_for_profile(profile)
         health.network_mode = net.mode.value
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
         health.last_error = f"network_config_error: {e}"
 
     # --- Runtime state (in-memory) ---
@@ -115,7 +117,7 @@ def get_profile_health(profile_id: str) -> ProfileHealth:
         try:
             wait_for_cdp(health.cdp_port, timeout_s=1.0)
             health.cdp_alive = True
-        except Exception:
+        except Exception:  # noqa: BLE001 - the fallback is the answer: this could not be confirmed
             health.cdp_alive = False
 
     # --- Storage accessible ---
@@ -123,14 +125,20 @@ def get_profile_health(profile_id: str) -> ProfileHealth:
         udd = chrome_profile_dir(profile_id) / "user-data"
         health.user_data_dir = str(udd)
         health.storage_accessible = udd.exists()
-    except Exception:
+    except Exception:  # noqa: BLE001 - the fallback is the answer: this could not be confirmed
         health.storage_accessible = False
 
-    # Extension loaded: check per-profile extension copy exists
+    # Identity script installed. This used to test for a per-profile copy of
+    # the extension directory, which said nothing about whether the script ran
+    # -- and once the staging step was removed it would have read False on
+    # every healthy profile. Ask the injector instead: it knows whether
+    # Page.addScriptToEvaluateOnNewDocument actually succeeded.
     try:
-        ext_dir = chrome_profile_dir(profile_id) / "extension"
-        health.extension_loaded = (ext_dir / "manifest.json").exists()
-    except Exception:
+        from .runtime_state import get_runtime
+
+        rt = get_runtime(profile_id)
+        health.extension_loaded = None if rt is None else rt.inject_ok
+    except Exception:  # noqa: BLE001 - unknown is honest; False would not be
         health.extension_loaded = None
 
     health.checked_at = time.time()
@@ -151,7 +159,7 @@ def get_all_health(profile_ids: list[str] | None = None) -> list[dict[str, Any]]
         try:
             h = get_profile_health(pid)
             results.append(h.to_dict())
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             results.append({
                 "profileId": pid,
                 "overallOk": False,

@@ -125,8 +125,13 @@ def _store_in_file(key: bytes) -> None:
     tmp.write_text(base64.b64encode(key).decode(), encoding="utf-8")
     try:
         os.chmod(tmp, 0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        # The most consequential of these: this file is the key every proxy
+        # password is encrypted with. A readable key makes the encryption
+        # decorative, so the failure is reported even though it cannot raise.
+        from .storage.xdg import record_permission_fault
+
+        record_permission_fault(path, f"chmod on the key file failed: {e}")
     tmp.replace(path)
 
 

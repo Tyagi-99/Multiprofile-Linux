@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -9,9 +10,10 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from .. import __version__
+from .. import __version__, account, api_tokens, plans, usage
 from ..audit import audit_log, read_audit
 from ..backup import create_backup, list_backups, restore_backup
+from ..browser import identity_faults
 from ..browser import manager as browser_manager
 from ..browser.health import get_all_health, get_profile_health
 from ..browser.launcher import extension_src, find_chrome, launch_profile, stop_profile
@@ -26,9 +28,11 @@ from ..cookies_store import (
     load_cookies,
     save_cookies,
 )
+from ..engine import detect_engine_version
 from ..fingerprint import fingerprint_report
 from ..jobs import cancel_job, create_job, get_job, list_jobs
 from ..network import network_config_for_profile
+from ..profile_import import DEFAULT_PROXY_TYPE, import_profiles
 from ..proxy_util import parse_proxy, test_proxy
 from ..storage.clients import (
     create_client,
@@ -62,12 +66,21 @@ from ..storage.github_accounts import (
 from ..storage.profiles import (
     clone_profile,
     create_profile,
+    create_profiles,
     delete_profile,
     duplicate_profile,
-    filter_profiles,
+    empty_trash,
+    fleet_capacity,
     get_profile,
+    list_trash,
     load_profiles,
+    pid_alive,
+    purge_expired_trash,
+    purge_profile,
+    query_page,
     reap_orphans,
+    restore_profile,
+    trash_profile,
     update_profile,
 )
 from ..storage.templates import (
@@ -78,20 +91,21 @@ from ..storage.templates import (
     template_to_profile_payload,
     update_template,
 )
-from ..storage.xdg import chrome_profile_dir, data_dir, profiles_path
+from ..storage.xdg import chrome_profile_dir, data_dir, permission_health, profiles_path
 
 # v1.7.0 API hardening (Workstream 3): validation, cursor pagination, auth,
 # live events. WS1 (events bus / jobs table) and WS2 (metrics routes) are
 # wired defensively — the app must boot even if those modules are absent.
 from .auth import register_auth, register_request_guard
 from .event_bus import emit_job_progress, emit_profile_status, get_bus
-from .pagination import paginate, parse_limit
+from .pagination import decode_cursor, encode_cursor, paginate, parse_limit
 from .sse import register_events_routes
-from .user_agents import USER_AGENTS
+from .user_agents import user_agent_catalog
 from .validation import (
     ValidationError,
     register_error_handlers,
     require_json,
+    v_int,
     v_str,
     validate_clone_payload,
     validate_job_payload,
@@ -152,7 +166,7 @@ def _start_reaper() -> None:
                 reaped = reap_orphans()
                 for item in reaped:
                     audit_log("reap", profile_id=item.get("profileId"), ok=True, detail=item)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
                 log.warning("orphan reaper error: %s", e)
             time.sleep(15)
 
@@ -184,6 +198,80 @@ def _operator_state(launch_state: str | None) -> str | None:
     if not launch_state:
         return None
     return _OPERATOR_STATE.get(str(launch_state).upper())
+
+
+#: Dropped from list rows. The generated fingerprint is 2,114 bytes of a
+#: 2,795-byte row -- 76% of everything the list endpoint sends -- and the
+#: console's table never reads it: the inspector fetches
+#: ``/api/profiles/<id>/fingerprint`` when an operator opens one. Sending it
+#: with every row is what made a larger page expensive, so a page of 500 cost
+#: 1.4 MB of which 1.1 MB was never looked at.
+_LIST_OMITTED_FIELDS = ("fingerprint",)
+
+
+def _update_health() -> dict:
+    """A compact update summary for /api/health. Never raises."""
+    try:
+        from ..updates import status as _status
+
+        st = _status()
+        return {
+            "channelConfigured": st.get("channelConfigured"),
+            "checkEnabled": st.get("checkEnabled"),
+            "autoInstall": st.get("autoInstall"),
+            "available": st.get("available"),
+            "installed": st.get("installed"),
+            "latest": st.get("latest"),
+            "checkedAt": st.get("checkedAt"),
+            "error": st.get("error"),
+        }
+    except Exception as e:  # noqa: BLE001 - health must answer regardless
+        log.debug("update health unavailable: %s", e)
+        return {"channelConfigured": None, "error": "unavailable"}
+
+
+def _with_effective_geo(row: dict) -> dict:
+    """Add the timezone the launch will actually claim, and why.
+
+    The stored ``timezone`` is not always what the page will see. When
+    ``geoAuto`` is set it is only the creation default, and the launch
+    replaces it with something that agrees with where the traffic leaves
+    from: the exit IP's country through a proxy, this machine's own zone with
+    no proxy (F43). Before F43 the two happened to agree -- both said
+    America/New_York -- so rendering the stored value was harmless. It is not
+    harmless now, and a detail page labelled "Timezone" showing a value the
+    browser will not use is rule 1 of `docs/05` §10 wearing a field label.
+
+    Detail only, never the list: this resolves the profile's route, and doing
+    that per row is the shape of cost F9 was about.
+    """
+    try:
+        from ..geo import align_to_exit
+        from ..network import NetworkMode, network_config_for_profile
+
+        mode = network_config_for_profile(row, commit=False).mode
+        plan = align_to_exit(
+            row, row.get("fingerprint"), row.get("lastNetworkDiagnostics"),
+            direct=(mode == NetworkMode.DIRECT),
+        )
+    except Exception as e:  # noqa: BLE001 - a detail page must still render
+        log.debug("effective geo unavailable for %s: %s", row.get("id"), e)
+        return row
+
+    row["effectiveTimezone"] = plan["timezone"] or row.get("timezone")
+    row["effectiveLanguage"] = plan["language"] or row.get("language")
+    row["geoSource"] = plan["source"]
+    row["geoConflicts"] = plan["conflicts"]
+    return row
+
+
+def _list_rows(profiles: list) -> list:
+    """Project profiles for the operator table."""
+    rows = _with_launch_state(profiles)
+    return [
+        {k: v for k, v in row.items() if k not in _LIST_OMITTED_FIELDS}
+        for row in rows
+    ]
 
 
 def _with_launch_state(profiles: list) -> list:
@@ -244,28 +332,30 @@ def _with_launch_state(profiles: list) -> list:
         out.append(q)
     return out
 
-def _all_filtered_profiles(q=None, client_id=None, status=None, tag=None) -> list:
-    """Collect every profile matching the filters (filter_profiles caps its
-    own page at 500, so walk it until a short page)."""
-    out: list = []
-    offset = 0
-    while True:
-        result = filter_profiles(
-            q=q, client_id=client_id, status=status, tag=tag, limit=500, offset=offset
-        )
-        batch = result["items"] if isinstance(result, dict) else result
-        out.extend(batch)
-        if len(batch) < 500:
-            break
-        offset += 500
-    return out
+#: The most profiles one "select all" may resolve to. Not a storage limit --
+#: the query is cheap either way -- but a guard on what a single click can set
+#: in motion: launching ten thousand browsers because someone cleared a filter
+#: is not a thing the operator meant.
+SELECT_ALL_CAP = 5000
+
+#: Sanity bound on a requested bulk-create `count`, so `count: 1e9` is
+#: rejected as input rather than attempted. The limit that actually
+#: governs is the fleet capacity (config.max_profiles), which is checked
+#: inside the insert transaction and answers 409 with the real numbers.
+MAX_PROFILES_HARD_CAP = 10_000
+
+#: The largest page the profile list will serve. Higher than the default cap
+#: because a list row lost its fingerprint (2,795 bytes -> 663), so a full page
+#: is about 320 KB rather than 1.4 MB, and the database returns it in roughly a
+#: millisecond. It bounds one response, not one query.
+PROFILE_LIST_MAX_LIMIT = 500
 
 
 def _read_all_audit() -> list:
     """Read the full audit log for keyset pagination (newest-unbounded)."""
     try:
         return read_audit(limit=1_000_000)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.warning("audit read failed: %s", e)
         return []
 
@@ -274,7 +364,7 @@ def _runtime_state_name(profile_id: str) -> str | None:
     """Best-effort current launch state name for event payloads."""
     try:
         rt = get_runtime(profile_id or "")
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     if not rt:
         return None
@@ -300,7 +390,7 @@ def create_app() -> Flask:
     def health():
         try:
             reaped = reap_orphans()
-        except Exception:
+        except Exception:  # noqa: BLE001 - the fallback is the answer: this could not be confirmed
             reaped = []
 
         chrome_path = None
@@ -326,27 +416,29 @@ def create_app() -> Flask:
                     "unprivilegedUserns": st.unprivileged_userns,
                     "runningAsRoot": st.running_as_root,
                 }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             sandbox_info = {"ok": False, "reason": f"probe_failed: {e}"}
         try:
             wa = WorkAreaProvider().detect()
             work_area_info = {"x": wa.x, "y": wa.y, "w": wa.w, "h": wa.h, "source": wa.source, "ok": True}
         except WorkAreaError as e:
             work_area_info = {"ok": False, "error": "work_area_unavailable", "message": str(e), "reasons": e.reasons}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             work_area_info = {"ok": False, "error": "work_area_unavailable", "message": str(e)}
 
         static_ok = False
         try:
             static_ok = (static_dir() / "index.html").exists()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - False is the answer: the console assets could not be confirmed present
             pass
 
         extension_ok = False
         try:
             extension_ok = (extension_src() / "manifest.json").exists()
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - False is the answer: the evasion source could not be confirmed present
             pass
+
+        from ..storage.db import db_path as _db_path
 
         profiles_writable = False
         try:
@@ -356,27 +448,49 @@ def create_app() -> Flask:
             test.write_text("ok", encoding="utf-8")
             test.unlink(missing_ok=True)
             profiles_writable = True
-        except Exception:
+        except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
             pass
 
         items = []
+        profiles_error = None
         try:
             items = load_profiles()
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - health must answer even when the store cannot
+            # F11: this returned an empty list, so /api/health -- the endpoint
+            # whose job is to say whether anything is wrong -- reported a
+            # healthy install with zero profiles when the store was
+            # unreadable. "No profiles" and "could not read the profiles"
+            # have to be different answers here of all places.
+            profiles_error = str(e)
+            log.warning("health: profile store unreadable: %s", e)
 
         return jsonify(
             {
-                "ok": True,
+                # False when the profile store could not be read: an install
+                # whose profiles are unreachable is not ok, whatever else is.
+                "ok": profiles_error is None,
                 "app": "multiprofile-native",
                 "version": __version__,
                 "chrome_path": chrome_path,
                 "chrome_ok": chrome_ok,
                 "static_ok": static_ok,
                 "extension_ok": extension_ok,
-                "profiles_path": str(profiles_path()),
+                # Where profiles actually live. Reporting profiles.json here
+                # after the move to SQLite would have pointed an operator
+                # debugging a missing profile at a file that no longer exists
+                # -- and on a migrated install, at one holding stale data.
+                "profiles_path": str(_db_path()),
+                "profiles_store": "sqlite",
                 "profiles_writable": profiles_writable,
                 "count": len(items),
+                # Always present, like the permissions and identity blocks:
+                # "no channel configured" is a statement about how this
+                # install is set up, not an absence to be inferred.
+                "update": _update_health(),
+                # Always present. null is "the store was read"; a string is
+                # "count is 0 because it could not be", which is the one case
+                # a health check must not render as a healthy empty fleet.
+                "profilesError": profiles_error,
                 "data_dir": str(data_dir()),
                 "slots": browser_manager.slot_status(),
                 "maxConcurrentProfiles": settings.max_concurrent_profiles,
@@ -388,13 +502,25 @@ def create_app() -> Flask:
                 # Which key backend is protecting the proxy passwords. The
                 # operator must be able to see when it is the weaker one.
                 "secrets": _secrets_status(),
+                # What version profiles are allowed to claim, and on what
+                # authority. source="unavailable" means the claim on the wire
+                # was never compared to the engine running it (F5).
+                "engine": detect_engine_version(chrome_path).to_dict(),
+                # Steps on the identity path that failed quietly (F11).
+                # "faults": [] is a statement, not an absence: nothing has
+                # been swallowed since this process started.
+                "identity": identity_faults.health_summary(),
+                # Files this process could not make owner-only (F11/F4).
+                # Same reasoning as the identity block: [] is a statement that
+                # every write and repair landed 0600, not an absence.
+                "permissions": permission_health(),
                 "reaped": reaped,
             }
         )
 
     @app.get("/api/user-agents")
     def user_agents():
-        return jsonify(USER_AGENTS)
+        return jsonify(user_agent_catalog())
 
     @app.get("/api/profiles")
     def profiles():
@@ -406,23 +532,109 @@ def create_app() -> Flask:
         client_id = request.args.get("clientId")
         status = request.args.get("status")
         tag = request.args.get("tag")
-        limit = parse_limit(request.args.get("limit"))
-        filtered = _all_filtered_profiles(q=q, client_id=client_id, status=status, tag=tag)
-        page = paginate(
-            filtered,
-            cursor=request.args.get("cursor"),
-            limit=limit,
-            key_fn=lambda p: (str(p.get("id") or ""), str(p.get("id") or "")),
+        limit = parse_limit(request.args.get("limit"), maximum=PROFILE_LIST_MAX_LIMIT)
+
+        # The database orders, filters and cuts the page. This used to collect
+        # every match into Python first -- in chunks of 500, each of which
+        # re-read the whole store -- so one page of 25 out of 10,000 profiles
+        # took five seconds. The cursor contract is unchanged: keyset on id,
+        # opaque cursor, `total` counts every match rather than the page.
+        position = decode_cursor(request.args.get("cursor"))
+        after_id = str(position[1]) if position is not None else None
+        result = query_page(
+            q=q, client_id=client_id, status=status, tag=tag,
+            after_id=after_id, limit=limit,
         )
-        page["items"] = _with_launch_state(page["items"])
-        return jsonify(page)
+        items = result["items"]
+        next_cursor = None
+        if result["has_more"] and items:
+            last_id = str(items[-1].get("id") or "")
+            next_cursor = encode_cursor(last_id, last_id)
+        return jsonify({
+            "items": _list_rows(items),
+            "next_cursor": next_cursor,
+            "limit": result["limit"],
+            "total": result["total"],
+        })
+
+    @app.get("/api/profiles/ids")
+    def profiles_ids():
+        """Every profile id matching the filters, for select-all.
+
+        Selection in the console is bounded by the page, so "select all" means
+        "select the 25 rows you can see" and a bulk action on a filtered set of
+        400 means paging through it sixteen times. Resolving the filter to ids
+        server-side is what lets the client act on the whole match; it returns
+        ids rather than profiles because the client already has everything else
+        it needs and a full set of 10,000 profiles is megabytes it will not use.
+
+        Capped: a selection larger than the cap is refused with the count, so
+        the client can say what it would have selected instead of silently
+        acting on a truncated set -- which is how a "delete all" quietly
+        deletes some.
+        """
+        q = request.args.get("q")
+        client_id = request.args.get("clientId")
+        status = request.args.get("status")
+        tag = request.args.get("tag")
+        result = query_page(
+            q=q, client_id=client_id, status=status, tag=tag,
+            limit=SELECT_ALL_CAP + 1,
+        )
+        ids = [str(p.get("id") or "") for p in result["items"]]
+        if len(ids) > SELECT_ALL_CAP:
+            return jsonify({
+                "ok": False,
+                "error": "selection_too_large",
+                "total": result["total"],
+                "cap": SELECT_ALL_CAP,
+                "message": (
+                    f"{result['total']} profiles match; narrow the filter or "
+                    f"act on at most {SELECT_ALL_CAP} at a time"
+                ),
+            }), 413
+        return jsonify({"ids": ids, "total": result["total"], "cap": SELECT_ALL_CAP})
+
+    @app.get("/api/profiles/<profile_id>")
+    def profiles_detail(profile_id: str):
+        """One profile, in full.
+
+        There was no such route. The console's detail page fetched
+        ``/api/profiles?limit=500`` and searched the page for the id it
+        wanted -- but the list clamps ``limit`` to 100, so with more than a
+        hundred profiles the console could not open any of them past the
+        first hundred. Measured with 150 profiles: asking for 500 returned
+        100, and the detail page for #149 rendered "not found" while the
+        profile was sitting in the store.
+
+        Nothing reported the truncation, which is why it survived: the
+        request succeeded, the page rendered, and the answer was wrong.
+
+        Unlike a list row this keeps the fingerprint, because the thing
+        asking for one profile is the thing that wants its detail.
+        """
+        profile = get_profile(profile_id)
+        if not profile:
+            return jsonify({"error": "not_found", "id": profile_id}), 404
+        return jsonify(_with_effective_geo(_with_launch_state([profile])[0]))
+
+    def _apply_aliases(payload: dict) -> dict:
+        """Fold legacy field names into their current ones, before validation.
+
+        Order matters and used to be wrong: `uaId` was copied into
+        `userAgentId` *after* `validate_profile_payload` had already run, so
+        the alias was a way around every check the real field had. It also ran
+        only on create, so `uaId` on an update was accepted and silently
+        dropped -- the same class of bug as F8 and F21.
+        """
+        if "userAgentId" not in payload and "uaId" in payload:
+            payload["userAgentId"] = payload.pop("uaId")
+        return payload
 
     @app.post("/api/profiles")
     def profiles_create():
-        payload = require_json()
-        validate_profile_payload(payload, partial=False)
-        if "userAgentId" not in payload and "uaId" in payload:
-            payload["userAgentId"] = payload["uaId"]
+        payload = _apply_aliases(require_json())
+        field_warnings = validate_profile_payload(payload, partial=False)
         # A profile created in a workspace joins that workspace's proxy pool
         # unless it names one itself. This is the point of a workspace: the
         # operator sets the route once, not once per profile.
@@ -433,28 +645,292 @@ def create_app() -> Flask:
             if inherited:
                 payload["poolId"] = inherited
         profile = create_profile(payload)
-        warnings = _all_warnings(profile)
+        # Field warnings first: a setting that never took effect explains the
+        # consistency warnings underneath it more often than the reverse.
+        warnings = field_warnings + _all_warnings(profile)
         audit_log("profile_create", profile_id=profile.get("id"), ok=True)
         return jsonify({"ok": True, "profile": profile, "warnings": warnings})
 
+    @app.get("/api/account/export")
+    def account_export():
+        """Everything this installation holds, as one document.
+
+        The brief asks for "data deletion and export" under GDPR / DPDP
+        readiness, and the product could answer neither. Proxy passwords are
+        deliberately absent and the document says so, with the field names:
+        an export whose gaps are undocumented is worse than one with no gaps,
+        because the hole is discovered at restore time.
+        """
+        document = account.export_all()
+        response = Response(
+            json.dumps(document, indent=2, default=str),
+            mimetype="application/json",
+        )
+        response.headers["Content-Disposition"] = (
+            'attachment; filename="multiprofile-export.json"'
+        )
+        audit_log("account_export", ok=True, detail={"counts": document.get("counts")})
+        return response
+
+    @app.get("/api/account/deletion-preview")
+    def account_deletion_preview():
+        """What a deletion would remove. Nobody should have to run an
+        irreversible operation to find out what it covers."""
+        return jsonify({"ok": True, **account.deletion_preview()})
+
+    @app.post("/api/account/delete")
+    def account_delete():
+        """Remove everything. Irreversible.
+
+        Requires the exact confirmation string rather than a boolean: a flag
+        is too easy to send by accident from a script that meant something
+        else, and there is nothing behind this one.
+        """
+        payload = require_json()
+        try:
+            removed = account.delete_everything(payload.get("confirm"))
+        except ValueError as e:
+            raise ValidationError("confirm", str(e)) from e
+        audit_log("account_delete", ok=True, detail=removed)
+        return jsonify({"ok": True, "removed": removed})
+
+    @app.get("/api/tokens")
+    def tokens_list():
+        """Named tokens, never their secrets.
+
+        The secret exists once, in the response to the call that created it.
+        A store that can show you a token later is a store that can leak one
+        later, so there is deliberately no way to recover it.
+        """
+        include_revoked = str(request.args.get("includeRevoked", "0")).lower() in ("1", "true", "yes")
+        return jsonify({
+            "ok": True,
+            "items": api_tokens.listing(include_revoked=include_revoked),
+            "scopes": list(api_tokens.SCOPES),
+        })
+
+    @app.post("/api/tokens")
+    def tokens_create():
+        payload = require_json()
+        name = payload.get("name")
+        try:
+            record = api_tokens.create_token(name, payload.get("scopes", "read"))
+        except api_tokens.TokenError as e:
+            raise ValidationError("token", str(e)) from e
+        # The id is logged, never the secret.
+        audit_log("api_token_create", ok=True,
+                  detail={"tokenId": record["id"], "scopes": record["scopes"]})
+        return jsonify({
+            "ok": True,
+            "token": record,
+            "warning": "This is the only time the token is shown. Store it now.",
+        }), 201
+
+    @app.delete("/api/tokens/<token_id>")
+    def tokens_revoke(token_id: str):
+        """Revoke a token. The row stays, so the audit trail stays."""
+        if not api_tokens.revoke(token_id):
+            return jsonify({"error": "not found"}), 404
+        audit_log("api_token_revoke", ok=True, detail={"tokenId": token_id})
+        return jsonify({"ok": True, "revoked": token_id})
+
+    @app.get("/api/plan")
+    def plan_describe():
+        """What this installation is allowed to do, and what it has used.
+
+        Every limit says whether anything actually enforces it. Reporting a
+        limit nothing checks is the failure this audit kept finding -- a
+        control present in the interface and absent from the path -- so the
+        two that are real are marked real and the three that are declarative
+        are marked declarative.
+        """
+        return jsonify({"ok": True, **plans.describe()})
+
+    @app.get("/api/usage")
+    def usage_summary():
+        """What the fleet ran, over a window.
+
+        Nothing measured this before, so every commercial question -- what a
+        seat is worth, whether a cap is generous or mean, which workspace is
+        expensive -- was a guess. The metered quantity is seconds spent
+        running, because that is what a fleet costs; a launch count is easy to
+        record and says nothing.
+        """
+        period = (request.args.get("period") or "month").strip().lower()
+        if period not in usage.PERIODS:
+            raise ValidationError("period", f"must be one of {', '.join(usage.PERIODS)}")
+        return jsonify({"ok": True, **usage.summary(period)})
+
+    @app.get("/api/usage/sessions")
+    def usage_sessions_list():
+        """The sessions behind the summary. A total nobody can drill into is
+        a number to be taken on trust."""
+        period = (request.args.get("period") or "month").strip().lower()
+        if period not in usage.PERIODS:
+            raise ValidationError("period", f"must be one of {', '.join(usage.PERIODS)}")
+        limit = parse_limit(request.args.get("limit"), maximum=1000)
+        items = usage.sessions(period, limit=limit)
+        return jsonify({"ok": True, "items": items, "count": len(items), "period": period})
+
+    @app.get("/api/profiles/capacity")
+    def profiles_capacity():
+        """How many profiles are stored and how many more will fit.
+
+        The console needs this before it offers "create 50", so the operator
+        is told the fleet is nearly full while they are choosing a number
+        rather than after they have submitted one.
+        """
+        return jsonify({"ok": True, "fleet": fleet_capacity()})
+
     @app.put("/api/profiles/<profile_id>")
     def profiles_update(profile_id: str):
-        payload = require_json()
-        validate_profile_payload(payload, partial=True)
+        payload = _apply_aliases(require_json())
+        field_warnings = validate_profile_payload(payload, partial=True)
         updated = update_profile(profile_id, payload)
         if not updated:
             return jsonify({"error": "not found"}), 404
-        return jsonify({"ok": True, "profile": updated, "warnings": _all_warnings(updated)})
+        return jsonify({
+            "ok": True,
+            "profile": updated,
+            "warnings": field_warnings + _all_warnings(updated),
+        })
 
     @app.delete("/api/profiles/<profile_id>")
     def profiles_delete(profile_id: str):
-        purge = request.args.get("purgeStorage", "1")
-        purge_storage = str(purge).lower() not in ("0", "false", "no")
-        ok = delete_profile(profile_id, purge_storage=purge_storage)
-        if not ok:
+        """Move a profile to the trash.
+
+        This used to remove the row and rmtree ``chrome-profiles/<id>`` in one
+        step, with a confirmation dialog as the only thing between a misclick
+        and the permanent loss of every logged-in session the profile held.
+        Deleting is reversible now; ``?permanent=1`` is the way to ask for the
+        old behaviour, and emptying the trash is the other.
+        """
+        permanent = str(request.args.get("permanent", "0")).lower() in ("1", "true", "yes")
+        if permanent:
+            purge = request.args.get("purgeStorage", "1")
+            purge_storage = str(purge).lower() not in ("0", "false", "no")
+            if not delete_profile(profile_id, purge_storage=purge_storage):
+                return jsonify({"error": "not found"}), 404
+            audit_log("delete", profile_id=profile_id, ok=True,
+                      detail={"permanent": True, "purgeStorage": purge_storage})
+            return jsonify({"ok": True, "permanent": True, "purgeStorage": purge_storage})
+
+        # A running profile has Chrome writing into the directory the trash is
+        # supposed to preserve, so trashing it would capture a torn copy.
+        #
+        # `isRunning` alone is not enough: it is derived from the recorded
+        # status and pid, neither of which is updated when Chrome dies
+        # unexpectedly. A profile left marked running by a crash would be
+        # undeletable until something happened to reap it, which is a worse
+        # failure than the one this guard prevents. The pid is checked.
+        current = get_profile(profile_id)
+        if current and current.get("isRunning") and pid_alive(current.get("pid")):
+            return jsonify({
+                "error": {
+                    "code": "profile_running",
+                    "message": "stop the profile before deleting it",
+                }
+            }), 409
+
+        trashed = trash_profile(profile_id)
+        if not trashed:
             return jsonify({"error": "not found"}), 404
-        audit_log("delete", profile_id=profile_id, ok=True, detail={"purgeStorage": purge_storage})
-        return jsonify({"ok": True, "purgeStorage": purge_storage})
+        audit_log("delete", profile_id=profile_id, ok=True, detail={"permanent": False})
+        return jsonify({"ok": True, "permanent": False, "trashed": True,
+                        "profile": {"id": trashed.get("id"), "name": trashed.get("name")}})
+
+    @app.get("/api/trash")
+    def trash_list():
+        purge_expired_trash()
+        items = list_trash()
+        return jsonify({
+            "ok": True,
+            "items": items,
+            "count": len(items),
+            "diskBytes": sum(int(p.get("diskBytes") or 0) for p in items),
+            "retentionDays": get_settings().trash_retention_days,
+        })
+
+    @app.post("/api/profiles/<profile_id>/restore")
+    def profiles_restore(profile_id: str):
+        """Take a profile back out of the trash.
+
+        May answer 409 if the fleet is full: a restore is a create as far as
+        capacity is concerned, and silently exceeding the cap to honour one
+        would make the cap meaningless.
+        """
+        restored = restore_profile(profile_id)
+        if not restored:
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_restore", profile_id=profile_id, ok=True)
+        return jsonify({"ok": True, "profile": restored, "fleet": fleet_capacity()})
+
+    @app.delete("/api/trash/<profile_id>")
+    def trash_purge(profile_id: str):
+        """Delete one trashed profile for good, files included."""
+        if not purge_profile(profile_id):
+            return jsonify({"error": "not found"}), 404
+        audit_log("profile_purge", profile_id=profile_id, ok=True)
+        return jsonify({"ok": True, "purged": profile_id})
+
+    @app.post("/api/trash/empty")
+    def trash_empty():
+        removed = empty_trash()
+        audit_log("trash_empty", ok=True, detail={"purged": removed})
+        return jsonify({"ok": True, "purged": removed})
+
+    @app.post("/api/profiles/import")
+    def profiles_import():
+        """Create one profile per proxy in a pasted list.
+
+        The fleet-filling operation the product was missing: create, clone,
+        duplicate and from-template all made one profile at a time, so an
+        operator arriving with a block of proxies from a provider had to type
+        each one in.
+
+        Body: ``{"proxies": "<text or list>", "namePrefix": "...",
+        "proxyType": "socks5", "tags": [...], "clientId": ..., "poolId": ...,
+        "startUrl": ...}``. Everything but ``proxies`` is optional; the extra
+        fields are applied to every profile in the batch.
+
+        Partial success by design. A bad line does not reject the batch --
+        someone pasting 150 proxies usually has one typo, and failing all 150
+        for it means finding the typo by bisection. The response reports every
+        row by the input line it came from, so a caller fixes two lines rather
+        than re-pasting everything.
+        """
+        payload = require_json()
+        raw = payload.get("proxies")
+        if raw is None:
+            raw = payload.get("proxyList") or payload.get("list")
+        if not isinstance(raw, (str, list)) or not raw:
+            raise ValidationError(
+                "proxies",
+                "give a list of proxies, as newline-separated text or an array",
+            )
+
+        base: dict[str, object] = {}
+        for key in ("tags", "clientId", "poolId", "startUrl", "timezone",
+                    "language", "webrtcMode", "color", "notes"):
+            if key in payload and payload[key] is not None:
+                base[key] = payload[key]
+
+        report = import_profiles(
+            raw,
+            name_prefix=str(payload.get("namePrefix") or "Imported"),
+            proxy_type=str(payload.get("proxyType") or DEFAULT_PROXY_TYPE),
+            base=base,
+        )
+        audit_log(
+            "profiles_import",
+            ok=True,
+            detail={k: v for k, v in report["counts"].items()},
+        )
+        # 207: some rows may have failed while others were created, and the
+        # caller has to look at the body either way. A flat 200 would let a
+        # client treat "created 0 of 150" as success.
+        status = 200 if report["counts"]["failed"] == 0 else 207
+        return jsonify(report), status
 
     @app.post("/api/profiles/<profile_id>/launch")
     def profiles_launch(profile_id: str):
@@ -535,22 +1011,41 @@ def create_app() -> Flask:
         tpl = get_template(tid)
         if not tpl:
             return jsonify({"error": "template not found"}), 404
-        try:
-            count = max(1, min(int(payload.get("count") or 1), 50))
-        except (TypeError, ValueError):
-            count = 1
-        created = []
+        # `count` used to be clamped to 50 with max(1, min(...)): asking for
+        # 150 returned `ok: true` with 50 profiles and no mention of the other
+        # hundred, and a non-integer silently became 1. Filling a fleet from a
+        # template is the flow this endpoint exists for, so silently doing a
+        # third of it is the worst available answer. It is validated now, and
+        # the ceiling is the fleet's own capacity rather than an unrelated 50.
+        count = 1
+        if payload.get("count") is not None:
+            count = v_int(payload["count"], "count", min=1, max=MAX_PROFILES_HARD_CAP)
+
+        overrides_common = {}
+        if "clientId" in payload:
+            overrides_common["clientId"] = payload.get("clientId")
+        base_name = payload.get("name") or tpl.get("name") or "Profile"
+        bodies = []
         for i in range(count):
-            overrides = {}
+            overrides = dict(overrides_common)
             if payload.get("name"):
-                overrides["name"] = payload["name"] if count == 1 else f"{payload['name']} {i+1}"
+                overrides["name"] = payload["name"] if count == 1 else f"{base_name} {i+1}"
             elif count > 1:
-                overrides["name"] = f"{tpl.get('name') or 'Profile'} {i+1}"
-            if "clientId" in payload:
-                overrides["clientId"] = payload.get("clientId")
-            body = template_to_profile_payload(tpl, overrides)
-            created.append(create_profile(body))
-        return jsonify({"ok": True, "profiles": created, "count": len(created)})
+                overrides["name"] = f"{base_name} {i+1}"
+            bodies.append(template_to_profile_payload(tpl, overrides))
+
+        # Raises FleetFull -> 409 if the batch will not fit. All or nothing:
+        # a half-created fleet is worse than a refusal, because the operator
+        # cannot tell which half they got.
+        created = create_profiles(bodies)
+        audit_log("profiles_from_template", ok=True,
+                  detail={"templateId": tid, "count": len(created)})
+        return jsonify({
+            "ok": True,
+            "profiles": created,
+            "count": len(created),
+            "fleet": fleet_capacity(),
+        })
 
     @app.get("/api/profiles/<profile_id>/cookies")
     def cookies_get(profile_id: str):
@@ -805,17 +1300,94 @@ def create_app() -> Flask:
         audit_log("profile_note_delete", profile_id=profile_id, ok=True)
         return jsonify({"ok": True})
 
-    def _list_all_jobs() -> list:
-        """Best-effort full job list; None when the job system is missing."""
+    def _durable_job_epoch(value) -> float:
+        """``created_at`` is ISO text in the jobs table, epoch float in legacy."""
+        if not value:
+            return 0.0
         try:
-            try:
-                return list_jobs(limit=100_000)
-            except TypeError:
-                # Forward-compat: WS1's jobs table may not accept limit=.
-                return list_jobs()
-        except Exception as e:
-            log.warning("job system unavailable: %s", e)
-            return None
+            from datetime import datetime
+
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except Exception:  # noqa: BLE001 - an unsortable date must not hide a job
+            return 0.0
+
+    def _normalize_durable_job(row: dict) -> dict:
+        """Present a durable row in the shape the console already reads.
+
+        The two queues were never given a common shape: legacy uses ``type``
+        and an epoch ``createdAt`` with a string id, the jobs table uses
+        ``job_type``, ISO ``created_at`` and an integer id. The id is prefixed
+        so the two can never collide in one list.
+        """
+        return {
+            "id": f"durable:{row.get('id')}",
+            "type": row.get("job_type"),
+            "status": row.get("status"),
+            "createdAt": _durable_job_epoch(row.get("created_at")),
+            "updatedAt": _durable_job_epoch(row.get("updated_at")),
+            "profileIds": [row.get("profile_id")] if row.get("profile_id") else [],
+            "attempts": row.get("attempts"),
+            "maxAttempts": row.get("max_attempts"),
+            "error": row.get("error"),
+            "result": row.get("result"),
+            "source": "durable",
+        }
+
+    def _list_all_jobs() -> list:
+        """Every job the operator can see; None when the store cannot be read.
+
+        Since F20 there is one queue. This lists batches -- what the operator
+        started -- and then the durable jobs that belong to no batch, which
+        are the background ones: parking, health checks, and anything a crash
+        recovery re-queued. Both come from the same table, so "the job system
+        is unavailable" now means one thing rather than two.
+        """
+        jobs: list = []
+        failed = True
+        try:
+            jobs = list(list_jobs(limit=100_000))
+            failed = False
+        except Exception as e:  # noqa: BLE001 - the control DB may be absent
+            log.warning("job batches unavailable: %s", e)
+
+        try:
+            from ..jobs import list_durable_jobs
+
+            # Members of a batch are already represented by their batch; a
+            # list showing both would double-count every bulk launch.
+            jobs += [
+                _normalize_durable_job(r)
+                for r in list_durable_jobs(limit=100_000)
+                if not r.get("batch_id")
+            ]
+            failed = False
+        except Exception as e:  # noqa: BLE001 - one view must not hide the other
+            log.warning("durable job queue unavailable: %s", e)
+
+        return None if failed else jobs
+
+    @app.get("/api/update")
+    def update_status():
+        """What this install knows about updates, without asking again.
+
+        Always answers, including when no channel is configured -- that is
+        the default state and the one where the product makes no network
+        requests at all, so it has to read as a fact rather than a failure.
+        """
+        from ..updates import status as _status
+
+        return jsonify({"ok": True, **_status()})
+
+    @app.post("/api/update/check")
+    def update_check():
+        """Ask the channel now. Reports; never installs."""
+        from ..updates import check_now
+
+        result = check_now()
+        # 200 even when the check could not be made: the request succeeded,
+        # and the body says what happened. A 5xx here would make "no channel
+        # configured" look like a broken server.
+        return jsonify({"ok": result.get("error") is None, **result})
 
     @app.get("/api/jobs")
     def jobs_list():
@@ -887,7 +1459,7 @@ def create_app() -> Flask:
     def jobs_get(job_id: str):
         try:
             job = get_job(job_id)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             log.warning("job lookup unavailable: %s", e)
             job = None
             unavailable = True
@@ -924,7 +1496,7 @@ def create_app() -> Flask:
             ids = [ids]
         try:
             result = get_layout_manager().tile_running(ids)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             result = {"ok": False, "error": "tile_failed", "message": str(e), "results": []}
         # Always 200 with ok flag — client decides; browsers stay up.
         return jsonify(result)
@@ -933,7 +1505,7 @@ def create_app() -> Flask:
     def windows_layout():
         try:
             snap = get_layout_manager().layout_snapshot()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
             snap = {"ok": False, "error": str(e), "profiles": []}
         return jsonify(snap)
 
@@ -1059,28 +1631,68 @@ def create_app() -> Flask:
 
     @app.post("/api/profiles/<profile_id>/open-folder")
     def open_folder(profile_id: str):
+        """Open the profile's directory in the desktop file manager.
+
+        F11: this swallowed the failure and returned ok:True regardless, so a
+        host with no `xdg-open` -- a server install, a bare window manager --
+        told the operator the folder had opened and opened nothing. Reporting
+        success for work that did not happen is the defect this whole audit
+        is named after, and it was two lines from the console's own button.
+        """
         path = chrome_profile_dir(profile_id)
         try:
             subprocess.Popen(["xdg-open", str(path)])
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 - the path is still useful to report
+            log.warning("xdg-open failed for %s: %s", path, e)
+            return jsonify({
+                "ok": False,
+                "error": "open_failed",
+                "message": f"Could not open a file manager: {e}",
+                "path": str(path),
+            }), 500
         return jsonify({"ok": True, "path": str(path)})
 
     @app.post("/api/profiles/switch-all-direct")
     def switch_all_direct():
         return jsonify({"ok": True})
 
+    # These three were stubs -- "Updater disabled in native build",
+    # {"status": "disabled"}, {"ok": false} -- which is the F16 shape: a
+    # control the console can call that reaches nothing. Now they reach the
+    # updater that ships in the package.
     @app.post("/api/update/download")
     def update_download():
-        return jsonify({"ok": False, "error": "Updater disabled in native build"})
+        """Fetch and verify the update, without installing it."""
+        from ..updates import download_now
+
+        result = download_now()
+        return jsonify(result), (200 if result.get("ok") else 409)
 
     @app.get("/api/update/status")
-    def update_status():
-        return jsonify({"status": "disabled"})
+    def update_status_legacy():
+        """Kept at its old path; the console reads this one."""
+        from ..updates import status as _status
+
+        st = _status()
+        # `status` was a bare string here. Both shapes are returned so a
+        # client written against either keeps working.
+        if not st.get("channelConfigured"):
+            label = "no_channel"
+        elif st.get("available") is True:
+            label = "available"
+        elif st.get("available") is False:
+            label = "up_to_date"
+        else:
+            label = "unknown"
+        return jsonify({"status": label, **st})
 
     @app.post("/api/update/apply")
     def update_apply():
-        return jsonify({"ok": False})
+        """Install the available update. Refused while profiles are running."""
+        from ..updates import install_now
+
+        result = install_now()
+        return jsonify(result), (200 if result.get("ok") else 409)
 
     # ------------------------------------------------------------------ #
     #  Clone profile                                                       #
@@ -1137,7 +1749,7 @@ def create_app() -> Flask:
                 # Never expose credentials
                 "proxy": net.proxy.to_dict() if net.proxy else None,
             })
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
             return jsonify({"ok": False, "mode": net.mode.value, "error": str(e)}), 500
 
     # ------------------------------------------------------------------ #
@@ -1200,7 +1812,7 @@ def create_app() -> Flask:
         try:
             h = provider.health()
             return jsonify({"ok": h.ok, "gatewayId": gw_id, "health": h.to_dict()})
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
             return jsonify({"ok": False, "gatewayId": gw_id, "error": str(e)}), 500
 
     @app.post("/api/gateways/<gw_id>/provision")
@@ -1228,12 +1840,12 @@ def create_app() -> Flask:
     try:
         from ..devices.routes import register_devices_routes
         register_devices_routes(app)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("devices routes not registered: %s", e)
     try:
         from ..network_routes import register_network_routes
         register_network_routes(app)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("network routes not registered: %s", e)
 
     # ------------------------------------------------------------------ #
@@ -1245,7 +1857,7 @@ def create_app() -> Flask:
     # bus accessor), else an in-process fallback bus.
     try:
         register_events_routes(app)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("events routes not registered: %s", e)
 
     # ------------------------------------------------------------------ #
@@ -1258,7 +1870,7 @@ def create_app() -> Flask:
         register_metrics_routes(app)
     except ImportError:
         log.info("metrics routes not present (Workstream 2 pending)")
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("metrics routes not registered: %s", e)
     # ------------------------------------------------------------------ #
     #  v1.7.0 startup sequence: control-plane recovery + durable job      #
@@ -1302,6 +1914,28 @@ def create_app() -> Flask:
             log.info("durable job workers started")
         except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
             log.warning("job workers failed to start: %s", e)
+
+        # Idle parking. F20's missing producer: park_profile was reachable
+        # only from a job handler and nothing enqueued one, so the whole
+        # feature and its config flag reached nothing. Returns None and logs
+        # when parking is disabled, which is the default -- see
+        # config.parking_enabled for why.
+        try:
+            from ..parking import start_parking_sweeper
+
+            start_parking_sweeper()
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning("idle parking sweeper failed to start: %s", e)
+
+        # Update checking. Returns None and logs when no channel is
+        # configured, which is the default and the state in which this
+        # product makes no network requests of its own (F14).
+        try:
+            from ..updates import start_update_checker
+
+            start_update_checker()
+        except Exception as e:  # noqa: BLE001 - fail-safe boot, no crash
+            log.warning("update checker failed to start: %s", e)
 
         # Browser supervisor (crash watchdog). start() is itself a no-op
         # when disabled by config; the guard here keeps a broken

@@ -43,9 +43,18 @@ def test_launcher_source_uses_helpers_not_duplicate_disable_features():
 
 
 def test_jobs_pass_slot_rects_at_launch():
-    src = Path("src/multiprofile/jobs/legacy.py").read_text(encoding="utf-8")
+    """A batch member must carry the grid slot it was assigned.
+
+    Source-level, and pointed at `batches.py` since F20 moved job creation
+    there. A behavioural version lives in test_job_batches.py
+    (`test_the_members_carry_the_launch_arguments`); this one guards that the
+    rect is computed at create time at all, because the window opening in the
+    wrong place and jumping afterwards is the symptom nobody files a bug for.
+    """
+    src = Path("src/multiprofile/jobs/batches.py").read_text(encoding="utf-8")
     assert "window_rect=None" not in src
     assert "slot_rect_map" in src
+    assert '"window_rect"' in src
 
 
 def test_ensure_no_client_frame_shadow_writes_pref(tmp_path):

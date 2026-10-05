@@ -10,21 +10,143 @@
  */
 (function() {
   'use strict';
-  console.log("[Evasion] evasion.js active on:", location.href);
 
-  // Helper to make hooked functions appear 100% native
-  function makeNative(fn, name) {
+  // ==========================================
+  // 0. NATIVE-FUNCTION MASKING  (F3)
+  // ==========================================
+  //
+  // The previous makeNative assigned an **own** `toString` to every hooked
+  // function. That defeats `fn.toString()` and nothing else. Measured:
+  //
+  //   Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)
+  //     -> "function toDataURL() { let copy = null; try { copy = n..."
+  //   Object.prototype.hasOwnProperty.call(toDataURL, 'toString')
+  //     -> true      <- no native function has this, ever
+  //
+  // `Function.prototype.toString.call(fn)` never consults an own property, so
+  // it returned the hook's real source, comments included. That is not a
+  // statistical signal; it is the spoofing code handing a page its
+  // implementation, and it is the check every serious detector actually runs.
+  //
+  // So patch the one function all of those paths go through. A WeakMap holds
+  // what each hooked function should claim to be, and Function.prototype
+  // .toString answers from it. Nothing is written onto the hooked function, so
+  // there is no own property to find, and .call / .apply / .bind / Reflect
+  // .apply all arrive here because there is nowhere else for them to go.
+  //
+  // The WeakMap is shared across realms on purpose. The obvious way around a
+  // patched toString is to borrow a clean one from a fresh realm --
+  //
+  //   const f = document.createElement('iframe'); document.body.append(f);
+  //   f.contentWindow.Function.prototype.toString.call(hookedFn)
+  //
+  // -- so every realm this script reaches gets the same patch reading the same
+  // map, and a borrowed toString answers about a foreign realm's function just
+  // as the local one would. See applyNativeMasking, called for the top window
+  // here and for each iframe window in section 8.
+  const nativeSources = new WeakMap();
+
+  function nativeSourceFor(name) {
+    return 'function ' + (name || '') + '() { [native code] }';
+  }
+
+  // Registers `fn` under `name` without changing what it is. For the few
+  // replacements that really are constructors -- RTCPeerConnection,
+  // Intl.DateTimeFormat -- where a `prototype` property is correct and
+  // removing it would be the anomaly.
+  function makeNativeCtor(fn, name) {
     try {
       if (name) {
         Object.defineProperty(fn, 'name', { value: name, configurable: true });
       }
-      const nativeStr = `function ${name || fn.name || ''}() { [native code] }`;
-      fn.toString = function toString() { return nativeStr; };
-      Object.defineProperty(fn.toString, 'name', { value: 'toString', configurable: true });
-      fn.toString.toString = function toString() { return 'function toString() { [native code] }'; };
+      nativeSources.set(fn, nativeSourceFor(name || fn.name));
     } catch(e) {}
     return fn;
   }
+
+  // Returns a stand-in for `fn` shaped like a native *method*, registered so
+  // Function.prototype.toString will describe it as one.
+  //
+  // Found by diffing every hooked function against bare Chromium rather than
+  // by reading the code, because nothing in the source looks wrong:
+  //
+  //   Object.getOwnPropertyNames(HTMLCanvasElement.prototype.toDataURL)
+  //     stock Chromium   ["length", "name"]
+  //     a profile        ["length", "name", "prototype"]
+  //
+  // Every hook was a plain `function(){}`, and a plain function has an own
+  // `prototype` and is constructible. Native methods are neither, so
+  //
+  //   'prototype' in HTMLCanvasElement.prototype.toDataURL   -> true
+  //   new HTMLCanvasElement.prototype.toDataURL()            -> did not throw
+  //
+  // each identified the product in one line, without reading any source, and
+  // so survived the toString masking entirely. 22 of the replaced functions
+  // carried it.
+  //
+  // `prototype` is non-configurable, so it cannot be deleted, and a Proxy
+  // cannot hide it either -- the ownKeys invariant requires every
+  // non-configurable own key of the target to be reported. Method shorthand
+  // is the one construction that never creates it, and it is also not
+  // constructible, which is the other half of the same tell.
+  //
+  // `length` is restored explicitly because rest parameters report 0, and an
+  // arity that disagrees with the real method is the tell one level down.
+  function makeNative(fn, name) {
+    try {
+      const label = name || fn.name || '';
+      const arity = fn.length;
+      const holder = {
+        [label](...args) { return Reflect.apply(fn, this, args); }
+      };
+      const shim = holder[label];
+      Object.defineProperty(shim, 'length', { value: arity, configurable: true });
+      nativeSources.set(shim, nativeSourceFor(label));
+      return shim;
+    } catch(e) {
+      // Better a registered original than an unregistered one: the toString
+      // masking still applies, only the shape does not.
+      return makeNativeCtor(fn, name);
+    }
+  }
+
+  function applyNativeMasking(scope) {
+    try {
+      const FnProto = scope.Function && scope.Function.prototype;
+      if (!FnProto) return;
+      const original = FnProto.toString;
+      // Idempotent: this runs for the top window and again for every iframe
+      // window handed back by contentWindow, which can be the same window
+      // many times over. Wrapping a wrapper would work but each layer is
+      // another chance to differ from native.
+      if (nativeSources.get(original) !== undefined) return;
+
+      const masked = new Proxy(original, {
+        apply: function(target, thisArg, args) {
+          // `masked` is itself in the map, which is what makes
+          // Function.prototype.toString.toString() answer "native" -- it
+          // resolves .toString through Function.prototype and arrives here
+          // with itself as `this`.
+          const claimed = nativeSources.get(thisArg);
+          if (claimed !== undefined) return claimed;
+          // Not one of ours: the genuine answer, including the genuine
+          // TypeError when `this` is not callable.
+          return Reflect.apply(target, thisArg, args);
+        }
+      });
+
+      nativeSources.set(masked, nativeSourceFor('toString'));
+
+      Object.defineProperty(FnProto, 'toString', {
+        value: masked,
+        writable: true,
+        enumerable: false,
+        configurable: true
+      });
+    } catch(e) {}
+  }
+
+  applyNativeMasking(window);
 
   // Detect platform profile based on User-Agent
   const ua = navigator.userAgent || "";
@@ -36,6 +158,11 @@
   let TARGET_MEMORY = 8;
   let TARGET_GPU_VENDOR = "Google Inc. (NVIDIA)";
   let TARGET_GPU_RENDERER = "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ps_5_0, D3D11)";
+  // Derived in fingerprint/_core.py from the renderer above, so the two
+  // vocabularies for the same card cannot drift apart. Null means "claim
+  // nothing" -- inventing an identity that disagreed with the WebGL string
+  // would recreate the contradiction this exists to remove.
+  let TARGET_WEBGPU = null;
   let SCREEN_W = 1920;
   let SCREEN_H = 1080;
   let SCREEN_AVAIL_H = 1040;
@@ -105,6 +232,7 @@
       if (MP_CFG.gpu) {
         if (MP_CFG.gpu.vendor) TARGET_GPU_VENDOR = MP_CFG.gpu.vendor;
         if (MP_CFG.gpu.renderer) TARGET_GPU_RENDERER = MP_CFG.gpu.renderer;
+        if (MP_CFG.gpu.webgpu && MP_CFG.gpu.webgpu.vendor) TARGET_WEBGPU = MP_CFG.gpu.webgpu;
       }
       if (MP_CFG.screen) {
         if (MP_CFG.screen.w) SCREEN_W = MP_CFG.screen.w;
@@ -128,7 +256,23 @@
     } catch (e) {}
   }
 
-  // NOTE: No console.log — logging extension activity is a detection signal.
+  // NOTE: no console output unless the launcher explicitly asks for it.
+  //
+  // This script used to announce itself on EVERY page and in every frame:
+  //
+  //     console.log("[Evasion] evasion.js active on:", location.href);
+  //
+  // A page cannot read past console output, so it was not directly
+  // exploitable — but it was a plain-text confession visible in any DevTools
+  // session, screen share, demo or support screenshot, and harvestable by a
+  // page that installs a console proxy before this runs. The line survives
+  // behind a flag rather than being deleted, because the number of times it
+  // appears for one document is the only honest way to count how many times
+  // this script ran, which is how the double-injection bug was measured. It is
+  // OFF unless MULTIPROFILE_EVASION_DEBUG put debug:true in the config.
+  if (MP_CFG && MP_CFG.debug === true) {
+    try { console.log("[Evasion] evasion.js active on:", location.href); } catch (e) {}
+  }
 
 
   // Deterministic noise generator
@@ -147,70 +291,71 @@
   // ==========================================
   // 1. HARDWARE & CPU/MEMORY PROTOTYPE SPOOFING
   // ==========================================
+  // Where a spoofed accessor belongs (F3).
+  //
+  // This used to define every getter on BOTH Navigator.prototype and the
+  // navigator instance. The prototype one is correct and sufficient -- that is
+  // where the real accessor lives -- and the instance one is a tell:
+  //
+  //   Object.getOwnPropertyDescriptor(navigator, 'platform')
+  //     -> {get, set, enumerable, configurable}   <- native returns undefined
+  //
+  // A real navigator has no own 'platform', 'hardwareConcurrency' or
+  // 'deviceMemory'; they are inherited. Defining them on the instance
+  // shadowed the prototype correctly and announced itself while doing it.
+  //
+  // So: prototype when there is one, instance only as a fallback for a realm
+  // that does not expose the constructor. Returns nothing; it is used for its
+  // effect.
+  function defineOn(proto, instance, prop, descriptor) {
+    try {
+      if (proto) {
+        Object.defineProperty(proto, prop, descriptor);
+        return;
+      }
+      if (instance) {
+        Object.defineProperty(instance, prop, descriptor);
+      }
+    } catch(e) {}
+  }
+
+  function deleteFrom(proto, instance, prop) {
+    try { if (proto) delete proto[prop]; } catch(e) {}
+    try { if (instance) delete instance[prop]; } catch(e) {}
+  }
+
   function applyHardwareSpoofs(navObj, NavProto) {
     try {
+      const accessor = function(get) {
+        return { get: get, configurable: true, enumerable: true };
+      };
+
       // hardwareConcurrency
       const hcGetter = makeNative(function() {
         return TARGET_CORES;
       }, 'get hardwareConcurrency');
-
-      if (NavProto) {
-        Object.defineProperty(NavProto, 'hardwareConcurrency', {
-          get: hcGetter,
-          configurable: true,
-          enumerable: true
-        });
-      }
-      if (navObj) {
-        Object.defineProperty(navObj, 'hardwareConcurrency', {
-          get: hcGetter,
-          configurable: true,
-          enumerable: true
-        });
-      }
+      defineOn(NavProto, navObj, 'hardwareConcurrency', accessor(hcGetter));
 
       // deviceMemory
       if (TARGET_MEMORY !== undefined) {
         const dmGetter = makeNative(function() {
           return TARGET_MEMORY;
         }, 'get deviceMemory');
-
-        if (NavProto) {
-          Object.defineProperty(NavProto, 'deviceMemory', {
-            get: dmGetter,
-            configurable: true,
-            enumerable: true
-          });
-        }
-        if (navObj) {
-          Object.defineProperty(navObj, 'deviceMemory', {
-            get: dmGetter,
-            configurable: true,
-            enumerable: true
-          });
-        }
+        defineOn(NavProto, navObj, 'deviceMemory', accessor(dmGetter));
       } else {
-        if (NavProto) delete NavProto.deviceMemory;
-        if (navObj) delete navObj.deviceMemory;
+        // A profile claiming iOS must not expose deviceMemory at all, so this
+        // removes it from both -- an instance copy left behind by an earlier
+        // pass would resurrect the property the absence is the point of.
+        deleteFrom(NavProto, navObj, 'deviceMemory');
       }
 
       // platform spoofing (Android -> Linux armv8l, iPhone -> iPhone, Mac -> MacIntel, Windows -> Win32)
       const platGetter = makeNative(function() { return TARGET_PLATFORM; }, 'get platform');
-      if (NavProto) {
-        Object.defineProperty(NavProto, 'platform', { get: platGetter, configurable: true, enumerable: true });
-      }
-      if (navObj) {
-        Object.defineProperty(navObj, 'platform', { get: platGetter, configurable: true, enumerable: true });
-      }
+      defineOn(NavProto, navObj, 'platform', accessor(platGetter));
 
       // maxTouchPoints for mobile
       const touchGetter = makeNative(function() { return TARGET_TOUCH; }, 'get maxTouchPoints');
-      if (NavProto) {
-        Object.defineProperty(NavProto, 'maxTouchPoints', { get: touchGetter, configurable: true, enumerable: true });
-      }
-      if (navObj) {
-        Object.defineProperty(navObj, 'maxTouchPoints', { get: touchGetter, configurable: true, enumerable: true });
-      }
+      defineOn(NavProto, navObj, 'maxTouchPoints', accessor(touchGetter));
 
       // Keep navigator.webdriver exactly as the installed browser exposes it.
       // Replacing its native descriptor is rejected by some identity providers.
@@ -223,12 +368,9 @@
   try {
     const langGetter = makeNative(function() { return TARGET_LANGUAGE; }, 'get language');
     const langsGetter = makeNative(function() { return TARGET_LANGUAGES.slice(); }, 'get languages');
-    if (window.Navigator && Navigator.prototype) {
-      Object.defineProperty(Navigator.prototype, 'language', { get: langGetter, configurable: true, enumerable: true });
-      Object.defineProperty(Navigator.prototype, 'languages', { get: langsGetter, configurable: true, enumerable: true });
-    }
-    Object.defineProperty(navigator, 'language', { get: langGetter, configurable: true, enumerable: true });
-    Object.defineProperty(navigator, 'languages', { get: langsGetter, configurable: true, enumerable: true });
+    const NavProto = window.Navigator ? Navigator.prototype : null;
+    defineOn(NavProto, navigator, 'language', { get: langGetter, configurable: true, enumerable: true });
+    defineOn(NavProto, navigator, 'languages', { get: langsGetter, configurable: true, enumerable: true });
   } catch(e) {}
 
   // devicePixelRatio from fingerprint screen.dpr
@@ -284,15 +426,21 @@
     if (!proto || !proto.getParameter) return;
     const originalGetParameter = proto.getParameter;
 
+    // Parameter numbers are named out here rather than in comments inside the
+    // hook. The masking in section 0 means a page can no longer read this
+    // function's source -- but it could, and what it read was
+    // "// UNMASKED_VENDOR_WEBGL", the hook naming its own purpose. A comment
+    // that is only safe while another defence holds is worth moving.
+    const UNMASKED_VENDOR_WEBGL = 37445;
+    const UNMASKED_RENDERER_WEBGL = 37446;
+    const VENDOR = 7936;
+    const RENDERER = 7937;
+
     const patchedGetParameter = makeNative(function getParameter(param) {
-      // UNMASKED_VENDOR_WEBGL
-      if (param === 37445) return TARGET_GPU_VENDOR;
-      // UNMASKED_RENDERER_WEBGL
-      if (param === 37446) return TARGET_GPU_RENDERER;
-      // VENDOR
-      if (param === 7936) return "Google Inc.";
-      // RENDERER
-      if (param === 7937) return "WebKit WebGL";
+      if (param === UNMASKED_VENDOR_WEBGL) return TARGET_GPU_VENDOR;
+      if (param === UNMASKED_RENDERER_WEBGL) return TARGET_GPU_RENDERER;
+      if (param === VENDOR) return "Google Inc.";
+      if (param === RENDERER) return "WebKit WebGL";
 
       return originalGetParameter.call(this, param);
     }, 'getParameter');
@@ -464,148 +612,56 @@
     }
 
     // ==========================================
-    // 5. FONT UNIQUENESS & METRICS ISOLATION SHIELD
+    // 5. FONTS -- handled at the engine, not here
     // ==========================================
-    const origMeasureText = CanvasRenderingContext2D.prototype.measureText;
-    const desktopPool = ["Comic Sans MS", "Impact", "Garamond", "Trebuchet MS", "Palatino", "Bookman", "Georgia", "Verdana"];
-    const iosExcluded = ["Comic Sans MS", "Impact", "Lucida Console", "Lucida Sans Unicode", "Trebuchet MS"];
-
-    // Determine fonts to suppress for this profile
-    let suppressedFonts = [];
-    if (isIPhone || isAndroid) {
-      suppressedFonts = iosExcluded;
-    } else {
-      const idx1 = PROFILE_SEED % desktopPool.length;
-      const idx2 = (PROFILE_SEED * 3 + 1) % desktopPool.length;
-      suppressedFonts = [desktopPool[idx1]];
-      if (idx1 !== idx2) suppressedFonts.push(desktopPool[idx2]);
-    }
-
-    CanvasRenderingContext2D.prototype.measureText = makeNative(function measureText(text) {
-      const currentFont = (this.font || "").toLowerCase();
-      for (const sf of suppressedFonts) {
-        if (currentFont.includes(sf.toLowerCase())) {
-          // Emulate font fallback to monospace width so probe detects font as uninstalled
-          const prev = this.font;
-          this.font = '72px monospace';
-          const fallback = origMeasureText.call(this, text);
-          this.font = prev;
-          return fallback;
-        }
-      }
-      return origMeasureText.call(this, text);
-    }, 'measureText');
-
-    // Also align document.fonts.check if available
-    if (document.fonts && document.fonts.check) {
-      const origFontsCheck = document.fonts.check;
-      document.fonts.check = makeNative(function check(font, text) {
-        const fLower = (font || "").toLowerCase();
-        for (const sf of suppressedFonts) {
-          if (fLower.includes(sf.toLowerCase())) return false;
-        }
-        return origFontsCheck.call(this, font, text);
-      }, 'check');
-    }
+    // This section used to hook measureText and document.fonts.check to hide
+    // one or two names picked out of a hardcoded eight-font pool. It has been
+    // removed rather than extended, for two reasons.
+    //
+    // It solved the wrong problem. A profile claiming Windows enumerated
+    // thirteen Linux fonts, five of which (C059, P052, Z003, D050000L,
+    // Standard Symbols PS) exist on no Windows machine -- and the hook's
+    // response was to hide Georgia.
+    //
+    // And a canvas-only hook is a tell in itself. Measured on this host,
+    // canvas and DOM font detection agree exactly, so suppressing a font in
+    // measureText while a span measuring the same family still laid out at
+    // its real width would have produced a disagreement no real browser
+    // shows. The DOM half cannot be moved honestly from JavaScript, because
+    // reporting a width the engine did not lay out desynchronises measurement
+    // from rendering.
+    //
+    // The font set is now decided for the whole engine via a per-profile
+    // fontconfig (see multiprofile/browser/fontconfig.py), so canvas, DOM,
+    // document.fonts, workers and what is actually painted all agree without
+    // anything having to lie.
 
   } catch(e) {}
 
-  // CreepJS and similar probes fingerprint canvas inside Worker/OffscreenCanvas.
-  // Content scripts do not run in workers, so wrap Worker to prepend the same seed.
-  try {
-    if (typeof Worker !== "undefined") {
-      const NativeWorker = Worker;
-      const prelude =
-        "self.__MP_SEED=" + String(PROFILE_SEED | 0) + ";" +
-        "self.__MP_GPU_V=" + JSON.stringify(TARGET_GPU_VENDOR) + ";" +
-        "self.__MP_GPU_R=" + JSON.stringify(TARGET_GPU_RENDERER) + ";" +
-        "(" + function () {
-          const PROFILE_SEED = self.__MP_SEED || 1;
-          function pixelHash(x, y) {
-            let h = Math.imul(PROFILE_SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
-            h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
-            h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
-            return (h ^ (h >>> 15)) >>> 0;
-          }
-          function addNoise(data, ox, oy, w, h) {
-            if (w * h > 4000000) return;
-            for (let y = 0; y < h; y++) {
-              for (let x = 0; x < w; x++) {
-                const i = (y * w + x) * 4;
-                if (data[i + 3] === 0) continue;
-                const r = pixelHash(ox + x, oy + y);
-                if ((r & 15) !== 0) continue;
-                const up = ((r >>> 8) & 1) === 1;
-                const a = data[i + 3];
-                if (a === 255) {
-                  const c = i + ((r >>> 4) % 3);
-                  const v = data[c];
-                  data[c] = up ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
-                } else {
-                  data[i + 3] = (up || a === 1) ? a + 1 : a - 1;
-                }
-              }
-            }
-          }
-          try {
-            if (self.OffscreenCanvasRenderingContext2D) {
-              const orig = self.OffscreenCanvasRenderingContext2D.prototype.getImageData;
-              self.OffscreenCanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
-                const img = orig.apply(this, arguments);
-                try { addNoise(img.data, 0, 0, img.width, img.height); } catch (e) {}
-                return img;
-              };
-            }
-          } catch (e) {}
-          try {
-            const hookGL = function (proto) {
-              if (!proto || !proto.getParameter) return;
-              const origGP = proto.getParameter;
-              proto.getParameter = function (param) {
-                if (param === 37445) return self.__MP_GPU_V;
-                if (param === 37446) return self.__MP_GPU_R;
-                return origGP.call(this, param);
-              };
-              if (proto.readPixels) {
-                const origRP = proto.readPixels;
-                proto.readPixels = function (x, y, w, h, format, type, pixels) {
-                  const ret = origRP.apply(this, arguments);
-                  try {
-                    if (pixels && pixels.length && w > 0 && h > 0) {
-                      const len = Math.min(pixels.length, w * h * 4);
-                      for (let i = 0; i < len; i += 4) {
-                        const px = (i / 4) | 0;
-                        const r = pixelHash(px % w, (px / w) | 0);
-                        if ((r & 15) !== 0) continue;
-                        if (pixels[i + 3] === 0) continue;
-                        const c = i + ((r >>> 4) % 3);
-                        const v = pixels[c];
-                        pixels[c] = ((r >>> 8) & 1) ? (v === 255 ? 254 : v + 1) : (v === 0 ? 1 : v - 1);
-                      }
-                    }
-                  } catch (e) {}
-                  return ret;
-                };
-              }
-            };
-            if (self.WebGLRenderingContext) hookGL(self.WebGLRenderingContext.prototype);
-            if (self.WebGL2RenderingContext) hookGL(self.WebGL2RenderingContext.prototype);
-          } catch (e) {}
-        }.toString() + ")();";
-      function wrapWorkerScript(scriptURL) {
-        const blob = new Blob(
-          [prelude, "\ntry{importScripts(", JSON.stringify(String(scriptURL)), ");}catch(e){}"],
-          { type: "text/javascript" }
-        );
-        return URL.createObjectURL(blob);
-      }
-      const WrappedWorker = function Worker(scriptURL, options) {
-        return new NativeWorker(wrapWorkerScript(scriptURL), options);
-      };
-      WrappedWorker.prototype = NativeWorker.prototype;
-      window.Worker = makeNative(WrappedWorker, "Worker");
-    }
-  } catch (e) {}
+  // Worker realms are handled over CDP, not by rewriting worker source.
+  //
+  // This block used to wrap the Worker constructor and hand the real script
+  // to a new blob that ran a prelude and then importScripts()'d it. That
+  // reached dedicated workers only, and it broke one kind of them outright:
+  // a module worker has no importScripts(), the call sat inside a
+  // try/catch, so the prelude loaded, the real script silently never did,
+  // and the worker answered nothing. Measured against stock Chromium 151 on
+  // the same page:
+  //
+  //   bare Chromium     classic: "Linux x86_64/16"   module: "Linux x86_64/16"
+  //   profile (wrapper) classic: "Win32/12"          module: TIMEOUT
+  //
+  // It also could not reach a service worker at all, since those are fetched
+  // by the browser from a URL rather than constructed here -- which left the
+  // one realm that outlives the page reporting the host.
+  //
+  // The injector now evaluates a worker identity script over CDP while the
+  // worker is still frozen by waitForDebuggerOnStart, which lands ahead of
+  // the worker's own first line and reaches dedicated, module, shared and
+  // service workers alike. See build_worker_identity_script in
+  // browser/cdp_inject.py. Having exactly one mechanism is also what keeps
+  // the canvas noise consistent: applying it here as well would give a
+  // classic worker a different fingerprint from a module one.
 
   // ==========================================
   // 6. CLIENT HINTS CONSISTENCY
@@ -665,7 +721,7 @@
   // WebRTC hardening when profile requests disable modes
   try {
     if (MP_WEBRTC_MODE === "disable") {
-      const StubPC = makeNative(function RTCPeerConnection() {
+      const StubPC = makeNativeCtor(function RTCPeerConnection() {
         throw new DOMException("WebRTC disabled for this profile", "NotSupportedError");
       }, 'RTCPeerConnection');
       window.RTCPeerConnection = StubPC;
@@ -674,7 +730,7 @@
       // Light candidate filter — strip host candidates when possible
       if (window.RTCPeerConnection) {
         const OrigPC = window.RTCPeerConnection;
-        window.RTCPeerConnection = makeNative(function RTCPeerConnection(config, constraints) {
+        window.RTCPeerConnection = makeNativeCtor(function RTCPeerConnection(config, constraints) {
           const cfg = Object.assign({}, config || {});
           if (!cfg.iceTransportPolicy) cfg.iceTransportPolicy = "relay";
           return new OrigPC(cfg, constraints);
@@ -686,56 +742,35 @@
   } catch(e) {}
 
   // ==========================================
-  // 7. WEB WORKER SPOOFING (CRITICAL FOR CREEPJS)
+  // 7. WEB WORKERS -- handled over CDP, not by rewriting blobs
   // ==========================================
-  try {
-    const workerPreamble = `
-      try {
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${TARGET_CORES}, configurable: true });
-        ${TARGET_MEMORY !== undefined ? `Object.defineProperty(navigator, 'deviceMemory', { get: () => ${TARGET_MEMORY}, configurable: true });` : 'delete navigator.deviceMemory;'}
-        Object.defineProperty(navigator, 'platform', { get: () => ${JSON.stringify(TARGET_PLATFORM)}, configurable: true });
-        if (self.OffscreenCanvas) {
-          const origGetContext = OffscreenCanvas.prototype.getContext;
-          OffscreenCanvas.prototype.getContext = function(type, ...args) {
-            const ctx = origGetContext.call(this, type, ...args);
-            if (ctx && (type === 'webgl' || type === 'webgl2')) {
-              const origGetParam = ctx.getParameter;
-              ctx.getParameter = function(p) {
-                if (p === 37445) return ${JSON.stringify(TARGET_GPU_VENDOR)};
-                if (p === 37446) return ${JSON.stringify(TARGET_GPU_RENDERER)};
-                return origGetParam.call(this, p);
-              };
-            }
-            return ctx;
-          };
-        }
-        if (self.Intl && self.Intl.DateTimeFormat) {
-          const origRes = Intl.DateTimeFormat.prototype.resolvedOptions;
-          Intl.DateTimeFormat.prototype.resolvedOptions = function() {
-            const r = origRes.apply(this, arguments);
-            r.timeZone = ${JSON.stringify(TARGET_TIMEZONE)};
-            return r;
-          };
-        }
-        Date.prototype.getTimezoneOffset = function() {
-          const dUTC = new Date(this.toLocaleString('en-US', { timeZone: 'UTC' }));
-          const dTZ = new Date(this.toLocaleString('en-US', { timeZone: ${JSON.stringify(TARGET_TIMEZONE)} }));
-          return Math.round((dUTC - dTZ) / 60000);
-        };
-      } catch(e) {}
-    `;
-
-    const originalCreateObjectURL = URL.createObjectURL;
-    URL.createObjectURL = makeNative(function createObjectURL(object) {
-      if (object instanceof Blob && (object.type === 'application/javascript' || object.type === 'text/javascript' || object.type === '')) {
-        try {
-          const newBlob = new Blob([workerPreamble, object], { type: object.type || 'application/javascript' });
-          return originalCreateObjectURL.call(this, newBlob);
-        } catch(e) {}
-      }
-      return originalCreateObjectURL.call(this, object);
-    }, 'createObjectURL');
-  } catch(e) {}
+  // This section used to hook URL.createObjectURL and prepend a preamble to
+  // every JavaScript Blob, so that a worker constructed from a blob URL
+  // inherited part of the identity. It has been removed for three reasons.
+  //
+  // It reached only blob workers. A worker loaded from an ordinary URL --
+  // which is what a bundler emits -- got nothing from it at all.
+  //
+  // It was a *partial* copy of the page's spoofing, so the realms disagreed
+  // where it did apply. Measured on this host, a dedicated worker and its own
+  // page hashed the same OffscreenCanvas render differently, because the
+  // preamble spoofed the WebGL strings but never added the canvas noise:
+  //
+  //   page / shared worker / service worker   cv: 2097776059
+  //   dedicated worker                        cv: 2367204759
+  //
+  // And it set navigator.platform, hardwareConcurrency and deviceMemory but
+  // not language or languages, so a worker answered in a mix of the profile
+  // and the host.
+  //
+  // Hooking URL.createObjectURL is also a broad, observable change to an API
+  // that has nothing to do with workers: every blob URL in the document went
+  // through it.
+  //
+  // The injector now arms Target.setAutoAttach on each page session, so a
+  // dedicated worker is frozen before its first line and given the same
+  // identity script as every other realm. See build_worker_identity_script
+  // in browser/cdp_inject.py.
 
   // ==========================================
   // 8. IFRAME REALM SPOOFING
@@ -748,12 +783,28 @@
           const win = origIFrameContentWindow.call(this);
           if (win) {
             try {
+              // First, and before anything else installs a hook here: a fresh
+              // realm ships a pristine Function.prototype.toString, and
+              // borrowing it is the one-line way around the masking in the
+              // parent. Patch it while this frame still has no hooks of its
+              // own to describe.
+              applyNativeMasking(win);
               applyHardwareSpoofs(win.navigator, win.Navigator ? win.Navigator.prototype : null);
               applyScreenSpoofs(win);
               applyTimezoneSpoofs(win);
               if (win.WebGLRenderingContext) hookWebGLProto(win.WebGLRenderingContext.prototype);
               if (win.WebGL2RenderingContext) hookWebGLProto(win.WebGL2RenderingContext.prototype);
               applyWebRTCSpoofs(win);
+              // Surfaces added after this hook was written were not reaching
+              // iframes: an audio or rect fingerprint taken inside a frame
+              // returned the host's, while the same read in the top document
+              // returned the profile's. One page disagreeing with itself is
+              // the tell these spoofs exist to prevent.
+              applyAudioSpoofs(win);
+              applyRectSpoofs(win);
+              applyWebGPUSpoofs(win);
+              applyBatterySpoofs(win);
+              applySpeechSpoofs(win);
             } catch(e) {}
           }
           return win;
@@ -792,7 +843,7 @@
       }
       PatchedDateTimeFormat.prototype = OriginalDateTimeFormat.prototype;
       PatchedDateTimeFormat.supportedLocalesOf = OriginalDateTimeFormat.supportedLocalesOf;
-      makeNative(PatchedDateTimeFormat, 'DateTimeFormat');
+      makeNativeCtor(PatchedDateTimeFormat, 'DateTimeFormat');
       scope.Intl.DateTimeFormat = PatchedDateTimeFormat;
 
       // 2. Intl.DateTimeFormat.prototype.resolvedOptions
@@ -804,14 +855,16 @@
         } catch(e) {}
         return res;
       };
-      makeNative(OriginalDateTimeFormat.prototype.resolvedOptions, 'resolvedOptions');
+      OriginalDateTimeFormat.prototype.resolvedOptions =
+        makeNative(OriginalDateTimeFormat.prototype.resolvedOptions, 'resolvedOptions');
 
       // 3. Date.prototype.getTimezoneOffset
       const originalGetTimezoneOffset = scope.Date.prototype.getTimezoneOffset;
       scope.Date.prototype.getTimezoneOffset = function() {
         return getTzOffsetMinutes(this, TARGET_TIMEZONE);
       };
-      makeNative(scope.Date.prototype.getTimezoneOffset, 'getTimezoneOffset');
+      scope.Date.prototype.getTimezoneOffset =
+        makeNative(scope.Date.prototype.getTimezoneOffset, 'getTimezoneOffset');
 
       // 4. Date.prototype.toString & toTimeString
       function formatTzDateString(d, tz, timeOnly) {
@@ -842,14 +895,16 @@
         if (isNaN(this.getTime())) return originalDateToString.apply(this, arguments);
         return formatTzDateString(this, TARGET_TIMEZONE, false);
       };
-      makeNative(scope.Date.prototype.toString, 'toString');
+      scope.Date.prototype.toString =
+        makeNative(scope.Date.prototype.toString, 'toString');
 
       const originalDateToTimeString = scope.Date.prototype.toTimeString;
       scope.Date.prototype.toTimeString = function() {
         if (isNaN(this.getTime())) return originalDateToTimeString.apply(this, arguments);
         return formatTzDateString(this, TARGET_TIMEZONE, true);
       };
-      makeNative(scope.Date.prototype.toTimeString, 'toTimeString');
+      scope.Date.prototype.toTimeString =
+        makeNative(scope.Date.prototype.toTimeString, 'toTimeString');
 
     } catch(e) {}
   }
@@ -881,11 +936,10 @@
         const origCandDesc = Object.getOwnPropertyDescriptor(scope.RTCIceCandidate.prototype, 'candidate');
         if (origCandDesc && origCandDesc.get) {
           const origGet = origCandDesc.get;
-          const newGet = function() {
+          const newGet = makeNative(function() {
             const val = origGet.call(this);
             return sanitizeCandidateStr(val);
-          };
-          makeNative(newGet, 'get candidate');
+          }, 'get candidate');
           Object.defineProperty(scope.RTCIceCandidate.prototype, 'candidate', {
             get: newGet,
             configurable: true,
@@ -896,13 +950,12 @@
         const origAddrDesc = Object.getOwnPropertyDescriptor(scope.RTCIceCandidate.prototype, 'address');
         if (origAddrDesc && origAddrDesc.get) {
           const origGet = origAddrDesc.get;
-          const newGet = function() {
+          const newGet = makeNative(function() {
             const val = origGet.call(this);
             if (!val) return val;
             if (val.endsWith('.local') || val === '0.0.0.0' || val.startsWith('127.')) return val;
             return TARGET_IP;
-          };
-          makeNative(newGet, 'get address');
+          }, 'get address');
           Object.defineProperty(scope.RTCIceCandidate.prototype, 'address', {
             get: newGet,
             configurable: true,
@@ -922,7 +975,8 @@
             }
             return obj;
           };
-          makeNative(scope.RTCIceCandidate.prototype.toJSON, 'toJSON');
+          scope.RTCIceCandidate.prototype.toJSON =
+            makeNative(scope.RTCIceCandidate.prototype.toJSON, 'toJSON');
         }
       }
 
@@ -931,11 +985,10 @@
         const origSdpDesc = Object.getOwnPropertyDescriptor(scope.RTCSessionDescription.prototype, 'sdp');
         if (origSdpDesc && origSdpDesc.get) {
           const origGet = origSdpDesc.get;
-          const newGet = function() {
+          const newGet = makeNative(function() {
             const val = origGet.call(this);
             return sanitizeCandidateStr(val);
-          };
-          makeNative(newGet, 'get sdp');
+          }, 'get sdp');
           Object.defineProperty(scope.RTCSessionDescription.prototype, 'sdp', {
             get: newGet,
             configurable: true,
@@ -950,7 +1003,8 @@
             if (obj && obj.sdp) obj.sdp = sanitizeCandidateStr(obj.sdp);
             return obj;
           };
-          makeNative(scope.RTCSessionDescription.prototype.toJSON, 'toJSON');
+          scope.RTCSessionDescription.prototype.toJSON =
+            makeNative(scope.RTCSessionDescription.prototype.toJSON, 'toJSON');
         }
       }
 
@@ -971,14 +1025,403 @@
           } catch(e) {}
           return report;
         };
-        makeNative(scope.RTCPeerConnection.prototype.getStats, 'getStats');
+        scope.RTCPeerConnection.prototype.getStats =
+          makeNative(scope.RTCPeerConnection.prototype.getStats, 'getStats');
       }
     } catch(e) {}
+  }
+
+  // ==========================================
+  // 11. AUDIOCONTEXT FINGERPRINT (PER-PROFILE DETERMINISTIC)
+  // ==========================================
+  // Measured before this existed: two profiles with different seeds, claiming
+  // a GTX 1660 and an RTX 3060 respectively, both rendered
+  //
+  //     OfflineAudioContext -> oscillator -> compressor  sum = 172.6716509661
+  //
+  // byte for byte. The audio stack is the host's, so every profile on one
+  // machine shared one audio fingerprint -- while canvas and WebGL differed
+  // per profile. Two "different computers" with identical audio is how
+  // profiles get linked to each other, which is worse than either of them
+  // being identified alone.
+  //
+  // The noise is a pure function of (seed, sample index, original value), so
+  // reading the same buffer twice gives the same answer. A value that moved
+  // between reads would be a louder tell than the shared one, and would also
+  // break anything doing real audio work. Amplitude is ~1e-7: inaudible, and
+  // far below the threshold where playback is affected.
+  function applyAudioSpoofs(scope) {
+    try {
+      const AB = scope.AudioBuffer;
+      if (AB && AB.prototype && AB.prototype.getChannelData) {
+        const orig = AB.prototype.getChannelData;
+        const seen = new WeakMap();
+        AB.prototype.getChannelData = makeNative(function(channel) {
+          const data = orig.call(this, channel);
+          try {
+            let done = seen.get(this);
+            if (!done) { done = new Set(); seen.set(this, done); }
+            if (done.has(channel)) return data;   // already nudged; stay stable
+            done.add(channel);
+            for (let i = 0; i < data.length; i++) {
+              if (data[i] !== 0) {
+                data[i] += (getNoiseValue(PROFILE_SEED + i) - 0.5) * 1e-7;
+              }
+            }
+          } catch (e) {}
+          return data;
+        }, 'getChannelData');
+      }
+
+      const AN = scope.AnalyserNode;
+      if (AN && AN.prototype) {
+        for (const name of ['getFloatFrequencyData', 'getByteFrequencyData']) {
+          const fn = AN.prototype[name];
+          if (!fn) continue;
+          AN.prototype[name] = makeNative(function(array) {
+            fn.call(this, array);
+            try {
+              for (let i = 0; i < array.length; i++) {
+                const n = (getNoiseValue(PROFILE_SEED + i) - 0.5);
+                array[i] += (name === 'getByteFrequencyData') ? 0 : n * 1e-4;
+              }
+            } catch (e) {}
+          }, name);
+        }
+      }
+    } catch (e) {}
+  }
+
+  // ==========================================
+  // 12. CLIENTRECTS / DOMRECT (PER-PROFILE DETERMINISTIC)
+  // ==========================================
+  // Same measurement, same problem: two profiles claiming different hardware
+  // both reported
+  //
+  //     getBoundingClientRect -> 10.093750, 20.187500, 30.296875, 40.390625
+  //
+  // identically, because sub-pixel layout metrics come from the host's
+  // rendering stack. Another vector linking every profile on the machine.
+  //
+  // The nudge is deterministic in the ORIGINAL value, so an unchanged element
+  // measures the same every time -- a rect that drifted between calls would
+  // break drag-and-drop, sticky headers and hit-testing on real sites, and a
+  // site polling one rect would see it move. It is kept at ~1e-3 of a pixel:
+  // enough to separate two machines, far too small to disturb layout logic.
+  function applyRectSpoofs(scope) {
+    try {
+      const nudge = (v) => {
+        if (typeof v !== 'number' || !isFinite(v) || v === 0) return v;
+        const k = Math.abs(Math.round(v * 1000));
+        return v + (getNoiseValue(PROFILE_SEED + k) - 0.5) * 1e-3;
+      };
+      const patchRect = (r) => {
+        try {
+          const x = nudge(r.x), y = nudge(r.y);
+          const w = nudge(r.width), h = nudge(r.height);
+          return new scope.DOMRect(x, y, w, h);
+        } catch (e) { return r; }
+      };
+
+      for (const proto of [scope.Element && scope.Element.prototype,
+                           scope.Range && scope.Range.prototype]) {
+        if (!proto) continue;
+        if (proto.getBoundingClientRect) {
+          const orig = proto.getBoundingClientRect;
+          proto.getBoundingClientRect = makeNative(function() {
+            return patchRect(orig.apply(this, arguments));
+          }, 'getBoundingClientRect');
+        }
+        if (proto.getClientRects) {
+          const origList = proto.getClientRects;
+          proto.getClientRects = makeNative(function() {
+            const list = origList.apply(this, arguments);
+            try {
+              const out = Array.prototype.map.call(list, patchRect);
+              out.item = (i) => out[i] || null;
+              return out;
+            } catch (e) { return list; }
+          }, 'getClientRects');
+        }
+      }
+    } catch (e) {}
+  }
+
+
+  // ==========================================
+  // 13. WEBGPU ADAPTER IDENTITY
+  // ==========================================
+  // WebGL and WebGPU describe the same card in different vocabularies and a
+  // page can read both. Measured on this host, one profile said both of these
+  // at once:
+  //
+  //   WebGL   ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ...)
+  //   WebGPU  requestAdapter() -> null
+  //
+  // No Windows machine with an RTX 4060 has no WebGPU adapter. The null came
+  // from our own launch configuration -- forcing --ozone-platform=x11, which
+  // the window placement needs, left Dawn without one. Measured against stock
+  // Chromium 151 on the same host, where an adapter IS returned, it described
+  // the host truthfully and identically for every profile:
+  //
+  //   {vendor: "intel", architecture: "gen-12lp"}
+  //
+  // So the surface both contradicted the WebGL claim and linked every profile
+  // on the machine to every other. The launcher now restores the adapter with
+  // --enable-features=Vulkan; this rewrites what it says about itself.
+  //
+  // Only the four identity fields are replaced. The adapter itself is the
+  // real one, so limits, features and requestDevice() keep working -- a
+  // synthesised adapter that failed on first use would be a louder tell than
+  // the one it replaced.
+  function applyWebGPUSpoofs(scope) {
+    try {
+      if (!TARGET_WEBGPU || !TARGET_WEBGPU.vendor) return;
+      const gpu = scope.navigator && scope.navigator.gpu;
+      if (!gpu || typeof gpu.requestAdapter !== 'function') return;
+      if (gpu.__mp_hooked) return;
+
+      const FIELDS = ['vendor', 'architecture', 'device', 'description'];
+      const disguise = (info) => {
+        if (!info) return info;
+        try {
+          for (const key of FIELDS) {
+            const value = TARGET_WEBGPU[key] != null ? TARGET_WEBGPU[key] : '';
+            Object.defineProperty(info, key, {
+              get: makeNative(function () { return value; }, `get ${key}`),
+              configurable: true,
+              enumerable: true
+            });
+          }
+        } catch (e) {}
+        return info;
+      };
+
+      const origRequestAdapter = gpu.requestAdapter;
+      gpu.requestAdapter = makeNative(function requestAdapter() {
+        return origRequestAdapter.apply(this, arguments).then(function (adapter) {
+          if (!adapter) return adapter;
+          try {
+            // `info` is a prototype getter returning a live GPUAdapterInfo;
+            // shadowing it with an own accessor leaves the rest of the
+            // adapter untouched.
+            disguise(adapter.info);
+            if (typeof adapter.requestAdapterInfo === 'function') {
+              const origInfo = adapter.requestAdapterInfo;
+              adapter.requestAdapterInfo = makeNative(function requestAdapterInfo() {
+                return origInfo.apply(this, arguments).then(disguise);
+              }, 'requestAdapterInfo');
+            }
+          } catch (e) {}
+          return adapter;
+        });
+      }, 'requestAdapter');
+
+      try {
+        Object.defineProperty(gpu, '__mp_hooked', { value: true, enumerable: false });
+      } catch (e) {}
+    } catch (e) {}
+  }
+
+
+  // ==========================================
+  // 14. BATTERY
+  // ==========================================
+  // navigator.getBattery() was untouched, so it answered with the host's
+  // real battery. Measured on this machine, every profile returned:
+  //
+  //   charging=false  level=0.28  chargingTime=Infinity  dischargingTime=5545
+  //
+  // Three things are wrong with that at once. It is the host's state, so it
+  // is identical across profiles -- and unlike a static fingerprint it
+  // *moves*, in lockstep, which is a stronger link than a shared constant:
+  // two "different computers" whose batteries drain together are one
+  // computer. It contradicts the claimed machine, since these profiles
+  // present as desktops with a discrete GPU and no desktop discharges. And
+  // dischargingTime is a live counter, so the value is close to unique at
+  // any instant.
+  //
+  // A desktop without a battery is exactly what the spec describes: charging
+  // true, level 1, chargingTime 0, dischargingTime Infinity. That is what
+  // Chrome reports on a desktop, so for a desktop profile there is nothing
+  // to invent -- the honest answer for the claimed machine is also the
+  // constant one, which removes the moving link entirely.
+  //
+  // Mobile profiles do have a battery, so a constant full charge would be
+  // its own anomaly; those get a per-profile deterministic level instead.
+  function applyBatterySpoofs(scope) {
+    try {
+      const nav = scope.navigator;
+      if (!nav || typeof nav.getBattery !== 'function') return;
+      if (nav.getBattery.__mp_hooked) return;
+
+      const isMobile = TARGET_TOUCH > 0;
+      let state;
+      if (!isMobile) {
+        state = { charging: true, level: 1, chargingTime: 0, dischargingTime: Infinity };
+      } else {
+        // Deterministic in the seed, quantised to the 1% steps the API
+        // reports, and kept away from the ends so it is unremarkable.
+        const pct = 20 + (Math.abs(PROFILE_SEED | 0) % 71);
+        const charging = ((Math.abs(PROFILE_SEED | 0) >> 7) & 1) === 1;
+        state = {
+          charging: charging,
+          level: Math.round(pct) / 100,
+          chargingTime: charging ? (pct >= 99 ? 0 : 60 * (100 - pct)) : Infinity,
+          dischargingTime: charging ? Infinity : 60 * pct
+        };
+      }
+
+      const orig = nav.getBattery;
+      const hooked = makeNative(function getBattery() {
+        return orig.apply(this, arguments).then(function (manager) {
+          try {
+            // Shadow the prototype getters on the real BatteryManager rather
+            // than returning a stand-in, so instanceof and the change events
+            // keep working.
+            for (const key of Object.keys(state)) {
+              const value = state[key];
+              Object.defineProperty(manager, key, {
+                get: makeNative(function () { return value; }, `get ${key}`),
+                configurable: true,
+                enumerable: true
+              });
+            }
+          } catch (e) {}
+          return manager;
+        });
+      }, 'getBattery');
+      try {
+        Object.defineProperty(hooked, '__mp_hooked', { value: true, enumerable: false });
+      } catch (e) {}
+      nav.getBattery = hooked;
+    } catch (e) {}
+  }
+
+
+  // ==========================================
+  // 15. SPEECH SYNTHESIS VOICES
+  // ==========================================
+  // speechSynthesis.getVoices() returned an empty array. Measured on this
+  // host, both in a profile and in stock Chromium 151:
+  //
+  //   voices: 0
+  //
+  // That is normal for a Linux box with no speech-dispatcher installed, and
+  // impossible for the Windows machine the profile claims to be: Windows
+  // ships Microsoft David and Zira with the OS, so every Chrome on Windows
+  // enumerates at least those. An empty voice list on a Win32 navigator is a
+  // platform contradiction, and it is one of the cheapest checks a probe can
+  // run -- one property access, no permission, no user gesture.
+  //
+  // The voices are built against the real SpeechSynthesisVoice prototype so
+  // instanceof holds. The core set is deliberately NOT randomised per
+  // profile: nearly every Windows install has exactly David and Zira, so
+  // identical lists are what real machines look like here, and adding noise
+  // would make profiles *less* plausible rather than more. Only the optional
+  // language packs vary, because those genuinely differ between machines.
+  function applySpeechSpoofs(scope) {
+    try {
+      const synth = scope.speechSynthesis;
+      if (!synth || typeof synth.getVoices !== 'function') return;
+      if (synth.getVoices.__mp_hooked) return;
+
+      const isWindows = /Win/i.test(TARGET_PLATFORM || '');
+      const isMac = /Mac/i.test(TARGET_PLATFORM || '');
+      if (!isWindows && !isMac) return;  // a Linux claim on a Linux host is honest
+
+      const lang = TARGET_LANGUAGE || 'en-US';
+      let core, optional;
+      if (isWindows) {
+        core = [
+          ['Microsoft David - English (United States)', 'en-US'],
+          ['Microsoft Zira - English (United States)', 'en-US']
+        ];
+        optional = [
+          ['Microsoft Mark - English (United States)', 'en-US'],
+          ['Microsoft Hazel - English (Great Britain)', 'en-GB'],
+          ['Microsoft Catherine - English (Australia)', 'en-AU']
+        ];
+      } else {
+        core = [['Alex', 'en-US'], ['Samantha', 'en-US'], ['Daniel', 'en-GB']];
+        optional = [['Victoria', 'en-US'], ['Fred', 'en-US'], ['Karen', 'en-AU']];
+      }
+
+      // Chrome's own network voices, present on every platform.
+      const google = [
+        ['Google US English', 'en-US'],
+        ['Google UK English Female', 'en-GB'],
+        ['Google UK English Male', 'en-GB']
+      ];
+
+      const chosen = core.concat(
+        optional.filter((_, i) => ((Math.abs(PROFILE_SEED | 0) >> i) & 1) === 1)
+      );
+
+      const Proto = scope.SpeechSynthesisVoice ? scope.SpeechSynthesisVoice.prototype : null;
+      // Exactly one voice is the default. Marking every local voice whose
+      // language matches would have flagged three at once, which no browser
+      // does and which is a more specific anomaly than the empty list it
+      // replaced.
+      let defaultTaken = false;
+      const build = (name, voiceLang, local) => {
+        const isDefault = !defaultTaken && local && voiceLang === lang;
+        if (isDefault) defaultTaken = true;
+        const voice = Proto ? Object.create(Proto) : {};
+        const props = {
+          name: name,
+          lang: voiceLang,
+          default: isDefault,
+          localService: local,
+          voiceURI: local && isMac
+            ? 'com.apple.speech.synthesis.voice.' + name.toLowerCase()
+            : name
+        };
+        for (const key of Object.keys(props)) {
+          const value = props[key];
+          try {
+            Object.defineProperty(voice, key, {
+              get: makeNative(function () { return value; }, `get ${key}`),
+              configurable: true,
+              enumerable: true
+            });
+          } catch (e) {}
+        }
+        return voice;
+      };
+
+      const voices = chosen.map(v => build(v[0], v[1], true))
+        .concat(google.map(v => build(v[0], v[1], false)));
+
+      const hooked = makeNative(function getVoices() { return voices.slice(); }, 'getVoices');
+      try {
+        Object.defineProperty(hooked, '__mp_hooked', { value: true, enumerable: false });
+      } catch (e) {}
+      try {
+        Object.defineProperty(synth, 'getVoices', {
+          value: hooked, configurable: true, writable: true
+        });
+      } catch (e) { synth.getVoices = hooked; }
+
+      // Sites commonly wait for voiceschanged before reading the list; with
+      // a synchronous answer available the event still has to arrive, or
+      // those sites hang where a real browser would not.
+      try {
+        scope.setTimeout(function () {
+          try { synth.dispatchEvent(new scope.Event('voiceschanged')); } catch (e) {}
+        }, 0);
+      } catch (e) {}
+    } catch (e) {}
   }
 
   // Apply to main window
   applyTimezoneSpoofs(window);
   applyWebRTCSpoofs(window);
+  applyAudioSpoofs(window);
+  applyRectSpoofs(window);
+  applyWebGPUSpoofs(window);
+  applyBatterySpoofs(window);
+  applySpeechSpoofs(window);
 
   // ==========================================
   // NAVIGATOR.PLUGINS + MIMETYPES CONSISTENCY
@@ -1017,9 +1460,9 @@
       fakePL.item = i => fakePL[i] || null;
       fakePL.namedItem = n => [plugin1, plugin2, plugin3].find(p => p.name === n) || null;
       fakePL.refresh = () => {};
-      makeNative(fakePL.item, 'item');
-      makeNative(fakePL.namedItem, 'namedItem');
-      makeNative(fakePL.refresh, 'refresh');
+      fakePL.item = makeNative(fakePL.item, 'item');
+      fakePL.namedItem = makeNative(fakePL.namedItem, 'namedItem');
+      fakePL.refresh = makeNative(fakePL.refresh, 'refresh');
       Object.defineProperty(Navigator.prototype, 'plugins', {
         get: makeNative(() => fakePL, 'get plugins'),
         configurable: true, enumerable: true
@@ -1029,8 +1472,8 @@
       fakeML[0] = pdfMime; fakeML[1] = pdfXMime;
       fakeML.item = i => fakeML[i] || null;
       fakeML.namedItem = n => [pdfMime, pdfXMime].find(m => m.type === n) || null;
-      makeNative(fakeML.item, 'item');
-      makeNative(fakeML.namedItem, 'namedItem');
+      fakeML.item = makeNative(fakeML.item, 'item');
+      fakeML.namedItem = makeNative(fakeML.namedItem, 'namedItem');
       Object.defineProperty(Navigator.prototype, 'mimeTypes', {
         get: makeNative(() => fakeML, 'get mimeTypes'),
         configurable: true, enumerable: true
@@ -1126,19 +1569,40 @@
     const MP_DEVICE_IDS = (typeof __MP_INLINE_CFG__ !== 'undefined' && __MP_INLINE_CFG__.mediaDeviceIds)
       ? __MP_INLINE_CFG__.mediaDeviceIds
       : { audioinput: null, audiooutput: null, videoinput: null };
+    const MP_DEVICE_GROUPS = (typeof __MP_INLINE_CFG__ !== 'undefined' && __MP_INLINE_CFG__.mediaDeviceGroupIds)
+      ? __MP_INLINE_CFG__.mediaDeviceGroupIds
+      : { audioinput: null, audiooutput: null, videoinput: null };
 
     if (MP_DEVICE_IDS.audioinput && navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
       const origEnum = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
       navigator.mediaDevices.enumerateDevices = makeNative(async function() {
         try {
           const devices = await origEnum();
-          // Replace device IDs with stable seeded values
-          return devices.map((dev, i) => {
-            let stableId = dev.deviceId;
-            if (dev.kind === 'audioinput' && MP_DEVICE_IDS.audioinput) stableId = MP_DEVICE_IDS.audioinput;
-            if (dev.kind === 'audiooutput' && MP_DEVICE_IDS.audiooutput) stableId = MP_DEVICE_IDS.audiooutput;
-            if (dev.kind === 'videoinput' && MP_DEVICE_IDS.videoinput) stableId = MP_DEVICE_IDS.videoinput;
-            return { kind: dev.kind, label: dev.label, deviceId: stableId, groupId: dev.groupId };
+          return devices.map((dev) => {
+            // Only substitute what the browser is ALREADY exposing. Without
+            // media permission Chrome returns deviceId '' (and label '',
+            // groupId '') for every device -- measured on stock Chromium 151.
+            // Replacing that with a stable 64-char id produced a combination
+            // no real browser emits, an id beside an empty label and empty
+            // group, and handed every site the same persistent identifier for
+            // the life of the profile. Spoofing that volunteers an identifier
+            // where the host volunteers none is worse than not spoofing.
+            const realId = dev.deviceId || '';
+            const realGroup = dev.groupId || '';
+            let id = realId;
+            let group = realGroup;
+            if (realId) {
+              const byKind = MP_DEVICE_IDS[dev.kind];
+              if (byKind) id = byKind;
+            }
+            if (realGroup) {
+              const g = MP_DEVICE_GROUPS[dev.kind];
+              if (g) group = g;
+            }
+            // 'default' and 'communications' are Chrome's own reserved ids;
+            // renaming them breaks getUserMedia and is itself a tell.
+            if (realId === 'default' || realId === 'communications') id = realId;
+            return { kind: dev.kind, label: dev.label, deviceId: id, groupId: group };
           });
         } catch(e) {
           return origEnum();

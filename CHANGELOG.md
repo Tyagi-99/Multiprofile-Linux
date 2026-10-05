@@ -1,3 +1,171 @@
+## Unreleased
+
+- **The claimed Chrome version now comes from the installed engine** (audit
+  finding F5, new `engine.py`, `fingerprint/_core.py`, `browser/launcher.py`,
+  `browser/cdp_identity.py`, `devices/*`, `api/user_agents.py`): every UA pool,
+  all seven device presets and the UA picker were written against Chrome 131,
+  while the engine actually running them is whatever Chromium the host has —
+  141 in CI, 151 on the dev machine, roughly twenty stable releases later. A
+  page could tell twice over: by probing an engine feature that shipped after
+  131, and by cohort alone, since Chrome 131 has negligible real-world share.
+  - New `engine.py` asks the binary for its version once per process and owns
+    the rewrites. Pool defaults and preset UAs are now templates realigned to
+    that answer; `browser_version_policy` moved from `"pinned:131"` to
+    `"match-engine"`.
+  - **An explicit `profile.userAgent` is never renumbered** — an operator may
+    be matching a fingerprint bought elsewhere. The launch notes report the
+    disagreement instead, and the client hints follow the UA, so the two can
+    never claim different browsers.
+  - **An unknown engine invents nothing.** No binary, an unreadable binary or
+    `MULTIPROFILE_CLAIM_ENGINE_VERSION=0` leaves the literals in place and
+    records `source: "unavailable"`; the launch note calls the claim
+    `UNVERIFIED` rather than reporting a pass.
+  - The UA string carries the reduced `<major>.0.0.0` form and
+    `Sec-CH-UA-Full-Version-List` carries the real build, as a real Chrome
+    does. Both used to carry `131.0.0.0`, a patch version no Chrome release
+    has ever had.
+  - Fixed on the way: `_chrome_version()` matched only `Chrome/`, so the iPhone
+    pool (`CriOS/`) always fell back to the 131 literal; and
+    `GET /api/devices/<id>` served the raw catalogue, so the device page and
+    the wire described different browsers.
+  - Settings: `MULTIPROFILE_ENGINE_VERSION` pins a claimed version explicitly;
+    `MULTIPROFILE_CLAIM_ENGINE_VERSION=0` turns alignment off. `/api/health`
+    reports the resolved engine under `engine`.
+
+- **Profiles no longer browse as the host machine** (audit finding F1,
+  `fingerprint/_core.py`, `browser/cdp_identity.py`, `browser/cdp_inject.py`,
+  `browser/launcher.py`, new `browser/identity_assert.py`): a profile created
+  without a device preset — the one the quick-create button makes — sent the
+  host's own `User-Agent` and `sec-ch-ua-*` headers while its JavaScript
+  claimed to be Windows. Measured on the wire before the fix:
+  `Mozilla/5.0 (X11; Linux x86_64) … Chrome/141` with
+  `sec-ch-ua-platform: "Linux"` beside `navigator.platform: "Win32"`. That
+  contradiction is something no real browser can produce, so the profile was
+  *more* identifiable than an unmodified browser. Three causes, all fixed:
+  - **No User-Agent existed to set.** `build_fingerprint` echoed
+    `profile["userAgent"]`, which is empty on the quick-create path, so the
+    launcher passed no `--user-agent` at all. Every fingerprint pool now names
+    a default UA whose Chrome major matches the client-hint brands the same
+    pool builds, and `--user-agent` is set on **every** launch.
+  - **The override was discarded as it was applied.** `apply_ua_override()`
+    sent `Network.setUserAgentOverride` down a one-shot WebSocket; Chromium
+    scopes that override to the DevTools session that set it, so it vanished
+    when the socket closed — while the ACK made the function return `True` and
+    the launcher log "override applied". It now takes a **held** session and
+    returns `False` whenever it does not have one; the one-shot helper that
+    made the mistake possible is deleted rather than documented. The identity
+    injector applies the same override per attached target, so tabs opened
+    later are covered too, and the launcher holds one CDP session open for the
+    browser's lifetime.
+  - **Nothing ever checked.** New `identity_assert` module: after the identity
+    is installed the launcher stands up a loopback server, makes the browser
+    navigate to it, and compares the headers that arrive against the identity
+    it intended. A **proven mismatch now fails the launch** (state `error`,
+    `identity_mismatch`) instead of being reported as healthy; a probe that
+    cannot run is recorded as unverified and is never treated as a pass.
+    Settings: `identity_assert_enabled` / `MULTIPROFILE_IDENTITY_ASSERT`.
+    The evidence travels with the launch result (`identityAssertion`) and in
+    the runtime registry (`identity_ok`, `identity_detail`).
+
+  Also fixed, found by the new assertion once the override started applying:
+  `acceptLanguage` was passed as a finished header, so Chromium emitted
+  `en-US,en;q=0.9;q=0.9` — malformed, and a tell in itself. It is now passed
+  as the language list Chromium expects.
+
+  Known residual: a tab's very first document request is issued before its
+  per-target override lands, so `sec-ch-ua-platform` on that one request still
+  reflects the host. Closing it means rewriting headers in the browser process
+  (browser-level `Fetch` interception) and is tracked in the audit report, not
+  papered over — the assertion measures a navigation and says so.
+
+- **evasion.js no longer announces itself** (audit finding F7,
+  `src/extension/evasion.js`, `config.py`, `browser/launcher.py`): the script
+  opened with `console.log("[Evasion] evasion.js active on:", location.href)`,
+  which ran on every page and in every frame — twelve lines above its own
+  comment saying "No console.log — logging extension activity is a detection
+  signal". A page cannot read past console output, so it was never directly
+  exploitable, but it was a plain-text confession in any DevTools session,
+  screen share, demo or support screenshot. The line now runs only when
+  `MULTIPROFILE_EVASION_DEBUG=1` (setting `evasion_debug`, default off) puts
+  `debug: true` in the injected config, and it was moved *after* the config is
+  parsed so it can be switched on at all. With the flag off the page config
+  gains no key and the browser produces no console output at all (verified
+  live: 0 messages off, 1 per document on). It is kept rather than deleted
+  because the count of those lines for one document is the only honest way to
+  measure how many times the script ran — the measurement that caught F2 — and
+  the launch notes say loudly when it is on.
+
+- **The cleartext proxy password is no longer on disk — including the copies
+  already there** (audit finding F4, `storage/xdg.py`, `app.py`,
+  `browser/launcher.py`): the extension staging step wrote
+  `<profile>/extension/proxy.json` (the proxy username and password in
+  cleartext, decrypted straight out of the OS keychain) and
+  `<profile>/extension/cookies.json` (the whole cookie jar) with a bare
+  `write_text`, so the umask decided the mode — **0644, world-readable**,
+  undoing the keychain encryption the launcher had just used. Every other
+  writer in the codebase goes through `secure_write_json` (0600).
+  - Removing the writer (see F2 above) stops new ones, but does nothing for
+    the copies sitting in a user's data directory right now. New
+    `purge_legacy_extension_staging()` **deletes** those directories — at
+    startup for every profile, and at launch for the profile being launched,
+    so a process that started before the sweep still cleans as it goes.
+    Deleted rather than hardened: nothing reads them any more, and both files
+    are copies (the canonical cookie jar is `cookies/<id>.json`, the canonical
+    password is in the keychain), so a 0600 plaintext secret would be a
+    plaintext secret kept for no reason. A directory that cannot be removed
+    has its two secret files tightened instead, and the next sweep retries.
+  - `test_file_permissions.py` gains a guard that the launcher contains
+    exactly one `write_text` — the temp file it renames over Chrome's own
+    `Preferences` — so a third umask-decided write cannot appear unnoticed.
+
+- **evasion.js now reaches a page exactly once** (audit finding F2,
+  `browser/launcher.py`, `browser/cdp_inject.py`, `browser/health.py`): the
+  launcher still passed `--load-extension` and `--disable-extensions-except`
+  and still staged a per-profile copy of the extension, *while* the CDP
+  injector installed the same script. Google Chrome refuses those flags
+  ("--disable-extensions-except is not allowed in Google Chrome, ignoring") —
+  which is why CDP injection was written — but Chromium honours them, so on
+  Chromium the script ran twice per document and on Chrome once. Measured on
+  Chromium 141 with a real `http://` page: two `[Evasion] evasion.js active
+  on: <url>` lines for one document before, one after. Two runs mean the
+  canvas and WebGL noise is applied twice, so the rendered fingerprint is
+  neither the one the config specifies nor reproducible across engines.
+  - Both flags and the whole `_prepare_extension` staging step are removed.
+    CDP is the only route. `src/extension/` stays as the *source* of
+    `evasion.js` and is no longer loaded into any browser.
+  - Exclusivity (`allow_webstore_extensions=False`, the default) now means
+    plain `--disable-extensions`: there is no extension of ours to except.
+  - Carried over from the staging step so they were not lost silently: the
+    `__PROFILE_TIMEZONE__` / `__PROFILE_ALLOCATED_IP__` / `__PROFILE_SEED__`
+    substitutions (`build_identity_script` takes a `replacements` mapping) and
+    the explicit `webrtcMode`.
+  - `health.extension_loaded` tested for the staging copy, which would have
+    read False on every healthy profile once the copy was gone. It now reports
+    the injector's `inject_ok` — whether the script actually reached the
+    browser, which is what the field was always meant to mean.
+  - The audit's own measurement for this finding was wrong and is corrected in
+    the report: `toString(toDataURL).match(/copy = null/g).length == 2` counts
+    2 for a *single* layer, and `evasion.js` already had an `alreadyShielded`
+    guard that kept the canvas hook from stacking. The script's execution count
+    per document is the honest measure; the finding held.
+
+- **Supervisor restart budget now bounds crash loops** (`browser/supervisor.py`):
+  `max_restart_attempts` lived in a local loop variable, so it only bounded
+  consecutive *launch failures* within a single death. A browser that launched
+  successfully and then died on the next watchdog tick got a brand-new budget
+  every time and was relaunched forever (field symptom: `relaunch ... succeeded
+  (attempt 1)` repeating every ~11s). The budget is now spent per **crash
+  episode**: a restart counts as a recovery only once the relaunched browser
+  survives `restart_stability_s` (new setting, default 60s,
+  `MULTIPROFILE_SUPERVISOR_STABILITY_S`). Deaths inside that window continue
+  the episode and spend the same budget, so a crash-looping profile is parked
+  in `error` after 3 restarts and waits for an explicit operator restart;
+  surviving the window resets the budget so unrelated crashes each get a full
+  allowance. Exponential backoff now spans deaths too, and the supervisor warns
+  at startup if the stability window is shorter than the check interval (where
+  the budget could never bind). Two regression tests cover the loop and the
+  reset.
+
 ## 1.9.0 (2026-09-24)
 
 - **Premium console redesign**: the old single-file console (`src/static/app.js`) is replaced by a Next.js 15 / React 19 / TypeScript / Tailwind v4 static export, served from the same `src/static` directory and packaged into the deb exactly as before — no Node.js runtime needed on the machine. Hash routing keeps every deep link working; all Flask API contracts, the browser launcher, supervisor, 33 device presets (with honest support badges), fingerprints, proxies/gateways, jobs, audit, backups, and proxy fail-closed behaviour are preserved.

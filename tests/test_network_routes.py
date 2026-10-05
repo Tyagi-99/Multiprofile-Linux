@@ -105,7 +105,8 @@ def test_consistency_200_shape(monkeypatch):
     assert body["profile_id"] == "p1"
     assert body["status"] in ("PASS", "WARNING", "ERROR")
     domains = [c["domain"] for c in body["checks"]]
-    assert domains == ["geo", "device", "platform", "mobile", "browser", "gpu_webgl"]
+    assert domains == ["geo", "device", "platform", "mobile", "browser",
+                       "gpu_webgl", "webgpu"]
     # Profile has no deviceId -> graceful WARNING, not a crash.
     device = next(c for c in body["checks"] if c["domain"] == "device")
     assert device["status"] == "WARNING"

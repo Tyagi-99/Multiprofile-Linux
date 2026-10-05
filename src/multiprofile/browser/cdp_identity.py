@@ -11,6 +11,11 @@ Why this matters:
     headers say 'Linux', advanced bot-detection identifies the mismatch.
 
     Network.setUserAgentOverride with userAgentMetadata aligns both surfaces.
+
+    It only aligns them for as long as the DevTools session that sent it
+    stays open. Everything in this module is therefore built around a
+    caller-held session: :class:`PinnedCdpSession`, and an
+    :func:`apply_ua_override` that refuses to run without one.
 """
 from __future__ import annotations
 
@@ -20,6 +25,8 @@ import re
 import time
 import urllib.request
 from typing import Any
+
+from ..engine import detect_engine_version
 
 log = logging.getLogger("multiprofile.browser.cdp_identity")
 
@@ -41,38 +48,6 @@ def _cdp_get(port: int, path: str) -> Any:
         return json.loads(r.read())
 
 
-def _pick_page_ws_url(port: int) -> str | None:
-    """Return the WebSocket URL of the best page target on ``port``.
-
-    Chrome always has internal chrome:// pages (omnibox popups, webui).
-    Sending emulation/UA commands to those is ACKed but applies to the
-    popup, not the real page — and /json order is not stable, so picking
-    "the first page" flaps between calls. Prefer a real content page
-    (http/https/data/about/file/blob); keep the first page of any kind
-    only as a last resort. Returns None when CDP is unreachable or has no
-    page target.
-    """
-    try:
-        targets = _cdp_get(port, "/json")
-    except Exception as e:
-        log.debug("CDP /json failed on port %s: %s", port, e)
-        return None
-
-    fallback_url: str | None = None
-    for t in targets:
-        if t.get("type") != "page":
-            continue
-        url = t.get("url") or ""
-        if url.startswith("chrome://") or url.startswith("chrome-extension://"):
-            if fallback_url is None:
-                fallback_url = t.get("webSocketDebuggerUrl")
-            continue
-        ws_url = t.get("webSocketDebuggerUrl")
-        if ws_url:
-            return ws_url
-    return fallback_url
-
-
 class PinnedCdpSession:
     """One CDP WebSocket pinned to a page target, kept OPEN by the caller.
 
@@ -84,11 +59,18 @@ class PinnedCdpSession:
     after A closes). Only ``Emulation.setDeviceMetricsOverride`` survives a
     disconnect.
 
-    Consequence: one-shot "connect, send, close" helpers (like
-    :func:`_cdp_ws_send`) can NEVER make UA/touch emulation persist. Any
-    caller that needs those overrides to stay applied must hold a
-    PinnedCdpSession open for as long as the emulation should apply and
-    close it explicitly when done.
+    Consequence: one-shot "connect, send, close" helpers can NEVER make
+    UA/touch emulation persist. Any caller that needs those overrides to
+    stay applied must hold a PinnedCdpSession open for as long as the
+    emulation should apply and close it explicitly when done.
+
+    This module deliberately ships NO one-shot sender. It used to, and
+    :func:`apply_ua_override` used it: the override was ACKed, reported as
+    applied, and discarded microseconds later when the socket closed, so
+    every profile without a device preset browsed with the host's own
+    User-Agent and Client Hints while its JavaScript claimed otherwise.
+    The helper is gone rather than merely documented, because a footgun
+    that only a comment guards gets picked up again.
     """
 
     def __init__(self, ws: Any, target_url: str):
@@ -97,19 +79,38 @@ class PinnedCdpSession:
         self._next_id = 0
         self._closed = False
 
-    def send(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    @property
+    def is_open(self) -> bool:
+        """True while this session can still carry a command.
+
+        Session-scoped overrides live and die with the session, so callers
+        that promise persistence must be able to ask.
+        """
+        return not self._closed
+
+    def send(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Send one CDP command on the held session; return the response.
 
         Matches ``apply_cdp_plan``'s ``send(method, params) -> dict`` sender
-        contract. Returns None when the session is closed or the command
-        gets no response within the timeout.
+        contract. ``session_id`` addresses a flat child session (a target
+        attached through this one). Returns None when the session is closed
+        or the command gets no response within the timeout.
         """
         if self._closed:
             return None
         try:
             self._next_id += 1
             msg_id = self._next_id
-            self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params}))
+            msg: dict[str, Any] = {"id": msg_id, "method": method, "params": params}
+            if session_id:
+                msg["sessionId"] = session_id
+            self._ws.send(json.dumps(msg))
             deadline = time.monotonic() + _CDP_TIMEOUT
             while time.monotonic() < deadline:
                 raw = self._ws.recv()
@@ -128,7 +129,7 @@ class PinnedCdpSession:
         self._closed = True
         try:
             self._ws.close()
-        except Exception:  # noqa: BLE001 - best effort
+        except Exception:  # noqa: BLE001,S110 - best effort
             pass
 
     def __enter__(self) -> "PinnedCdpSession":
@@ -148,7 +149,7 @@ def open_pinned_cdp_session(port: int) -> PinnedCdpSession | None:
     """
     try:
         targets = _cdp_get(port, "/json")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.debug("CDP /json failed on port %s: %s", port, e)
         return None
     picked_url: str | None = None
@@ -187,66 +188,36 @@ def open_pinned_cdp_session(port: int) -> PinnedCdpSession | None:
     return PinnedCdpSession(ws, picked_page_url or fallback_page_url)
 
 
-def _cdp_ws_send(port: int, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
-    """Send one CDP command over a raw WebSocket and return the response.
+def open_pinned_browser_session(port: int) -> PinnedCdpSession | None:
+    """Open a session on the BROWSER endpoint; stays open, caller-owned.
 
-    One-shot semantics: connects, sends, reads the response, closes.
-    NOTE: because the session closes immediately, session-scoped overrides
-    (Network.setUserAgentOverride, Emulation.setTouchEmulationEnabled) do
-    NOT persist — use :func:`open_pinned_cdp_session` when the effect must
-    outlive the call.
+    The browser endpoint is the only one that can create and close targets,
+    which is what the launch-time identity probe needs (see
+    :mod:`multiprofile.browser.identity_assert`). Returns None when CDP is
+    unreachable or websocket-client is missing.
     """
-    import threading
-
-    ws_url = _pick_page_ws_url(port)
+    try:
+        version = _cdp_get(port, "/json/version")
+    except Exception as e:  # noqa: BLE001 - an unreachable port is a None session
+        log.debug("CDP /json/version failed on port %s: %s", port, e)
+        return None
+    ws_url = (version or {}).get("webSocketDebuggerUrl") or ""
     if not ws_url:
         return None
-
-    # Parse ws://127.0.0.1:<port>/devtools/page/<id>
-    m = re.match(r"ws://([^/]+)(.*)", ws_url)
-    if not m:
+    try:
+        import websocket  # type: ignore
+    except ImportError:
+        log.debug("websocket-client not installed; install python3-websocket")
         return None
-    host_port = m.group(1)
-    host, _, port_s = host_port.partition(":")
-
-    result: dict[str, Any] | None = None
-    error_box: list[Exception] = []
-
-    def _run():
-        nonlocal result
-        try:
-            import websocket  # type: ignore
-        except ImportError:
-            error_box.append(ImportError("websocket-client not installed; install python3-websocket"))
-            return
-        try:
-            ws = websocket.WebSocket()
-            # No Origin header, so Chrome's default DevTools origin check can
-            # stay on and --remote-allow-origins=* is no longer needed.
-            ws.connect(ws_url, timeout=_CDP_TIMEOUT, suppress_origin=True)
-            msg_id = 1
-            payload = json.dumps({"id": msg_id, "method": method, "params": params})
-            ws.send(payload)
-            deadline = time.monotonic() + _CDP_TIMEOUT
-            while time.monotonic() < deadline:
-                raw = ws.recv()
-                if not raw:
-                    break
-                obj = json.loads(raw)
-                if obj.get("id") == msg_id:
-                    result = obj
-                    break
-            ws.close()
-        except Exception as e:
-            error_box.append(e)
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    t.join(timeout=_CDP_TIMEOUT + 1)
-
-    if error_box:
-        log.debug("CDP WS error: %s", error_box[0])
-    return result
+    try:
+        ws = websocket.WebSocket()
+        # No Origin header, so Chrome's default DevTools origin check can
+        # stay on and --remote-allow-origins=* is no longer needed.
+        ws.connect(ws_url, timeout=_CDP_TIMEOUT, suppress_origin=True)
+    except Exception as e:  # noqa: BLE001
+        log.debug("CDP browser session connect failed on port %s: %s", port, e)
+        return None
+    return PinnedCdpSession(ws, "browser")
 
 
 # ---------------------------------------------------------------------------
@@ -302,10 +273,15 @@ def _extract_ua_metadata(fingerprint: dict[str, Any]) -> dict[str, Any]:
     platform_version = fingerprint.get("platformVersion") or "15.0.0"
     is_mobile = fingerprint.get("touch", 0) > 0
 
-    # Extract Chrome version from UA string
+    # Extract the Chromium version from the UA string. The fallback is the
+    # installed engine, not a literal: this branch is only reached when the
+    # fingerprint carries no brand lists, and inventing Chrome 131 there was
+    # the same stale claim F5 is about. CriOS/Edg count — the iPhone pool's
+    # UA has no "Chrome/" token at all.
     ua_str = fingerprint.get("userAgent") or ""
-    chrome_version = "131.0.0.0"
-    m = re.search(r"Chrome/(\d+\.\d+\.\d+\.\d+)", ua_str)
+    engine = detect_engine_version()
+    chrome_version = engine.full or "131.0.0.0"
+    m = re.search(r"\b(?:Chrome|Chromium|CriOS|Edg|EdgA|EdgiOS|HeadlessChrome)/(\d+\.\d+\.\d+\.\d+)", ua_str)
     if m:
         chrome_version = m.group(1)
 
@@ -330,41 +306,162 @@ def _extract_ua_metadata(fingerprint: dict[str, Any]) -> dict[str, Any]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def apply_ua_override(
-    cdp_port: int,
+UA_OVERRIDE_METHOD = "Network.setUserAgentOverride"
+
+
+def build_ua_override_params(
     fingerprint: dict[str, Any],
-    ua_string: str,
-) -> bool:
-    """Apply UA + client-hint metadata via CDP Network.setUserAgentOverride.
+    ua_string: str = "",
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return the ``Network.setUserAgentOverride`` params for one identity.
 
-    Returns True if the override was applied, False if it failed
-    (e.g. websocket-client not available — non-fatal).
+    Pure: no I/O, no session. This is the single description of what the
+    profile is supposed to look like on the wire, so the thing that applies
+    it and the thing that verifies it (``identity_assert``) cannot drift
+    apart. Returns None when there is no UA string to claim at all — the
+    caller must then treat the profile as unmasked rather than launch it
+    and hope.
+
+    ``metadata`` overrides the client-hint block derived from the
+    fingerprint; the device-preset path passes the preset's own hints so
+    the headers and the preset agree.
     """
-    if not ua_string:
-        ua_string = fingerprint.get("userAgent") or ""
-    if not ua_string:
-        return False
-
-    metadata = _extract_ua_metadata(fingerprint)
-    language = fingerprint.get("language") or "en-US"
-
-    params = {
-        "userAgent": ua_string,
-        "acceptLanguage": f"{language},en;q=0.9",
+    ua = ua_string or fingerprint.get("userAgent") or ""
+    if not ua:
+        return None
+    # acceptLanguage is a language LIST, not a finished header: Chromium adds
+    # the q-weights itself. Passing "en-US,en;q=0.9" produced
+    # "en-US,en;q=0.9;q=0.9" on the wire — a malformed header no real browser
+    # sends, and therefore a tell. Measured once the override started
+    # applying at all; invisible while it was being discarded (F1).
+    languages = fingerprint.get("languages") or []
+    if not isinstance(languages, list) or not languages:
+        languages = [fingerprint.get("language") or "en-US"]
+    return {
+        "userAgent": ua,
+        "acceptLanguage": ",".join(str(x) for x in languages if x),
         "platform": fingerprint.get("platform") or "Win32",
-        "userAgentMetadata": metadata,
+        "userAgentMetadata": metadata or _extract_ua_metadata(fingerprint),
     }
 
-    result = _cdp_ws_send(cdp_port, "Network.setUserAgentOverride", params)
-    if result and result.get("error"):
+
+# The path ``identity_assert`` serves its loopback probe on, shared here
+# because two modules must agree on it and both already import this one.
+#
+# The injector MUST NOT rewrite headers on this request. The probe exists to
+# observe what the browser would really send, and rewriting it would make the
+# launch-time assertion tautological: it would report "identity verified" from
+# headers the injector had just corrected, even when the UA override had failed
+# outright. That would quietly disarm the one check standing between F1 and a
+# repeat of it -- and F1 was a *reporting* bug before it was a spoofing bug.
+IDENTITY_PROBE_PATH = "/identity-probe"
+
+
+def _brand_list_header(brands: Any) -> str:
+    """Format a client-hints brand list the way Chrome puts it on the wire."""
+    parts = []
+    for entry in brands or []:
+        if not isinstance(entry, dict):
+            continue
+        brand = str(entry.get("brand") or "").strip()
+        version = str(entry.get("version") or "").strip()
+        if brand and version:
+            parts.append(f'"{brand}";v="{version}"')
+    return ", ".join(parts)
+
+
+def low_entropy_client_hints(ua_params: dict[str, Any] | None) -> dict[str, str]:
+    """The headers Chrome sends unasked, built from the intended identity.
+
+    These are the three low-entropy hints every request carries --
+    ``sec-ch-ua``, ``sec-ch-ua-mobile``, ``sec-ch-ua-platform`` -- plus the
+    User-Agent. They exist as a *header* builder because
+    ``Network.setUserAgentOverride`` is scoped to a renderer target, and a new
+    tab's first document request is issued by the **browser process** before
+    that override lands. Measured on Chromium 151, a new tab's first request::
+
+        intended : sec-ch-ua "Google Chrome";v="151", "Chromium";v="151", …
+                   sec-ch-ua-platform "Windows"
+        actual   : sec-ch-ua "Chromium";v="151", "Not=A?Brand";v="99"
+                   sec-ch-ua-platform "Linux"
+
+    The User-Agent was right (it comes from the process flag) while the brand
+    list was the host's own -- no "Google Chrome", and Chromium's GREASE
+    spelling -- next to a Windows UA. That pairing is a contradiction no real
+    browser produces, which is the F1 class of defect all over again.
+
+    Derived from the same ``ua_params`` the override uses, so the header the
+    request carries and the identity the page reports cannot drift apart.
+    """
+    if not ua_params:
+        return {}
+    meta = ua_params.get("userAgentMetadata") or {}
+    headers: dict[str, str] = {}
+
+    ua = str(ua_params.get("userAgent") or "").strip()
+    if ua:
+        headers["User-Agent"] = ua
+
+    brands = _brand_list_header(meta.get("brands"))
+    if brands:
+        headers["sec-ch-ua"] = brands
+
+    headers["sec-ch-ua-mobile"] = "?1" if meta.get("mobile") else "?0"
+
+    platform = str(meta.get("platform") or "").strip()
+    if platform:
+        headers["sec-ch-ua-platform"] = f'"{platform}"'
+
+    return headers
+
+
+def apply_ua_override(
+    session: PinnedCdpSession | None,
+    fingerprint: dict[str, Any],
+    ua_string: str = "",
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Apply UA + client-hint metadata on an OPEN, CALLER-HELD CDP session.
+
+    ``session`` must stay open for as long as the override should apply.
+    Chromium scopes ``Network.setUserAgentOverride`` to the DevTools
+    session that set it (see :class:`PinnedCdpSession`), so an override
+    sent on a session that is about to close is not an override at all.
+
+    This function therefore **returns False whenever it does not hold an
+    open session**, instead of reporting the success the ACK would suggest.
+    That is the whole point: the previous version sent the command down a
+    one-shot socket, got its ACK, returned True, and the launcher logged
+    "CDP UA/client-hints override applied" while the browser went on
+    sending the host's own User-Agent and ``sec-ch-ua-platform``.
+    """
+    if session is None or not session.is_open:
+        log.warning(
+            "refusing UA override without an open CDP session: a session-scoped "
+            "override would be discarded and the profile would browse as the host"
+        )
+        return False
+
+    params = build_ua_override_params(fingerprint, ua_string, metadata=metadata)
+    if params is None:
+        log.warning("refusing UA override with no User-Agent to claim")
+        return False
+
+    result = session.send(UA_OVERRIDE_METHOD, params)
+    if result is None:
+        log.warning("CDP UA override got no response on a held session")
+        return False
+    if result.get("error"):
         log.warning("CDP UA override error: %s", result["error"])
         return False
-    if result is not None:
-        log.info(
-            "CDP UA override applied: platform=%s arch=%s bitness=%s",
-            metadata["platform"],
-            metadata["architecture"],
-            metadata["bitness"],
-        )
-        return True
-    return False
+    meta = params["userAgentMetadata"]
+    log.info(
+        "CDP UA override applied on a held session: platform=%s arch=%s bitness=%s",
+        meta.get("platform"),
+        meta.get("architecture"),
+        meta.get("bitness"),
+    )
+    return True

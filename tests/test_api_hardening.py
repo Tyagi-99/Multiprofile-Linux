@@ -37,28 +37,22 @@ def client(xdg_isolated):
 
 @pytest.fixture()
 def fake_jobs():
-    """Seed the legacy in-memory job store with 30 fake jobs (no workers)."""
-    from multiprofile.jobs import legacy
+    """Seed 30 job batches, no workers running.
 
-    saved_jobs = dict(legacy._jobs)
-    saved_recent = list(legacy._recent)
-    try:
-        for i in range(30):
-            jid = f"job_test_{i:03d}"
-            legacy._jobs[jid] = {
-                "id": jid,
-                "type": "launch_profile",
-                "profileIds": ["p1"],
-                "status": "queued",
-                "createdAt": 1_700_000_000.0 + i,  # distinct, sortable
-            }
-            legacy._recent.append(jid)
-        yield
-    finally:
-        legacy._jobs.clear()
-        legacy._jobs.update(saved_jobs)
-        legacy._recent.clear()
-        legacy._recent.extend(saved_recent)
+    Writes rows directly rather than calling create_job: this file is about
+    pagination, and going through the real creator would drag in tiling and
+    the profile store for no benefit. Since F20 these are durable rows, so
+    the fixture no longer needs to save and restore process-global state --
+    each test gets its own XDG dir and therefore its own database.
+    """
+    from multiprofile.storage import db
+
+    for i in range(30):
+        # Distinct, sortable timestamps: pagination keys on (createdAt, id).
+        db.insert_job_batch(f"job_test_{i:03d}", "launch_profile",
+                            '{"profileIds":["p1"]}', 1)
+        db.update_job_batch(f"job_test_{i:03d}", status="queued")
+    yield
 
 
 def _seed_profiles(n=30):
@@ -99,12 +93,21 @@ def test_profiles_pagination_all_30_exactly_once(client):
     assert seeded <= set(ids)  # all 30 seeded profiles returned
 
 
-def test_profiles_limit_clamped_to_100(client):
+def test_profiles_limit_clamped(client):
+    """The profile list caps higher than other collections.
+
+    A list row lost its fingerprint (2,795 bytes -> 663), so a full page is
+    about 320 KB rather than 1.4 MB. The cap bounds one response, not one
+    query, so it is set per endpoint rather than globally -- jobs and the
+    rest keep the conservative 100.
+    """
+    from multiprofile.api.server import PROFILE_LIST_MAX_LIMIT
+
     seeded = {p["id"] for p in _seed_profiles(3)}
-    resp = client.get("/api/profiles", query_string={"limit": 1000})
+    resp = client.get("/api/profiles", query_string={"limit": 10_000})
     body = resp.get_json()
     assert resp.status_code == 200
-    assert body["limit"] == 100
+    assert body["limit"] == PROFILE_LIST_MAX_LIMIT
     assert seeded <= {p["id"] for p in body["items"]}
     assert body["next_cursor"] is None  # everything fit in one page
 

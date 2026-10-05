@@ -20,7 +20,9 @@ far beyond that; Chromium itself is.
 
 | Knob | Env var | Default | Meaning |
 |---|---|---|---|
-| `max_concurrent_profiles` | `MAX_CONCURRENT_PROFILES` | 20 | hard cap on running profiles |
+| `max_profiles` | `MAX_PROFILES` | 150 | hard cap on *stored* profiles; trashed ones excluded |
+| `max_concurrent_profiles` | `MAX_CONCURRENT_PROFILES` | 20 | hard cap on *running* profiles |
+| (plan) | `MULTIPROFILE_PLAN` | `self-hosted` | names the two above as a set; either env var still overrides |
 | `jobs_max_workers` | `MULTIPROFILE_JOBS_MAX_WORKERS` | 4 | job worker threads |
 | `jobs_max_concurrent_launches` | `MULTIPROFILE_JOBS_MAX_LAUNCHES` | 2 | simultaneous Chromium spawns |
 | `parking_enabled` | `MULTIPROFILE_PARKING_ENABLED` | true | park idle profiles |

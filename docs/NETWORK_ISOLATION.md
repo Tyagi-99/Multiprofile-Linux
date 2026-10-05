@@ -86,7 +86,9 @@ Passing proxy credentials in CLI arguments (e.g., `--proxy-server=http://user:pa
 
 Multiprofile Linux protects credentials through two layers:
 1. **CLI Flag Sanitization**: `ProxyConfig.chrome_proxy_server()` returns only `<scheme>://<host>:<port>`. Usernames and passwords are never included.
-2. **Extension Authentication**: During profile launch, `_prepare_extension()` copies the extension template to the profile's dedicated directory and writes credentials to `extension/proxy.json`. The extension's background service listens to `chrome.webRequest.onAuthRequired` and supplies authentication headers dynamically inside the browser.
+2. **CDP Authentication**: During profile launch, `cdp_inject.IdentityInjector` arms `Fetch.enable{handleAuthRequests: true}` and answers `Fetch.authRequired` with the credentials, which it holds **in memory only** for the lifetime of the browser. `ProxyAuth.__repr__` is overridden so a traceback cannot print the password either.
+
+   This replaced an extension that was never loaded. The launcher used to stage a per-profile copy of the extension and write the decrypted password to `extension/proxy.json` — with a bare `write_text`, so the umask decided the mode and the file landed **0644 world-readable**, undoing the keychain encryption it had just used (audit finding F4). Google Chrome refuses `--load-extension` outright, so on Chrome the file was written and nothing ever read it; on Chromium the extension loaded and ran `evasion.js` a second time (F2). The staging step, the flags and both files are gone: the credential that must not leak is now never written to disk at all.
 
 ---
 

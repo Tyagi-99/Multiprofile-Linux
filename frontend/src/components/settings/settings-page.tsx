@@ -3,9 +3,11 @@ import { getHashQuery } from "../../lib/router";
 import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
 import { BackupsTab, ExtensionsTab } from "./data-tabs";
 import { GeneralTab } from "./general-tab";
+import { AccountTab } from "./account-tab";
 import { GroupsTab } from "./groups-tab";
+import { TokensTab } from "./tokens-tab";
 
-const TABS = ["general", "groups", "backups", "extensions"] as const;
+const TABS = ["general", "groups", "backups", "extensions", "tokens", "account"] as const;
 type TabId = (typeof TABS)[number];
 
 export function SettingsPage({ initialTab }: { initialTab?: TabId }) {
@@ -30,6 +32,8 @@ export function SettingsPage({ initialTab }: { initialTab?: TabId }) {
           <TabsTrigger value="groups">Clients &amp; Templates</TabsTrigger>
           <TabsTrigger value="backups">Backups</TabsTrigger>
           <TabsTrigger value="extensions">Extensions</TabsTrigger>
+          <TabsTrigger value="tokens">API tokens</TabsTrigger>
+          <TabsTrigger value="account">Your data</TabsTrigger>
         </TabsList>
       </Tabs>
       <div key={tab}>
@@ -37,6 +41,8 @@ export function SettingsPage({ initialTab }: { initialTab?: TabId }) {
         {tab === "groups" && <GroupsTab />}
         {tab === "backups" && <BackupsTab />}
         {tab === "extensions" && <ExtensionsTab />}
+        {tab === "tokens" && <TokensTab />}
+        {tab === "account" && <AccountTab />}
       </div>
     </div>
   );

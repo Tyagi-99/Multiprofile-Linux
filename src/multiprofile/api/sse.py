@@ -53,7 +53,7 @@ def register_events_routes(app) -> None:
         bus = get_bus()
         try:
             sub = subscribe_queue(bus)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             log.warning("event subscribe failed: %s", e)
             return {"error": "event bus unavailable"}, 503
         try:
@@ -81,7 +81,7 @@ def register_events_routes(app) -> None:
                 if callable(unsub):
                     try:
                         unsub(sub)
-                    except Exception:
+                    except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
                         pass
 
         return Response(

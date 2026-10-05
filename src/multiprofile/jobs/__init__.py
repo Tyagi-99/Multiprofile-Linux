@@ -1,13 +1,20 @@
 """Job queue package.
 
-Two generations coexist here (same public surface for the API server):
+**One queue, since F20.** Two generations used to coexist: an in-process
+queue that ``POST /api/jobs`` wrote to, and a durable SQLite queue with
+workers, crash recovery and a schema that nothing ordinary ever wrote to. The
+durable one could not take over because it was per-profile and the operator
+works in batches — "launch these eight" is one thing they started, with one
+progress bar and one cancel button.
 
-- :mod:`multiprofile.jobs.legacy` — the original in-process queue
-  (``create_job``/``get_job``/``list_jobs``/``cancel_job`` with bulk
-  launch/stop). Preserved unchanged for backward compatibility.
-- :mod:`multiprofile.jobs.queue` + :mod:`multiprofile.jobs.workers` —
-  the durable SQLite-backed queue (``enqueue`` + :class:`JobWorker`),
-  introduced in v1.7.0. Survives process restarts.
+:mod:`multiprofile.jobs.batches` supplies that concept and is now the only
+producer. The names the API server imports (``create_job``/``get_job``/
+``list_jobs``/``cancel_job``) are unchanged and return the same record shape
+they always did; what changed is that the jobs behind them survive a restart.
+
+:mod:`multiprofile.jobs.legacy` is retired. It remains only as a module that
+explains itself and raises, so an import that was missed fails loudly instead
+of quietly running a second queue nobody is watching.
 
 Startup contract (wired by the application entry point)::
 
@@ -18,29 +25,34 @@ Startup contract (wired by the application entry point)::
 """
 from __future__ import annotations
 
-from . import legacy
-from .handlers import DISPATCH, HandlerContext, JobHandlerError
+from . import batches
+from .batches import JOB_TYPES as BATCH_JOB_TYPES
+from .handlers import DISPATCH, HandlerContext, JobCancelled, JobHandlerError
 from .queue import DEFAULT_MAX_ATTEMPTS, JOB_TYPES, enqueue, pending_count
 from .queue import get_job as get_durable_job
 from .queue import list_jobs as list_durable_jobs
 from .workers import JobWorker, get_worker, start_workers, stop_workers
 
-# Legacy API preserved for the API server (server.py imports these names).
-create_job = legacy.create_job
-get_job = legacy.get_job
-list_jobs = legacy.list_jobs
-cancel_job = legacy.cancel_job
-LEGACY_JOB_TYPES = legacy.JOB_TYPES
+# The API surface the server imports. Same names, same record shape, durable
+# storage underneath.
+create_job = batches.create_job
+get_job = batches.get_job
+list_jobs = batches.list_jobs
+cancel_job = batches.cancel_job
+
+#: Kept under its old name because `validate_job_payload` checks against it.
+LEGACY_JOB_TYPES = batches.JOB_TYPES
 
 # Durable recovery entry point (re-exported for the startup contract).
 from ..storage.db import recover  # noqa: E402
 
 __all__ = [
-    # durable queue
+    # durable queue primitives
     "JOB_TYPES",
     "DEFAULT_MAX_ATTEMPTS",
     "DISPATCH",
     "HandlerContext",
+    "JobCancelled",
     "JobHandlerError",
     "JobWorker",
     "enqueue",
@@ -51,11 +63,12 @@ __all__ = [
     "start_workers",
     "stop_workers",
     "recover",
-    # legacy in-process queue (unchanged behavior)
+    # batch API (what the HTTP layer and console use)
+    "batches",
+    "BATCH_JOB_TYPES",
     "create_job",
     "get_job",
     "list_jobs",
     "cancel_job",
     "LEGACY_JOB_TYPES",
-    "legacy",
 ]

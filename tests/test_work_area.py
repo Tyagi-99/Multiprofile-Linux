@@ -1,4 +1,16 @@
-"""WorkAreaProvider fail-loud tests."""
+"""WorkAreaProvider fail-loud tests.
+
+These exercise the **X11** detector chain. They always did; they just never
+said so, and so they passed or failed depending on which machine ran them.
+Once Wayland detectors were added for F13 they began failing on a Wayland
+host, because a real compositor answered before the patched X11 functions
+were ever consulted -- the tests patch `_from_xrandr_primary` and friends and
+assume nothing else can win.
+
+The `x11_session` fixture makes the assumption explicit rather than
+environmental. Nothing about what these tests assert has changed; they now
+declare the session they are about, which is what they always meant.
+"""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -6,6 +18,13 @@ from unittest.mock import patch
 import pytest
 
 from multiprofile.browser.work_area import WorkArea, WorkAreaError, WorkAreaProvider, intersect_work_areas
+
+
+@pytest.fixture(autouse=True)
+def x11_session(monkeypatch):
+    """Pin the session type, so these run the X11 chain on any host."""
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
 
 
 def test_env_override(monkeypatch):

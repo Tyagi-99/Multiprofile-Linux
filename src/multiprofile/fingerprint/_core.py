@@ -17,6 +17,8 @@ import hashlib
 import re
 from typing import Any
 
+from ..engine import align_ua_string, detect_engine_version
+
 
 def normalize_seed(profile: dict[str, Any]) -> int:
     """Return a stable positive int seed from profile.seed or profile id."""
@@ -37,6 +39,43 @@ def _rng(seed: int, salt: int = 0) -> float:
     return int(h[:8], 16) / 0xFFFFFFFF
 
 
+#: The only values ``navigator.deviceMemory`` is allowed to take.
+#:
+#: The Device Memory spec rounds the machine's RAM down to a power of two and
+#: then clamps it to [0.25, 8] -- explicitly to cap how much entropy the API
+#: contributes. Chrome on a 16 GB or a 64 GB machine reports **8**, and never
+#: more. The pools below describe hardware, where 16 GB is an ordinary amount;
+#: this is what that hardware is permitted to say about itself.
+#:
+#: Without the clamp, profiles were reporting ``deviceMemory: 16`` and ``6``.
+#: Neither value exists in any Chrome build, so either one identified the
+#: profile as spoofed on its own -- the same shape as F29, a Windows profile
+#: with no speech voices, where the *claim* was the tell rather than anything
+#: missing.
+_DEVICE_MEMORY_STEPS = (0.25, 0.5, 1, 2, 4, 8)
+
+
+def web_device_memory(gb: float | int | None) -> float | int | None:
+    """What a machine with ``gb`` of RAM reports to the web, or None.
+
+    Rounds down rather than to nearest: every step is a legal value, and
+    overstating memory is the direction that produces the impossible claim.
+    None passes through -- iOS exposes nothing here, and an absence is not a
+    number to be corrected.
+    """
+    if gb is None:
+        return None
+    try:
+        value = float(gb)
+    except (TypeError, ValueError):
+        return None
+    if value <= _DEVICE_MEMORY_STEPS[0]:
+        return _DEVICE_MEMORY_STEPS[0]
+    allowed = [s for s in _DEVICE_MEMORY_STEPS if s <= value]
+    step = allowed[-1]
+    return int(step) if step >= 1 else step
+
+
 def _pick(seed: int, salt: int, choices: list):
     idx = int(_rng(seed, salt) * len(choices)) % len(choices)
     return choices[idx]
@@ -53,10 +92,24 @@ def _hex_id(rng_val: float) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-# Platform pools — UA must agree with platform/touch/screen
+# Platform pools — UA must agree with platform/touch/screen.
+#
+# Each pool carries a default "userAgent". A profile created without one used
+# to get an EMPTY UA: the launcher then passed no --user-agent, the CDP
+# override had nothing to claim, and the browser went on sending the host's
+# own User-Agent and sec-ch-ua-platform while the injected script told the
+# page it was Windows. That contradiction is the root of F1 — the pool knew
+# it was pretending to be Win32/Windows/Chrome-131 and simply never said so
+# in a UA string. The defaults below are the same strings the UA picker in
+# api/user_agents.py offers, and their Chrome major matches the ch_brands the
+# same pool builds, so the wire and the page agree by construction.
 _DESKTOP_WIN = {
     "pool_name": "win",
     "platform": "Win32",
+    "userAgent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "touch": 0,
     "screens": [(1920, 1080, 1040, 1), (2560, 1440, 1400, 1), (1366, 768, 728, 1), (1536, 864, 824, 1.25)],
     "cores": [4, 6, 8, 12, 16],
@@ -78,6 +131,10 @@ _DESKTOP_WIN = {
 _DESKTOP_MAC = {
     "pool_name": "mac",
     "platform": "MacIntel",
+    "userAgent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "touch": 0,
     "screens": [(1440, 900, 877, 2), (1680, 1050, 1027, 2), (1728, 1117, 1080, 2), (2560, 1600, 1570, 2)],
     "cores": [8, 10, 12],
@@ -97,6 +154,10 @@ _DESKTOP_MAC = {
 _DESKTOP_LINUX = {
     "pool_name": "linux",
     "platform": "Linux x86_64",
+    "userAgent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
     "touch": 0,
     "screens": [(1920, 1080, 1040, 1), (2560, 1440, 1400, 1), (1366, 768, 728, 1)],
     "cores": [4, 8, 12, 16],
@@ -116,6 +177,10 @@ _DESKTOP_LINUX = {
 _MOBILE_ANDROID = {
     "pool_name": "android",
     "platform": "Linux armv8l",
+    "userAgent": (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    ),
     "touch": 5,
     "screens": [(412, 915, 915, 2.625), (360, 800, 800, 3), (393, 851, 851, 2.75), (412, 892, 892, 2.625)],
     "cores": [8],
@@ -135,6 +200,14 @@ _MOBILE_ANDROID = {
 _MOBILE_IPHONE = {
     "pool_name": "iphone",
     "platform": "iPhone",
+    # CriOS, not Safari: the same pool claims Chrome brands in its client
+    # hints, and a Safari UA beside Chrome hints is the contradiction this
+    # whole area exists to avoid.
+    "userAgent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/131.0.0.0 "
+        "Mobile/15E148 Safari/604.1"
+    ),
     "touch": 5,
     "screens": [(393, 852, 852, 3), (390, 844, 844, 3), (428, 926, 926, 3)],
     "cores": [6],
@@ -178,11 +251,20 @@ def _detect_pool(ua: str, is_mobile: bool) -> dict:
     return _DESKTOP_WIN
 
 
+# Every token a Chromium build puts its version behind. Matching only
+# "Chrome/" read the iPhone pool -- whose UA says CriOS/ -- as unversioned
+# and fell back to the 131 literal, so its brands disagreed with its own UA
+# string the moment either one moved.
+_UA_VERSION_TOKEN = re.compile(r"\b(?:Chrome|Chromium|CriOS|Edg|EdgA|EdgiOS|HeadlessChrome)/([\d.]+)")
+
+_FALLBACK_CHROME_VERSION = "131.0.0.0"
+
+
 def _chrome_version(ua: str) -> str:
-    m = re.search(r"Chrome/([\d.]+)", ua or "")
+    m = _UA_VERSION_TOKEN.search(ua or "")
     if m:
         return m.group(1)
-    return "131.0.0.0"
+    return _FALLBACK_CHROME_VERSION
 
 
 def _chrome_major(ua: str) -> int:
@@ -190,7 +272,7 @@ def _chrome_major(ua: str) -> int:
     try:
         return int(full.split(".")[0])
     except (ValueError, IndexError):
-        return 131
+        return int(_FALLBACK_CHROME_VERSION.split(".")[0])
 
 
 def _languages(lang: str) -> list[str]:
@@ -256,7 +338,8 @@ def resolve_context(
     elif isinstance(device_preset, dict):
         preset_dict = dict(device_preset)
 
-    ua = preset_dict.get("user_agent") or profile.get("userAgent") or ""
+    explicit_ua = preset_dict.get("user_agent") or profile.get("userAgent") or ""
+    ua = explicit_ua
     is_mobile = bool(preset_dict.get("mobile", profile.get("isMobile")))
 
     pool = _detect_pool(ua, is_mobile)
@@ -274,11 +357,21 @@ def resolve_context(
         pool = _apply_preset(pool, preset_dict)
         source = f"device_preset:overlay({pool_name})"
 
+    # No explicit UA anywhere: claim the pool's own. Every other surface is
+    # already built from this pool, so this is the string that agrees with
+    # them — and an empty UA agrees with nothing (F1).
+    if not ua:
+        ua = pool.get("userAgent") or ""
+
     lang = profile.get("language") or "en-US"
     tz = profile.get("timezone") or "America/New_York"
-    webrtc = profile.get("webrtcMode") or "default"
-    if webrtc not in ("default", "disable_non_proxied_udp", "disable"):
-        webrtc = "default"
+    # One vocabulary, shared with network.py and evasion.js. The console's
+    # own words ("disabled", "proxy") used to land here as unknown and be
+    # coerced to "default" -- the JS half of the same gap that left the
+    # Chrome flags off.
+    from ..network import normalize_webrtc_mode
+
+    webrtc = normalize_webrtc_mode(profile.get("webrtcMode"))
 
     return {
         "seed": seed,
@@ -315,21 +408,110 @@ def device_preset_for_profile(profile: dict[str, Any] | None) -> dict[str, Any] 
 
     Guarded import: returns None when the devices package is unavailable
     or the id is unknown, so callers degrade gracefully.
+
+    "Degrade gracefully" means the profile is built *without the preset it
+    asked for* -- the exact shape of the bug F8 was about, where a device
+    selection was accepted and then silently never applied. A profile naming a
+    deviceId and not getting one is a fault, not a detail, so each route out of
+    here records one (F11). No deviceId at all is not a fault: that is a
+    profile that never asked.
     """
     device_id = (profile or {}).get("deviceId")
     if not device_id:
         return None
+
+    from ..browser.identity_faults import record
+
+    profile_id = str((profile or {}).get("id") or "") or None
     try:
         from ..devices.registry import DeviceRegistry
         preset = DeviceRegistry().get(device_id)
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - recorded, not hidden
+        record(
+            "preset_unreadable",
+            f"device preset '{device_id}' could not be read ({e}); the profile is "
+            "being built without it and will not look like that device",
+            where="fingerprint._core.device_preset_for_profile",
+            profile_id=profile_id,
+        )
         return None
     if preset is None:
+        record(
+            "preset_unknown",
+            f"device preset '{device_id}' is not in the registry; the profile is "
+            "being built without it and will not look like that device",
+            where="fingerprint._core.device_preset_for_profile",
+            profile_id=profile_id,
+        )
         return None
     try:
         return preset.to_dict()
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - recorded, not hidden
+        record(
+            "preset_unserializable",
+            f"device preset '{device_id}' could not be serialised ({e}); the "
+            "profile is being built without it",
+            where="fingerprint._core.device_preset_for_profile",
+            profile_id=profile_id,
+        )
         return None
+
+
+# ---------------------------------------------------------------------------
+# WebGPU adapter identity
+# ---------------------------------------------------------------------------
+#
+# WebGL and WebGPU describe the same card in different vocabularies, and a
+# page can read both. Measured on this host before this existed, one profile
+# said both of these at once::
+#
+#     WebGL   ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Direct3D11 vs_5_0 ...)
+#     WebGPU  requestAdapter() -> null
+#
+# No Windows machine with an RTX 4060 has no WebGPU adapter. And where an
+# adapter *was* returned it described the host truthfully -- ``intel`` /
+# ``gen-12lp`` on this laptop -- identically for every profile, so the surface
+# linked them to each other as well as contradicting the WebGL claim.
+#
+# Chrome reports these lowercase, with the architecture as the GPU family
+# rather than the model: an RTX 4060 is ``nvidia`` / ``ada``, a GTX 1660 is
+# ``nvidia`` / ``turing``. Deriving both from the renderer string the profile
+# already claims keeps one source of truth, the way F5 did for the UA.
+_GPU_ARCHITECTURES: tuple[tuple[str, str, str], ...] = (
+    # (needle in the WebGL renderer, vendor, architecture)
+    ("RTX 40", "nvidia", "ada"),
+    ("RTX 30", "nvidia", "ampere"),
+    ("GTX 16", "nvidia", "turing"),
+    ("RTX 20", "nvidia", "turing"),
+    ("GTX 10", "nvidia", "pascal"),
+    ("RX 7", "amd", "rdna-3"),
+    ("RX 6", "amd", "rdna-2"),
+    ("RX 5", "amd", "rdna-1"),
+    ("Iris Xe", "intel", "gen-12lp"),
+    ("UHD Graphics 6", "intel", "gen-9"),
+    ("UHD Graphics", "intel", "gen-11"),
+    ("Apple M1", "apple", "apple-m1"),
+    ("Apple M2", "apple", "apple-m2"),
+    ("Apple M3", "apple", "apple-m3"),
+    ("Apple GPU", "apple", "apple-a"),
+    ("Adreno", "qualcomm", "adreno-7xx"),
+    ("Mali", "arm", "mali-g78"),
+)
+
+
+def webgpu_identity(renderer: str, vendor: str = "") -> dict[str, str]:
+    """The WebGPU adapter identity matching a claimed WebGL renderer.
+
+    Returned empty when nothing matches, which the injector reads as "do not
+    claim an adapter identity" -- inventing one that disagreed with the WebGL
+    string would recreate the contradiction this exists to remove.
+    """
+    haystack = f"{renderer} {vendor}"
+    for needle, gpu_vendor, architecture in _GPU_ARCHITECTURES:
+        if needle.lower() in haystack.lower():
+            return {"vendor": gpu_vendor, "architecture": architecture,
+                    "device": "", "description": ""}
+    return {}
 
 
 def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
@@ -341,15 +523,29 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
     this exact dict shape.
     """
     seed = normalize_seed(profile)
-    ua = profile.get("userAgent") or ""
+    explicit_ua = (profile.get("userAgent") or "").strip()
+    ua = explicit_ua
     is_mobile = bool(profile.get("isMobile"))
     pool = _detect_pool(ua, is_mobile)
+    # The pool decides what this profile pretends to be; without an explicit
+    # UA it must still SAY so, or the launcher has nothing to put on the wire
+    # and the profile browses as the host (F1).
+    #
+    # A pool default is OUR claim, so it tracks the engine that will actually
+    # run it instead of the Chrome 131 these literals were written against
+    # (F5). An explicit operator UA is left exactly as given: they may be
+    # matching a fingerprint bought elsewhere, and silently renumbering it
+    # would break the pairing they came for. `engine_version` below records
+    # the disagreement instead.
+    if not ua:
+        ua = align_ua_string(pool.get("userAgent") or "")
 
     screen = _pick(seed, 1, pool["screens"])
     w, h, avail_h, dpr = screen
     cores = _pick(seed, 2, pool["cores"])
-    memory = _pick(seed, 3, pool["memory"])
+    memory = web_device_memory(_pick(seed, 3, pool["memory"]))
     gpu = _pick(seed, 4, pool["gpus"])
+    gpu_webgpu = webgpu_identity(gpu[1], gpu[0])
 
     lang = profile.get("language") or "en-US"
     languages = [lang]
@@ -359,16 +555,25 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         languages.append(lang.split("-")[0])
 
     tz = profile.get("timezone") or "America/New_York"
-    webrtc = profile.get("webrtcMode") or "default"
-    if webrtc not in ("default", "disable_non_proxied_udp", "disable"):
-        webrtc = "default"
+    # One vocabulary, shared with network.py and evasion.js. The console's
+    # own words ("disabled", "proxy") used to land here as unknown and be
+    # coerced to "default" -- the JS half of the same gap that left the
+    # Chrome flags off.
+    from ..network import normalize_webrtc_mode
 
+    webrtc = normalize_webrtc_mode(profile.get("webrtcMode"))
+
+    # Two different claims, because real Chrome makes them differently: the
+    # UA string carries the reduced `<major>.0.0.0` form, while
+    # Sec-CH-UA-Full-Version-List carries the real build. Publishing the
+    # reduced form in both -- what this used to do -- claims a build number
+    # no Chrome release has ever had.
+    engine = detect_engine_version()
     ua_full = _chrome_version(ua)
-    major = ua_full.split(".")[0] if ua_full else "131"
-    try:
-        major_int = int(major)
-    except ValueError:
-        major_int = 131
+    major_int = _chrome_major(ua)
+    if not explicit_ua and engine.known:
+        ua_full = engine.full or ua_full
+        major_int = engine.major or major_int
 
     ch_brands = [
         {"brand": "Google Chrome", "version": str(major_int)},
@@ -381,12 +586,26 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         {"brand": "Not-A.Brand", "version": "99.0.0.0"},
     ]
 
-    # Stable per-seed media device IDs — deterministic, not random on each call
-    rng_dev = _rng(seed, 20)
+    # Stable per-seed media device IDs — deterministic, not random on each
+    # call. One salt PER KIND: all three used to share _rng(seed, 20) and so
+    # carried the same 64-char id, which is a microphone, a camera and a
+    # speaker with one identifier between them. No real browser does that.
+    #
+    # evasion.js only substitutes these when the browser is already exposing
+    # real ids; see the enumerateDevices hook for why handing them out
+    # unconditionally was worse than not spoofing at all.
     media_device_ids = {
-        "audioinput": _hex_id(rng_dev),
-        "audiooutput": _hex_id(rng_dev),
-        "videoinput": _hex_id(rng_dev),
+        "audioinput": _hex_id(_rng(seed, 20)),
+        "audiooutput": _hex_id(_rng(seed, 21)),
+        "videoinput": _hex_id(_rng(seed, 22)),
+    }
+    # Chrome groups devices belonging to one physical unit: a webcam's camera
+    # and microphone share a groupId. The audio pair together, the camera
+    # apart, is the ordinary shape.
+    media_device_group_ids = {
+        "audioinput": _hex_id(_rng(seed, 23)),
+        "audiooutput": _hex_id(_rng(seed, 23)),
+        "videoinput": _hex_id(_rng(seed, 24)),
     }
 
     fp = {
@@ -396,7 +615,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         "memory": memory,
         "screen": {"w": w, "h": h, "availH": avail_h, "dpr": dpr},
         "touch": pool["touch"],
-        "gpu": {"vendor": gpu[0], "renderer": gpu[1]},
+        "gpu": {"vendor": gpu[0], "renderer": gpu[1], "webgpu": gpu_webgpu},
         "languages": languages,
         "language": lang,
         "timezone": tz,
@@ -412,6 +631,7 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         "model": pool.get("model") or "",
         # Stable media device IDs per profile
         "mediaDeviceIds": media_device_ids,
+        "mediaDeviceGroupIds": media_device_group_ids,
         # Nested client hints (legacy field, kept for extension compatibility)
         "clientHints": {
             "platform": pool["ch_platform"],
@@ -425,6 +645,10 @@ def build_fingerprint(profile: dict[str, Any]) -> dict[str, Any]:
         },
         "userAgent": ua,
         "isMobile": pool["touch"] > 0,
+        # What the claim was measured against, so a launch note, /api/health
+        # and the consistency check can all say whether the version on the
+        # wire was verified or merely inherited from a literal.
+        "engineVersion": engine.to_dict(),
     }
     return fp
 

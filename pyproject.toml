@@ -48,14 +48,27 @@ markers = [
 # ---------------------------------------------------------------------------
 # Lint. Enforced in CI, so the selected set is one the tree actually passes.
 #
-# This is a deliberate floor, not the ceiling. The full default ruff run
-# reports ~1400 findings, dominated by BLE001 (blind except, x106) and S110
-# (try/except/pass, x37). Those are real -- they are exactly how a failure
-# gets swallowed -- but fixing them means deciding, case by case, which
-# exceptions are genuinely ignorable in a launch path that must never crash
-# a browser. That is Phase 2 cleanup, and silencing them with a blanket
-# ignore would be worse than leaving them visible. They are tracked in
-# AUDIT.md as H4 rather than hidden here.
+# BLE001 (blind except) and S110 (try/except/pass) are **selected**, which is
+# F11's resolution. They were deselected for most of this audit with a comment
+# saying the ~140 existing sites were real but needed case-by-case judgement
+# rather than a blanket silence. That judgement has now been made for every
+# one of them, so the rules are on and each remaining site carries a `noqa`
+# naming what is lost when it fires.
+#
+# The point is not the existing sites. It is that a **new** one cannot be
+# added without a reviewer seeing it and writing down why it is safe. The
+# policy the finding asks for is:
+#
+#   * a handler on the identity or security path records a structured fault
+#     that reaches /api/health and the launch notes
+#     (browser/identity_faults.py, storage/xdg.permission_faults)
+#   * a handler whose failure costs the operator something reports it in the
+#     value it returns -- a restore says how many cookies it restored, health
+#     says the store was unreadable rather than reporting zero profiles
+#   * anything else may still swallow, with a `noqa` saying what is lost
+#
+# "A launch path must never crash a browser" remains the reason these are
+# broad. It was never a reason for them to be silent.
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 120
@@ -63,11 +76,20 @@ target-version = "py311"
 extend-exclude = ["frontend", "dist", ".venv"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B"]
+select = ["E", "F", "I", "B", "BLE001", "S110"]
 ignore = [
   "E501",   # long lines: 25 remain, all in dense data literals
   "B008",   # call-in-default: Flask route decorators legitimately do this
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["E402"]  # tests set XDG env vars before importing the package
+# E402: tests set XDG env vars before importing the package.
+#
+# BLE001/S110: the policy above is about the product, where a swallowed
+# failure reaches an operator who then believes something happened that did
+# not. In a test harness the same construct means "this host has no Chrome,
+# skip" or "tear the browser down, and do not let a teardown error mask the
+# assertion that already failed". Nothing downstream is misled, so requiring
+# a justification on each would be ceremony rather than a control -- and
+# ceremony is how a policy stops being read.
+"tests/*" = ["E402", "BLE001", "S110"]

@@ -180,9 +180,9 @@ def test_proxy(parsed: dict[str, Any], timeout: float = 8) -> dict[str, Any]:
                 body = resp.read().decode("utf-8", "ignore")
                 try:
                     egress_ip = json_loads_ip(body)
-                except Exception:
+                except Exception:  # noqa: BLE001 - the failure is recorded in the value this assigns
                     egress_ip = body.strip()[:64] or None
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             http_error = str(e)
 
     latency = int((time.monotonic() - t0) * 1000)

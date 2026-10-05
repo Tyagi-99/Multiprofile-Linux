@@ -146,7 +146,7 @@ def _build_manifest(
     all_clients = []
     try:
         all_clients = [{"id": c.get("id"), "name": c.get("name")} for c in load_clients()]
-    except Exception:
+    except Exception:  # noqa: BLE001,S110 - the manifest records an empty client list rather than failing the backup
         pass
 
     return {
@@ -254,7 +254,7 @@ def create_backup(
             audit_log("backup", profile_id=profile_id, ok=True,
                       detail={"path": str(enc_path), "encrypted": True})
             return result
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
             # Plaintext zip still exists as fallback
             log.error("Encryption failed, plaintext backup retained: %s", e)
             return {"ok": False, "error": f"Encryption failed: {e}", "plaintextPath": str(zip_path)}
@@ -298,7 +298,7 @@ def list_backups(profile_id: str | None = None) -> list[dict[str, Any]]:
             if sha_path.exists():
                 try:
                     sha = sha_path.read_text(encoding="utf-8").split()[0]
-                except Exception:
+                except Exception:  # noqa: BLE001,S110 - sha stays None, which the listing already renders as unknown
                     pass
             items.append({
                 "backupId": f"{d.name}/{stamp}",
@@ -395,7 +395,7 @@ def restore_backup(
             if ext_manifest_path.exists():
                 try:
                     manifest = json.loads(ext_manifest_path.read_text(encoding="utf-8"))
-                except Exception:
+                except Exception:  # noqa: BLE001,S110 - an unreadable manifest falls through to the next candidate below
                     pass
 
             # Fall back to internal manifest.json or meta.json (plaintext backups)
@@ -404,7 +404,7 @@ def restore_backup(
                     if name in zf.namelist():
                         try:
                             manifest = json.loads(zf.read(name).decode("utf-8"))
-                        except Exception:
+                        except Exception:  # noqa: BLE001,S110 - an unreadable manifest falls through to the next candidate below
                             pass
                         break
 
@@ -432,9 +432,19 @@ def restore_backup(
                 save_profiles(items)
 
             # Restore cookies (inline in manifest or from cookies/ dir)
+            #
+            # F11: this used to swallow every failure per member and say
+            # nothing. A restore whose cookie members were all corrupt
+            # returned ok:True with no sessions -- the operator restores a
+            # profile precisely to get its logins back, and got a clean
+            # success with none of them. "Restored nothing" and "there was
+            # nothing to restore" have to be different answers.
+            cookies_restored = 0
+            cookie_failures: list[str] = []
             cookies = manifest.get("cookies")
             if isinstance(cookies, list):
                 save_cookies(target_id, cookies)
+                cookies_restored = len(cookies)
             else:
                 cookie_members = [n for n in zf.namelist() if n.startswith("cookies/")]
                 for name in cookie_members:
@@ -442,8 +452,16 @@ def restore_backup(
                         raw = json.loads(zf.read(name).decode("utf-8"))
                         if isinstance(raw, list):
                             save_cookies(target_id, raw)
-                    except Exception:
-                        pass
+                            cookies_restored += len(raw)
+                        else:
+                            cookie_failures.append(f"{name}: not a cookie list")
+                    except Exception as e:  # noqa: BLE001 - one bad member must not abort the restore
+                        cookie_failures.append(f"{name}: {e}")
+                if cookie_failures:
+                    log.warning(
+                        "restore %s: %d cookie member(s) could not be read: %s",
+                        target_id, len(cookie_failures), "; ".join(cookie_failures[:5]),
+                    )
 
             # Restore user-data
             user_dir = chrome_profile_dir(target_id) / "user-data"
@@ -462,15 +480,23 @@ def restore_backup(
             "backupPath": str(zpath),
             "encrypted": zpath.suffix == ".mp_enc",
             "restoredUserData": bool(user_members) if 'user_members' in dir() else False,
+            # Always present, both of them: a count of 0 with no failures is
+            # "this backup had no cookies", and a count of 0 with failures is
+            # "this backup had cookies and you did not get them". Reporting
+            # only on trouble would make the two look alike again.
+            "restoredCookies": cookies_restored,
+            "cookieFailures": cookie_failures,
         }
         audit_log("restore", profile_id=target_id, ok=True,
-                  detail={"path": str(zpath), "encrypted": zpath.suffix == ".mp_enc"})
+                  detail={"path": str(zpath), "encrypted": zpath.suffix == ".mp_enc",
+                          "cookies": cookies_restored,
+                          "cookieFailures": len(cookie_failures)})
         return result
 
     except ValueError as e:
         # Wrong passphrase or corrupt backup — never log the passphrase itself
         audit_log("restore", profile_id=profile_id, ok=False, detail="decryption_failed")
         return {"ok": False, "error": str(e)}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - the failure is reported in the response, not swallowed
         audit_log("restore", profile_id=profile_id, ok=False, detail=str(e))
         return {"ok": False, "error": str(e)}

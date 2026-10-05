@@ -79,7 +79,7 @@ def _ws1_bus():
     """Return WS1's bus if it exists and exposes publish/subscribe, else None."""
     try:
         from . import events as ws1  # type: ignore
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return None
     publish = getattr(ws1, "publish", None)
     subscribe = getattr(ws1, "subscribe", None)
@@ -120,7 +120,7 @@ def subscribe_queue(bus) -> queue.Queue:
                     q.put_nowait(item)
                 except queue.Full:
                     pass
-        except Exception as e:  # pragma: no cover - defensive
+        except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
             log.warning("event pump ended: %s", e)
 
     threading.Thread(target=_pump, name="mp-events-pump", daemon=True).start()
@@ -131,7 +131,7 @@ def emit(bus, event_type: str, payload: dict[str, Any]) -> None:
     """Publish one event, never raising into the request path."""
     try:
         bus.publish(event_type, payload)
-    except Exception as e:  # pragma: no cover - defensive
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("event publish failed (%s): %s", event_type, e)
 
 

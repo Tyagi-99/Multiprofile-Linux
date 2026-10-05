@@ -468,3 +468,38 @@ def test_secrets_never_reach_audit_or_profile_logs(xdg_tmp, tmp_path):
     # Non-secret content survives redaction:
     assert "harmless text" in raw_audit
     assert "10.0.0.1" in raw_audit
+
+
+def test_a_wave_zero_delay_never_reaches_the_jitter_bound():
+    """`compute_health_delays` documents a half-open `[0, jitter_s)`, and the
+    value callers see is the rounded one.
+
+    `round(1.996, 2)` is 2.0, so the returned delay could sit exactly on the
+    bound the docstring excludes. It made the staggering test above fail about
+    one run in a hundred, which is worse than a plain bug: an intermittently
+    red suite is one people re-run rather than read. 50,000 seeds, all four
+    profiles in wave 0.
+    """
+    from multiprofile.parking import compute_health_delays
+
+    worst = 0.0
+    for seed in range(50_000):
+        for _pid, delay in compute_health_delays(
+            [f"p{i}" for i in range(4)], max_concurrent=4, jitter_s=2, seed=seed
+        ):
+            worst = max(worst, delay)
+    assert worst < 2, worst
+
+
+def test_later_waves_still_start_after_the_gap():
+    """Truncating must not pull a wave back across its own start."""
+    from multiprofile.parking import compute_health_delays
+
+    for seed in range(2000):
+        delays = compute_health_delays(
+            [f"p{i}" for i in range(9)], max_concurrent=4, jitter_s=2, seed=seed
+        )
+        wave_gap = max(5.0, 2 / 2.0)
+        for i, (_pid, delay) in enumerate(delays):
+            wave = i // 4
+            assert delay >= wave * wave_gap, (seed, i, delay)

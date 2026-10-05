@@ -22,7 +22,6 @@ import { KV, Mono } from "../profile-detail/kv";
 const STEPS = ["Basic", "Device", "Network", "Fingerprint", "Consistency", "Review"] as const;
 
 type NetMode = "direct" | "http" | "https" | "socks5" | "gateway";
-type FpMode = "stable" | "preset" | "custom";
 
 interface Draft {
   name: string;
@@ -38,7 +37,6 @@ interface Draft {
   user: string;
   pass: string;
   gatewayId: string;
-  fpMode: FpMode;
 }
 
 interface ProxyTest {
@@ -66,7 +64,6 @@ function emptyDraft(deviceId?: string): Draft {
     user: "",
     pass: "",
     gatewayId: "",
-    fpMode: "stable",
   };
 }
 
@@ -103,7 +100,6 @@ function WizardOpen() {
         notes: n.notes,
         startUrl: n.startUrl.trim() || "https://example.com",
         deviceId: n.deviceId || undefined,
-        fingerprintStrategy: n.fpMode,
       };
       if (n.netMode === "direct") payload.networkMode = "direct";
       else if (n.netMode === "gateway") {
@@ -226,7 +222,7 @@ function WizardOpen() {
         {step === 0 && <BasicStep draft={draft} set={set} />}
         {step === 1 && <DeviceStep draft={draft} set={set} />}
         {step === 2 && <NetworkStep draft={draft} set={set} netTest={netTest} setNetTest={setNetTest} />}
-        {step === 3 && <FingerprintStep draft={draft} set={set} />}
+        {step === 3 && <FingerprintStep draft={draft} />}
         {step === 4 && <ConsistencyStep draft={draft} netTest={netTest} />}
         {step === 5 && <ReviewStep draft={draft} />}
       </div>
@@ -574,42 +570,13 @@ function NetworkStep({
 
 /* ---------------- Step 4: Fingerprint ---------------- */
 
-const FP_MODES: { id: FpMode; label: string; sub: string }[] = [
-  { id: "stable", label: "Stable profile", sub: "Deterministic fingerprint from a fixed seed" },
-  { id: "preset", label: "Preset", sub: "Pick a curated fingerprint preset" },
-  { id: "custom", label: "Custom", sub: "Tune individual components (stored with profile)" },
-];
-
-function FingerprintStep({ draft, set }: { draft: Draft; set: (p: Partial<Draft>) => void }) {
+function FingerprintStep({ draft }: { draft: Draft }) {
   const { data, isLoading } = useDeviceDetail(draft.deviceId);
   const caps = data?.capability_matrix;
   const entries = caps ? Object.entries(caps) : [];
 
   return (
     <div className="grid gap-4">
-      <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="Fingerprint strategy">
-        {FP_MODES.map((m) => {
-          const selected = draft.fpMode === m.id;
-          return (
-            <button
-              key={m.id}
-              type="button"
-              role="radio"
-              aria-checked={selected}
-              onClick={() => set({ fpMode: m.id })}
-              className={`rounded-xl border p-3 text-left transition-colors ${
-                selected
-                  ? "border-brand-500 bg-brand-500/10 ring-1 ring-brand-500"
-                  : "border-border-subtle bg-surface-1 hover:border-border-strong"
-              }`}
-            >
-              <p className="text-sm font-semibold text-ink-1">{m.label}</p>
-              <p className="text-xs text-ink-3">{m.sub}</p>
-            </button>
-          );
-        })}
-      </div>
-
       <h3 className="text-sm font-semibold text-ink-1">
         Capability status{draft.deviceId ? ` — ${draft.deviceId}` : ""}
       </h3>
@@ -787,9 +754,6 @@ function ReviewStep({ draft }: { draft: Draft }) {
         ? `Gateway (${draft.gatewayId || "none selected"})`
         : `${draft.netMode.toUpperCase()} ${draft.host}:${draft.port}${draft.user ? " (auth •••)" : ""}`;
 
-  const fpLabel =
-    draft.fpMode === "stable" ? "Stable profile" : draft.fpMode === "preset" ? "Preset" : "Custom";
-
   return (
     <div className="grid gap-3">
       <Card>
@@ -828,12 +792,6 @@ function ReviewStep({ draft }: { draft: Draft }) {
         <CardContent className="pt-4">
           <h4 className="mb-2 text-sm font-semibold text-ink-1">Network</h4>
           <KV pairs={[["Mode", netSummary]]} />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardContent className="pt-4">
-          <h4 className="mb-2 text-sm font-semibold text-ink-1">Fingerprint</h4>
-          <KV pairs={[["Strategy", fpLabel]]} />
         </CardContent>
       </Card>
     </div>

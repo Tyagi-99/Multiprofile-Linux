@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 import threading
 import time
@@ -73,7 +74,7 @@ def _read_activity() -> dict[str, float]:
         raw = _activity_path().read_text(encoding="utf-8")
         data = json.loads(raw) if raw.strip() else {}
         return {str(k): float(v) for k, v in data.items() if isinstance(v, (int, float))}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return {}
 
 
@@ -128,7 +129,7 @@ def _disk_runtime_state() -> dict[str, dict[str, Any]]:
         raw = (cache_dir() / "runtime.json").read_text(encoding="utf-8")
         data = json.loads(raw) if raw.strip() else {}
         return {str(k): v for k, v in data.items() if isinstance(v, dict)}
-    except Exception:
+    except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return {}
 
 
@@ -146,7 +147,7 @@ def is_profile_running(profile_id: str) -> bool:
         rt = get_runtime(str(profile_id))
         if rt is not None and rt.launch_state == LaunchState.RUNNING:
             return True
-    except Exception:  # noqa: BLE001 - degrade gracefully
+    except Exception:  # noqa: BLE001,S110 - degrade gracefully
         pass
     return False
 
@@ -244,6 +245,106 @@ def _stop_via_launcher(profile_id: str) -> dict[str, Any]:
     """
     from .browser.launcher import stop_profile
     return stop_profile(profile_id)
+
+
+def sweep_idle_profiles(*, dry_run: bool = False) -> dict[str, Any]:
+    """Enqueue a ``park`` job for every profile idle past the timeout.
+
+    **The producer F20 was missing.** ``park_profile`` was reachable only from
+    a job handler, and nothing enqueued one, so roughly 1,500 lines of parking
+    code and a config flag reading ``enabled = true`` reached nothing at all.
+    A control that exists in the vocabulary and touches nothing is the shape
+    this audit kept finding; this is the last of them.
+
+    Does nothing at all when parking is disabled, which is now the default --
+    see ``config.parking_enabled`` for why that decision went the way it did.
+
+    Enqueues rather than parking inline: parking stops a browser, and the
+    thing that decides to stop a browser should not also be the thing holding
+    the sweep loop. Going through the queue also means a park survives a
+    restart and is visible in ``GET /api/jobs`` like any other job.
+
+    Never raises.
+    """
+    settings = get_settings()
+    summary: dict[str, Any] = {
+        "enqueued": 0, "candidates": [], "skipped": [], "reason": None,
+        "dryRun": bool(dry_run),
+    }
+    if not settings.parking_enabled:
+        summary["reason"] = "parking_disabled"
+        return summary
+
+    try:
+        from .storage.db import list_profile_runtimes
+
+        running = [
+            str(r.get("profile_id"))
+            for r in list_profile_runtimes()
+            if str(r.get("state") or "").lower() == "running"
+        ]
+    except Exception as e:  # noqa: BLE001 - a sweep must never take the app down
+        summary["reason"] = f"runtime_unavailable: {e}"
+        return summary
+
+    now = time.time()
+    for profile_id in running:
+        ts = last_activity_ts(profile_id)
+        idle_for_s = (now - ts) if ts is not None else 0.0
+        if idle_for_s <= settings.parking_idle_timeout_s:
+            continue
+        if job_running_for(profile_id):
+            summary["skipped"].append({"profileId": profile_id, "reason": "job_running"})
+            continue
+        summary["candidates"].append(
+            {"profileId": profile_id, "idleForS": round(idle_for_s, 1)}
+        )
+        if dry_run:
+            continue
+        try:
+            from .jobs import enqueue
+
+            job_id = enqueue("park", profile_id, {"reason": "idle",
+                                                  "idleForS": round(idle_for_s, 1)})
+            summary["enqueued"] += 1
+            audit_event("park_enqueued", profile_id=profile_id, ok=True,
+                        detail={"jobId": job_id, "idleForS": round(idle_for_s, 1)})
+        except Exception as e:  # noqa: BLE001 - one profile must not stop the sweep
+            log.warning("park enqueue failed for %s: %s", profile_id, e)
+            summary["skipped"].append({"profileId": profile_id, "reason": str(e)})
+    return summary
+
+
+def start_parking_sweeper() -> threading.Thread | None:
+    """Run :func:`sweep_idle_profiles` on a background thread, or don't.
+
+    Returns None when parking is disabled, which is the default. Started by
+    the API server alongside the job workers.
+    """
+    settings = get_settings()
+    if not settings.parking_enabled:
+        log.info("idle parking disabled; no sweeper started")
+        return None
+
+    interval = max(10, int(settings.parking_sweep_interval_s))
+
+    def _loop() -> None:
+        while True:
+            time.sleep(interval)
+            try:
+                result = sweep_idle_profiles()
+                if result.get("enqueued"):
+                    log.info("idle parking: enqueued %d park job(s)", result["enqueued"])
+            except Exception as e:  # noqa: BLE001 - the sweeper must outlive its own bugs
+                log.warning("idle parking sweep failed: %s", e, exc_info=True)
+
+    thread = threading.Thread(target=_loop, name="mp-parking-sweep", daemon=True)
+    thread.start()
+    log.info(
+        "idle parking enabled: sweeping every %ds for profiles idle over %ds",
+        interval, settings.parking_idle_timeout_s,
+    )
+    return thread
 
 
 def park_profile(profile_id: str) -> bool:
@@ -352,7 +453,7 @@ def read_profiles_runtime() -> tuple[str, list[dict[str, Any]]]:
                         "state": str(r["state"]),
                         "pid": r["pid"] if "pid" in r.keys() else None,
                     })
-                except Exception:
+                except Exception:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
                     continue
         log.info("read %d rows from WS1 profiles_runtime table", len(rows))
         return "ws1", rows
@@ -391,8 +492,20 @@ def compute_health_delays(
     out: list[tuple[str, float]] = []
     for i, profile_id in enumerate(profile_ids):
         wave = i // maxc
-        delay = wave * wave_gap + (rng.uniform(0, jitter) if jitter > 0 else 0.0)
-        out.append((str(profile_id), round(delay, 2)))
+        # `rng.random() * jitter`, not `rng.uniform(0, jitter)`: uniform is
+        # documented as inclusive of both endpoints and can return the upper
+        # bound outright through float rounding. The interval this function
+        # promises just above is half-open, and the difference was a test that
+        # failed roughly one run in a hundred -- which is worse than a bug,
+        # because an intermittently red suite is one people re-run rather than
+        # read.
+        delay = wave * wave_gap + (rng.random() * jitter if jitter > 0 else 0.0)
+        # Truncated, not rounded. `round(1.996, 2)` is 2.0, which puts the
+        # *returned* value outside the half-open interval this function
+        # documents -- and that is the value callers and tests see. It made a
+        # bound assertion fail roughly one run in a hundred, and an
+        # intermittently red suite is one people re-run rather than read.
+        out.append((str(profile_id), math.floor(delay * 100) / 100))
     return out
 
 

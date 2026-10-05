@@ -240,8 +240,23 @@ for i, a in enumerate(rects):
         assert not overlap, (a, b)
 print("tiling ok", area.source)
 
+import ast
 src = open("src/multiprofile/browser/launcher.py", encoding="utf-8").read()
-assert "--disable-extensions-except" in src
+# Exclusivity used to mean --disable-extensions-except=<our extension>. The
+# identity script now arrives over CDP, so there is nothing to except and
+# exclusivity is plain --disable-extensions. Chrome refused the old flags and
+# Chromium honoured them, which ran evasion.js twice on one engine.
+#
+# Checked as string literals, so the comments explaining that history do not
+# trip this but a re-added flag does.
+flags = [
+    n.value for n in ast.walk(ast.parse(src))
+    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    and n.value.startswith("--")
+]
+assert "--disable-extensions" in flags, flags
+assert not [f for f in flags if f.startswith("--load-extension")], flags
+assert not [f for f in flags if f.startswith("--disable-extensions-except")], flags
 assert "allow_webstore_extensions" in src
 print("exclusivity default ON")
 print("PHASE2_OK")

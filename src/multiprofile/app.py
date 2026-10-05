@@ -27,13 +27,39 @@ def prepare_data_dir() -> None:
     directory. Side effects belong in the entrypoint, not the factory.
     """
     try:
-        from .storage.xdg import harden_data_dir
+        from .storage.xdg import harden_data_dir, permission_faults
 
         fixed = harden_data_dir()
         if fixed:
             log.warning("tightened permissions on operator data: %s", ", ".join(fixed))
+        # What it could not fix matters more than what it did: those files are
+        # still readable by someone else. Startup says so, and /api/health
+        # keeps saying so.
+        stuck = permission_faults()
+        if stuck:
+            log.error(
+                "could not make %d file(s) owner-only: %s",
+                len(stuck), ", ".join(f["path"] for f in stuck),
+            )
     except Exception as e:  # noqa: BLE001 - never block startup
         log.debug("permission hardening skipped: %s", e)
+
+    try:
+        from .storage.xdg import purge_legacy_extension_staging
+
+        # Earlier versions staged a copy of the extension per profile, holding
+        # the cleartext proxy password and the cookie jar at 0644. Nothing
+        # writes or reads them now; the copies already on disk are removed.
+        purged = purge_legacy_extension_staging()
+        if purged:
+            log.warning(
+                "removed legacy staged extension directories (cleartext proxy "
+                "password, cookie jar) for %d profile(s): %s",
+                len(purged),
+                ", ".join(purged[:10]) + (" …" if len(purged) > 10 else ""),
+            )
+    except Exception as e:  # noqa: BLE001 - never block startup
+        log.debug("legacy extension purge skipped: %s", e)
 
     try:
         from .secrets import backend, migrate_plaintext_secrets
@@ -108,7 +134,7 @@ def open_ui(url: str = "http://127.0.0.1:8765/", title: str = "Multiprofile") ->
             icon=icon,
         )
         return
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden
         log.warning("pywebview unavailable (%s); opening system browser", e)
         webbrowser.open(url)
         log.info("UI opened in system browser: %s", url)

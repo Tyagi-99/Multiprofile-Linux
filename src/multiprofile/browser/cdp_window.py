@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -26,10 +27,62 @@ class CdpError(Exception):
         super().__init__(message)
 
 
+#: Ports handed out but not yet released. Guarded by its own lock; see
+#: :func:`allocate_localhost_port`. A dict rather than a set purely so the
+#: backstop below can drop the oldest entries in insertion order.
+_handed_out: dict[int, None] = {}
+
+#: Backstop only. Teardown returns ports, so this is reached only when a
+#: teardown never ran.
+_MAX_TRACKED = 512
+_port_lock = threading.Lock()
+
+
 def allocate_localhost_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+    """Pick a free localhost port for a browser's debugging endpoint.
+
+    The kernel picks the number, we close the socket, and Chrome binds it a
+    moment later -- so there is a window in which the port is free and
+    something else can take it. Sequentially that window is small enough not
+    to matter in practice. In parallel it is not: two launches starting at
+    once were handed the same number often enough to matter, and the second
+    browser then fails to bind its debugging port, which surfaces as a launch
+    that came up with no CDP at all.
+
+    Remembering what has been handed out removes the half of the race we
+    cause ourselves. The external half -- an unrelated process taking the
+    port in that window -- is not fixable from here without Chrome accepting
+    a pre-bound socket, and it is rare; a launch that hits it fails cleanly
+    on the CDP wait rather than silently.
+
+    Entries are returned by :func:`release_localhost_port` when a browser is
+    torn down, so the set tracks what is actually in use. The size cap below
+    is only a backstop against a teardown path that never runs -- a crash, a
+    kill -9 -- and it drops the oldest, which are the least likely to still
+    be live.
+    """
+    with _port_lock:
+        while len(_handed_out) > _MAX_TRACKED:
+            _handed_out.pop(next(iter(_handed_out)))
+        for _ in range(64):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                port = int(s.getsockname()[1])
+            if port not in _handed_out:
+                _handed_out[port] = None
+                return port
+        # Every attempt collided with one we already gave out. Returning it
+        # anyway is better than failing the launch: the caller's CDP wait is
+        # the thing that decides whether the browser actually came up.
+        return port
+
+
+def release_localhost_port(port: int | None) -> None:
+    """Let a port be handed out again once its browser is gone."""
+    if not port:
+        return
+    with _port_lock:
+        _handed_out.pop(int(port), None)
 
 
 def wait_cdp_ready(port: int, timeout_s: float = 8.0) -> dict[str, Any]:
@@ -47,7 +100,7 @@ def wait_cdp_ready(port: int, timeout_s: float = 8.0) -> dict[str, Any]:
             return data
         except CdpError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the failure is recorded in the value this assigns
             last = str(e)
             time.sleep(0.15)
     raise CdpError("cdp_unreachable", f"CDP not ready on 127.0.0.1:{port}: {last}")
@@ -81,7 +134,7 @@ class CdpWindowController:
         if self._ws is not None:
             try:
                 self._ws.close()
-            except Exception:
+            except Exception:  # noqa: BLE001,S110 - teardown; a failure here cannot be acted on
                 pass
             self._ws = None
 
