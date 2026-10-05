@@ -134,6 +134,10 @@ engineering draft rather than legal advice.
 | **F50** | ✅ Low | Security / Config | **`MULTIPROFILE_PREFER_SANDBOX` was read into a field nothing used** — a security-adjacent setting that looked honoured and was not | done |
 | **F51** | ✅ **High** | Privacy / Storage | **A permanent delete could leave every cookie and login on disk and report `purgeStorage: true`** — the response echoed the request, not the outcome | done |
 | **F52** | ✅ Low | Security | **The audit log's `chmod(0600)` failed in silence** — the last one in the tree that did not reach `/api/health` | done |
+| **F53** | ✅ **High** | Fingerprint | **Shared and service workers reported the host OS** in `navigator.userAgentData` beside a page claiming another — found by CreepJS, narrowed by probing each realm separately | done |
+| **F54** | ✅ **High** | Fingerprint | **CSS `device-width` reported the real display** while `screen.*` reported the claim — every profile without a device preset | done |
+| **F55** | ✅ **High** | Fingerprint | **The page reported a timezone this engine cannot report** — `Asia/Kolkata` is not in `Intl.supportedValuesOf('timeZone')`, and every worker said `Asia/Calcutta` | done |
+| **F56** | ✅ **High** | Network | **Authenticated SOCKS5 launched green into a browser that could not load a page** — Chromium does not implement RFC 1929 | done |
 
 ---
 
@@ -2760,6 +2764,71 @@ share of the machines this product runs on unattended. 9 tests.
 
 ---
 
+### F53–F56 — the parity pass of 5 October 2026
+
+Four findings from the work in
+[`reports/Browser parity roadmap 2026.md`](../reports/Browser%20parity%20roadmap%202026.md)
+Phases 1–3. Each is written up at length where it was fixed; this is the
+register entry.
+
+All four share a shape worth naming: **every one was found by a measurement
+that did not previously exist**, and three of them sat in surfaces the
+internal probes happened not to cover. The two the roadmap named came from a
+public checker; the third came from the comparison harness built to reproduce
+them, on its first run; the fourth came from the first test in this repository
+to ask where traffic actually left from rather than what the launcher decided.
+
+**F53 — shared and service workers reported the host OS.** `userAgent` was
+right in every realm (a process-wide flag) and `userAgentData` was not.
+Probing each realm separately split it: dedicated workers — blob, URL and
+module — were already correct, because a dedicated worker runs in its owner
+document's renderer and inherits the page's `Network.setUserAgentOverride`.
+Shared and service workers are their own targets in their own processes and
+inherited nothing. CreepJS reports from a `ServiceWorkerGlobalScope` where
+one exists, which is why it saw this and a Blob-worker spot check did not.
+Fixed by sending the override to those two target types rather than shimming
+`NavigatorUAData` — a shim has a shape, which is the trade F3 keeps losing.
+
+**F54 — CSS disagreed with `screen.*`.** `evasion.js` can only define
+`screen.width` as a getter; CSS `device-width` is resolved by the compositor
+and no script can reach it. `Emulation.setDeviceMetricsOverride` moves both
+and was sent **only when a device preset was selected**, so every profile
+without one carried the contradiction. The reason that path was skipped was
+real — a viewport override letterboxes the operator's window — and it turned
+out to be avoidable: `width`/`height`/`deviceScaleFactor` of 0 means *screen
+only*, verified on Chromium 151 to move CSS `device-height` 1600 → 1440 with
+`innerWidth`, `innerHeight`, `outerWidth` and `outerHeight` byte-identical.
+
+**F55 — an impossible timezone.** The page returned the stored zone string
+verbatim, and on this engine `Intl.supportedValuesOf('timeZone')` does not
+contain `Asia/Kolkata` at all — so no real browser on this build can return
+it. **F44's shape**, a value outside the set of values that can exist, in one
+line with nothing to compare against. Internal agreement could not have
+caught it; only asking the engine what it supports does. Every worker said
+`Asia/Calcutta`, and so did stock Chromium in every realm, which identified
+the page as the outlier. Both spellings carry the same offset, which is why
+the original capture read as agreement.
+
+**F56 — authenticated SOCKS5.** Chromium has never implemented the SOCKS5
+username/password method. The product accepted the configuration, reported
+`ok: true`, noted "proxy auth=armed", and produced a browser that loaded
+nothing: 0 requests reached the destination and the proxy rejected 40
+handshakes. It failed *closed* — no host-IP leak — but silently from the
+operator's side, and authenticated SOCKS5 is what most commercial proxy
+providers sell. Now refused with the reason. The "armed" note referred to the
+CDP `Fetch.authRequired` handler, which answers an HTTP `407` and has nothing
+to do with SOCKS5.
+
+**And one that stays open:** a Linux-claiming profile shows `Liberation Sans`
+but neither `Liberation Serif` nor `Liberation Mono`, where stock Chromium on
+the same host shows all three, with identical generic baselines. The font plan
+and the rendered `fonts.conf` both contain all three families — `fc-list`
+under the profile's own config lists them — so what remains is Chromium's
+fallback under a restricted config, and it is unexplained. Recorded in
+[`04` §11.5](04_FINGERPRINT_TEST_RESULTS.md) rather than closed.
+
+---
+
 ### F52 — ✅ LOW: the audit log could be created world-readable in silence — **FIXED**
 
 **File:** [`audit.py`](../src/multiprofile/audit.py)
@@ -3577,7 +3646,7 @@ for the dead fingerprint step beside it.
 | Dead code | ✅ | F2 fixed — the extension staging path is deleted, not just documented |
 | TODOs/FIXMEs | ✅ | **zero** |
 | Type safety | 🟡 | frontend TS strict & clean; Python has annotations but **no type checker in CI** |
-| Tests | ✅ | 1,327 functions across 91 files; **2,267 passing**, 5 skipped; **76.6% coverage** against a 70% gate |
+| Tests | ✅ | 1,373 functions across 96 files; **2,353 passing**, 5 skipped; **76.6% coverage** against a 70% gate (coverage last measured before the parity pass) |
 | CI | ✅ | lint + 3-version matrix + coverage gate + isolated live-browser job |
 
 ## 4.2 Security
