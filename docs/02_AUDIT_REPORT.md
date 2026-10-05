@@ -127,6 +127,7 @@ engineering draft rather than legal advice.
 | **F45** | ✅ **High** | Storage | **Schema v7 broke every existing database** — an index over a column the migration had not yet added | done |
 | **F46** | ✅ **High** | Fingerprint | **No WebGL at all on a GPU-less host**, and `DISPLAY` was mistaken for a graphics device | done |
 | **F47** | ✅ Low | Distribution | The package **declared `Architecture: amd64`** while containing nothing compiled, so `dpkg -i` refused it on arm64 for no reason | done |
+| **F48** | ✅ **Medium** | Distribution | The updater looked for the delta's **base package under the client's configured architecture**, so on an arch-independent package every update silently downloaded in full | done |
 
 ---
 
@@ -2750,6 +2751,55 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F48 — ✅ MEDIUM: the delta channel transferred nothing less than the full package — **FIXED**
+
+**File:** [`packaging/update/multiprofile-update`](../packaging/update/multiprofile-update)
+(`_download`, `cmd_install`)
+
+Found by the lifecycle job failing one line after F47 landed:
+
+```
+Setting up multiprofile-native (1.9.1) ...
+downloaded the full package (1045996 bytes)
+the delta path was not used
+```
+
+A delta is applied to the copy of the currently-installed package kept in
+`/var/lib/multiprofile/updates`. The updater built that filename from
+`cfg['arch']` — the **client's** configured architecture:
+
+```python
+local_old = STATE_DIR / f"{PACKAGE}_{current}_{cfg['arch']}.deb"
+```
+
+A Debian filename carries the **package's** architecture, which for an
+`Architecture: all` package is `_all`. So the lookup missed, `local_old` was
+never a file, and the delta branch was skipped entirely. The same expression
+chose the package to keep for a rollback, which would have left nothing to
+roll back to.
+
+**What makes this worth more than its one-line fix** is how it failed. Nothing
+errored. `--install` printed `downloaded the full package`, dpkg installed the
+right bytes, the signature was verified, and the update succeeded — while the
+delta channel, which is the roadmap requirement F12 exists to satisfy,
+transferred not one byte less than a full download. An operator would have
+paid for it indefinitely without a single log line saying so.
+
+It is also only reachable *because* of F47: with `Architecture: amd64` the
+filename and the configured arch agreed by accident, and the lifecycle's own
+delta assertion passed. Making one field honest exposed the other. Which is
+the audit's recurring shape again — **a control that exists in the vocabulary
+and reaches nothing**, this time in the measurement rather than in the
+product.
+
+The base package is now found by globbing `{PACKAGE}_{version}_*.deb`, so
+whatever architecture the package declares, the file is found. Two tests, both
+confirmed to fail against the old expression: a client configured `amd64`
+against an `all` package, and a client configured `arm64` against the same
+channel.
 
 ---
 

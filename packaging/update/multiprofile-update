@@ -259,6 +259,26 @@ def cmd_check(cfg: dict[str, str]) -> int:
     return 10  # distinct from 0/1 so a script can branch on "there is one"
 
 
+def _kept_deb(version: str) -> Path | None:
+    """The locally kept .deb for a version, whatever its architecture suffix.
+
+    Deriving this filename from the *client's* configured architecture was
+    wrong in two ways at once. The package is `Architecture: all`, so its
+    filename ends `_all.deb`; and a client configured as `arm64` would have
+    looked for `_arm64.deb` on a channel that publishes one file for every
+    architecture. Either way the lookup missed.
+
+    The symptom was silent and expensive rather than loud: the base package
+    for a delta was simply never found, so every update downloaded in full
+    and the delta channel -- the roadmap requirement F12 exists for -- was
+    dead weight nobody would have noticed paying for. The rollback path had
+    the same bug, which would have been noticed, because it means there is
+    nothing to roll back to.
+    """
+    matches = sorted(STATE_DIR.glob(f"{PACKAGE}_{version}_*.deb"))
+    return matches[-1] if matches else None
+
+
 def _download(cfg: dict[str, str], work: Path, verbose: bool = True) -> tuple[Path, str]:
     """The new .deb, by delta when possible, verified either way."""
     base = cfg["url"].rstrip("/")
@@ -275,7 +295,7 @@ def _download(cfg: dict[str, str], work: Path, verbose: bool = True) -> tuple[Pa
     target = work / Path(candidate["Filename"]).name
 
     current = installed_version()
-    local_old = STATE_DIR / f"{PACKAGE}_{current}_{cfg['arch']}.deb" if current else None
+    local_old = _kept_deb(current) if current else None
     if (local_old and local_old.is_file() and shutil.which("zstd") is not None):
         for entry in _fetch_delta_manifest(cfg, work, hashes):
             if entry.get("package") != PACKAGE or entry.get("to") != version:
@@ -348,7 +368,7 @@ def cmd_install(cfg: dict[str, str], assume_yes: bool) -> int:
         # needs the network is not a rollback.
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         if current:
-            previous = _installed_deb_path(current, cfg)
+            previous = _kept_deb(current)
             if previous and previous.is_file():
                 shutil.copy2(previous, STATE_DIR / f"rollback_{PACKAGE}_{current}.deb")
         new_local = STATE_DIR / deb.name
@@ -363,9 +383,7 @@ def cmd_install(cfg: dict[str, str], assume_yes: bool) -> int:
     return 0
 
 
-def _installed_deb_path(version: str, cfg: dict[str, str]) -> Path | None:
-    candidate = STATE_DIR / f"{PACKAGE}_{version}_{cfg['arch']}.deb"
-    return candidate if candidate.is_file() else None
+
 
 
 def cmd_rollback(cfg: dict[str, str], assume_yes: bool) -> int:

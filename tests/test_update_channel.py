@@ -48,6 +48,8 @@ pytestmark = pytest.mark.skipif(
     shutil.which("gpg") is None, reason="gpg is required to sign the channel"
 )
 
+zstd_required = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd not installed")
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -476,6 +478,55 @@ def test_the_verifier_checks_every_arch_the_release_names(arch_all_channel, tmp_
     assert out.returncode != 0, out.stdout
 
 
+@zstd_required
+def test_the_delta_is_used_when_the_package_is_arch_independent(arch_all_channel, tmp_path):
+    """The base package is found by *its* architecture, not the client's.
+
+    `Architecture: all` means the kept file is `_all.deb` while the client
+    config says `arch = amd64`. Deriving the base filename from the config
+    missed it, and the failure was silent: the delta was skipped and the full
+    package downloaded, so the delta channel existed and transferred nothing
+    less. Found by the lifecycle, not by reading -- "the delta path was not
+    used" was the only sign.
+    """
+    client = tmp_path / "client-delta"
+    client.mkdir()
+    srv = _Server(arch_all_channel["repo"])
+    try:
+        env = _client_env(client, arch_all_channel["repo"], srv.url, installed="1.0.0")
+        state = client / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        base = arch_all_channel["repo"] / "pool/main/multiprofile-native_1.0.0_all.deb"
+        shutil.copy2(base, state / "multiprofile-native_1.0.0_all.deb")
+        out = _run_updater(env, "--download")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert "applied a delta" in out.stdout, out.stdout + out.stderr
+    finally:
+        srv.close()
+
+
+@zstd_required
+def test_the_delta_is_used_when_the_client_arch_differs(arch_all_channel, tmp_path):
+    """And on arm64, where the config arch matches neither the package nor
+    anything in the pool."""
+    client = tmp_path / "client-delta-arm64"
+    client.mkdir()
+    srv = _Server(arch_all_channel["repo"])
+    try:
+        env = _client_env(client, arch_all_channel["repo"], srv.url, installed="1.0.0")
+        conf = client / "update.conf"
+        conf.write_text(conf.read_text().replace("arch = amd64", "arch = arm64"))
+        state = client / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        base = arch_all_channel["repo"] / "pool/main/multiprofile-native_1.0.0_all.deb"
+        shutil.copy2(base, state / "multiprofile-native_1.0.0_all.deb")
+        out = _run_updater(env, "--download")
+        assert out.returncode == 0, out.stdout + out.stderr
+        assert "applied a delta" in out.stdout, out.stdout + out.stderr
+    finally:
+        srv.close()
+
+
 def test_a_client_on_another_arch_finds_the_update(arch_all_channel, tmp_path):
     """The arm64 path, as far as it can be driven on an amd64 host: the
     client is configured as arm64, fetches the arm64 index, and finds the
@@ -498,7 +549,6 @@ def test_a_client_on_another_arch_finds_the_update(arch_all_channel, tmp_path):
 # 3. Deltas
 # --------------------------------------------------------------------------
 
-zstd_required = pytest.mark.skipif(shutil.which("zstd") is None, reason="zstd not installed")
 
 
 @zstd_required
