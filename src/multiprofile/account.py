@@ -230,6 +230,10 @@ def delete_everything(confirmation: str) -> dict[str, Any]:
     from .storage.xdg import audit_path, clients_path, data_dir, profiles_path, templates_path
 
     removed: dict[str, Any] = {}
+    # What could not be removed. A deletion that reports only what it managed
+    # to delete cannot be told apart from a complete one, and this is the
+    # operation 07 §6 answers "yes" with (F51).
+    left_behind: list[str] = []
 
     # The database first, and closed before its files are unlinked: removing a
     # file out from under an open SQLite connection leaves the process holding
@@ -258,6 +262,7 @@ def delete_everything(confirmation: str) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001
         log.warning("could not remove the control database: %s", e)
         removed["database"] = False
+        left_behind.append(str(db_path))
 
     # Browser directories: the cookies and logins. A deletion that leaves
     # these is not a deletion, it is hiding the index.
@@ -273,6 +278,7 @@ def delete_everything(confirmation: str) -> dict[str, Any]:
                     child.unlink()
             except OSError as e:
                 log.warning("could not remove %s: %s", child, e)
+                left_behind.append(str(child))
     removed["browserDirectories"] = directories
 
     files = 0
@@ -283,6 +289,7 @@ def delete_everything(confirmation: str) -> dict[str, Any]:
                 files += 1
         except OSError as e:
             log.warning("could not remove %s: %s", path, e)
+            left_behind.append(str(path))
     # Cookie jars live in their own directory beside the profiles.
     try:
         from .cookies_store import cookies_path
@@ -293,11 +300,17 @@ def delete_everything(confirmation: str) -> dict[str, Any]:
                 try:
                     child.unlink()
                     files += 1
-                except OSError:
-                    continue
+                except OSError as e:
+                    # Was `continue` with nothing said. A cookie jar that
+                    # survives an account deletion is the whole of what the
+                    # deletion was for (F51).
+                    log.warning("could not remove %s: %s", child, e)
+                    left_behind.append(str(child))
     except Exception as e:  # noqa: BLE001
         log.debug("no cookie directory to clear: %s", e)
     removed["files"] = files
+    removed["leftBehind"] = left_behind
+    removed["complete"] = not left_behind
     removed["deletedAt"] = _utcnow()
     log.warning("account data deleted: %s", removed)
     return removed

@@ -2825,11 +2825,22 @@ that had been reviewed was not the one an operator reaches with
 `?permanent=1`. They share an implementation now, with a test that fails if
 they stop sharing it.
 
-**Tests:** `tests/test_permanent_delete_reports_truth.py` — six, including a
-purge made to fail the way a real one does (a read-only parent directory, so
-`rmtree` leaves the tree), checked both through the store and through the
-endpoint, and asserting the cookies are **still on disk** afterwards. Both
-confirmed to fail against the restored swallow.
+**The same defect one level up.** `account.delete_everything()` — the
+operation behind *"can we delete our data?"* — reported
+`browserDirectories: N` and `files: N` and said nothing about what it could
+not remove, so three of three and three of five read identically. Its
+cookie-jar loop was the worst of them: a bare `except OSError: continue`, so
+a surviving cookie jar was dropped from the count with nothing logged. It now
+carries `leftBehind` and `complete` alongside the counts, and logs each
+failure.
+
+**Tests:** `tests/test_permanent_delete_reports_truth.py` — eight. A purge
+made to fail the way a real one does (a read-only parent directory, so
+`rmtree` leaves the tree), checked through the store and through the
+endpoint, and asserting the cookies are **still on disk** afterwards; the
+same for an account-wide deletion; and one that fails if the two
+permanent-delete paths stop sharing an implementation. Three confirmed to
+fail against the restored swallows.
 
 ---
 

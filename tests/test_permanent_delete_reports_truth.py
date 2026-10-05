@@ -171,3 +171,41 @@ def test_emptying_the_trash_uses_the_same_purge():
         store.purge_profile_files = real
     assert calls == [pid], "purge_profile no longer shares purge_profile_files"
     assert not root.exists()
+
+
+# --------------------------------------------------------------------------
+# 4. The same thing one level up: deleting the whole account
+# --------------------------------------------------------------------------
+
+def test_an_account_deletion_reports_completeness():
+    from multiprofile import account
+
+    _make_profile_with_storage("acct")
+    report = account.delete_everything(account.DELETE_CONFIRMATION)
+    assert report["complete"] is True, report
+    assert report["leftBehind"] == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_an_account_deletion_that_leaves_a_profile_says_so():
+    """`delete_everything` reported `browserDirectories: N` and nothing about
+    what it could not remove, so three of three and three of five looked the
+    same. The cookie-jar loop was worse: a bare `except OSError: continue`.
+    """
+    from multiprofile import account
+    from multiprofile.storage.xdg import data_dir
+
+    _, root = _make_profile_with_storage("acct-stuck")
+    inner = root / "Default"
+    original = stat.S_IMODE(inner.stat().st_mode)
+    os.chmod(inner, 0o500)
+    try:
+        report = account.delete_everything(account.DELETE_CONFIRMATION)
+        assert report["complete"] is False, (
+            f"an incomplete deletion reported as complete: {report}"
+        )
+        assert any(str(root) in p for p in report["leftBehind"]), report["leftBehind"]
+        assert (inner / "Cookies").exists()
+        assert (data_dir() / "chrome-profiles").is_dir()
+    finally:
+        os.chmod(inner, original)
