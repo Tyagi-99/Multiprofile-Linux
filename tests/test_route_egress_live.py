@@ -393,3 +393,147 @@ def test_an_ip_authorised_socks5_proxy_is_not_refused(lab):
         "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
     }, commit=False)
     assert unsupported_route_reason(config) is None
+
+
+# --------------------------------------------------------------------------
+# The proxy goes away mid-session
+# --------------------------------------------------------------------------
+#
+# The roadmap's sharpest requirement: "a prelaunch check cannot prove that a
+# later disconnect ... stays on the intended route" and "deliberately
+# disconnect the proxy during a session and prove what happens next. For
+# profiles requiring a fixed route, do not silently fall back to the host
+# connection."
+#
+# A pre-launch probe is structurally unable to answer this. The only way to
+# know is to kill the proxy with the browser still running and then watch the
+# destination.
+
+
+@pytest.mark.parametrize("name,expected_source",
+                         (("http", "127.0.0.2"), ("socks5", "127.0.0.3")))
+def test_a_mid_session_proxy_drop_does_not_fall_back_to_the_host(
+    lab, name, expected_source
+):
+    """Kill the proxy with the browser running; the host address must not
+    appear at the destination afterwards."""
+    import multiprofile.browser.launcher as L
+
+    destination = lab["destination"]
+    proxy = lab["proxies"][name]
+    nav = f"http://127.0.0.1:{destination.port}/dest?drop={name}&phase=before"
+    profile_id, port = _launch({
+        "name": f"drop-{name}",
+        "proxyType": "socks5" if name == "socks5" else "http",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+    }, nav)
+    try:
+        # Precondition: the route works at all, or the rest proves nothing.
+        before = _fetch_in_page(port, f"/dest?drop={name}&phase=before2")
+        assert before.get("ok") is True, (name, before)
+        assert set(destination.sources_for(f"drop={name}")) == {expected_source}
+
+        # The event under test. hard_stop, not stop: closing only the
+        # listener left Chromium relaying through an already-established
+        # tunnel, so this test passed for the wrong reason -- the request
+        # arrived from the proxy's own source address, which is correct
+        # behaviour for a proxy that is still running. A proxy going away
+        # severs what the browser had open.
+        proxy.hard_stop()
+        time.sleep(1.5)
+
+        _fetch_in_page(port, f"/dest?drop={name}&phase=after")
+        sources_after = destination.sources_for(f"drop={name}&phase=after")
+
+        # THE GATE, and the only claim this lab can make honestly: whatever
+        # happens after the proxy dies, the request must never arrive from
+        # the host address. That is the roadmap's requirement -- "do not
+        # silently fall back to the host connection" -- and it holds.
+        assert "127.0.0.1" not in sources_after, (
+            f"{name}: after the proxy died the browser reached the "
+            f"destination from the host address: {sources_after}"
+        )
+
+        # What is deliberately NOT asserted, and why.
+        #
+        # "No request arrives at all" would be the stronger claim, and for
+        # SOCKS5 it is what happens. For the HTTP proxy it is not assertable
+        # *with this lab*, because the lab proxy is a dumb pipe: after it
+        # relays the first request it is a bidirectional socket pair, so
+        # HTTP/1.1 keep-alive requests pass through its logic untouched --
+        # visible in the destination's own log, which shows absolute-form
+        # paths (`http://127.0.0.1:PORT/dest?...`) that only a verbatim
+        # forward produces. A real proxy parses every request on the
+        # connection; this one does not, so "the proxy is gone" and "the pipe
+        # is gone" are not the same event here.
+        #
+        # Severing every tracked socket (`hard_stop`) still left one request
+        # arriving from 127.0.0.2 in origin form, which means it went through
+        # the proxy's own handler after the listener was closed -- a lab
+        # behaviour this harness does not yet explain. It is recorded in
+        # docs/NETWORK_ISOLATION.md §7b rather than asserted around, because
+        # the security-relevant question is answered either way: the source
+        # was the proxy, never the host.
+        assert all(src in ("127.0.0.2", "127.0.0.3") for src in sources_after), (
+            f"{name}: a request arrived from an unexpected source after the "
+            f"drop: {sources_after}"
+        )
+    finally:
+        L.stop_profile(profile_id)
+
+
+def test_a_websocket_follows_the_proxy_route(lab):
+    """WebSockets are named in the roadmap because they are a separate code
+    path in Chromium, not an HTTP request with a different header."""
+    import multiprofile.browser.launcher as L
+
+    destination = lab["destination"]
+    proxy = lab["proxies"]["http"]
+    nav = f"http://127.0.0.1:{destination.port}/dest?ws=nav"
+    profile_id, port = _launch({
+        "name": "ws-route", "proxyType": "http",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+    }, nav)
+    try:
+        before = proxy.connections
+        # The destination is a plain HTTP server, so the upgrade fails -- but
+        # the *connection attempt* is what is being measured, and it has to
+        # have gone through the proxy to be counted here.
+        import json as _json
+
+        import websocket
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/json", headers={"Host": f"localhost:{port}"}
+        )
+        target = next(t for t in _json.loads(
+            urllib.request.urlopen(request, timeout=5).read())
+            if t.get("type") == "page")
+        ws = websocket.create_connection(
+            target["webSocketDebuggerUrl"], timeout=30, suppress_origin=True)
+        try:
+            ws.send(_json.dumps({
+                "id": 1, "method": "Runtime.evaluate",
+                "params": {"expression": (
+                    "new Promise(res => {"
+                    f"  const s = new WebSocket('ws://127.0.0.1:{destination.port}/ws');"
+                    "   s.onopen = () => res('open');"
+                    "   s.onerror = () => res('error');"
+                    "   s.onclose = () => res('closed');"
+                    "   setTimeout(() => res('timeout'), 6000);"
+                    "})"
+                ), "awaitPromise": True, "returnByValue": True},
+            }))
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                message = _json.loads(ws.recv())
+                if message.get("id") == 1:
+                    break
+        finally:
+            ws.close()
+        assert proxy.connections > before, (
+            "the WebSocket attempt did not go through the proxy: connections "
+            f"stayed at {before}"
+        )
+    finally:
+        L.stop_profile(profile_id)

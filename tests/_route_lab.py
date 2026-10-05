@@ -161,6 +161,12 @@ class _BaseProxy:
         #: this is where that is observable rather than asserted.
         self.requested_hostnames: list[str] = []
         self.requested_literals: list[str] = []
+        #: Live sockets, so a proxy can be made to *vanish* rather than
+        #: merely stop accepting. The difference is measurable: closing only
+        #: the listener left Chromium relaying through an established tunnel,
+        #: so a "dropped proxy" test passed for the wrong reason.
+        self._live: list[socket.socket] = []
+        self._live_lock = threading.Lock()
         self._stop = threading.Event()
         self._listener = socket.socket()
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -190,6 +196,10 @@ class _BaseProxy:
     def _handle(self, client: socket.socket) -> None:
         raise NotImplementedError
 
+    def _track(self, *sockets: socket.socket) -> None:
+        with self._live_lock:
+            self._live.extend(sockets)
+
     def _connect_upstream(self, host: str, port: int) -> socket.socket:
         upstream = socket.socket()
         # The measurement. Binding the outbound socket is what lets the
@@ -201,13 +211,38 @@ class _BaseProxy:
         return upstream
 
     def stop(self) -> None:
-        """Close the listener. Existing tunnels are left to die on their own,
-        which is what a proxy going away mid-session looks like."""
+        """Stop accepting new connections. Established tunnels keep relaying.
+
+        This is a proxy that has stopped listening, not one that has gone
+        away, and the distinction turned out to matter: a mid-session test
+        using this still saw traffic arrive through an open tunnel, from the
+        proxy's own source address.
+        """
         self._stop.set()
         try:
             self._listener.close()
         except OSError:
             pass
+
+    def hard_stop(self) -> None:
+        """Vanish: close the listener *and* every established tunnel.
+
+        This is what a proxy going away mid-session actually looks like --
+        the process dies, the provider drops the route, the container is
+        killed. Anything the browser had open is severed.
+        """
+        self.stop()
+        with self._live_lock:
+            live, self._live = list(self._live), []
+        for sock in live:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 class HttpConnectProxy(_BaseProxy):
@@ -266,6 +301,7 @@ class HttpConnectProxy(_BaseProxy):
                 client.close()
                 return
             self.connections += 1
+            self._track(client, upstream)
             client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             _Tunnel(client, upstream).start()
             return
@@ -293,6 +329,7 @@ class HttpConnectProxy(_BaseProxy):
             if name in ("proxy-authorization", "proxy-connection"):
                 continue
             rebuilt.append(f"{name}: {value}")
+        self._track(client, upstream)
         upstream.sendall(("\r\n".join(rebuilt) + "\r\n\r\n").encode("latin-1") + rest)
         _Tunnel(client, upstream).start()
 
@@ -363,6 +400,7 @@ class Socks5Proxy(_BaseProxy):
             client.close()
             return
         self.connections += 1
+        self._track(client, upstream)
         client.sendall(b"\x05\x00\x00\x01" + socket.inet_aton("0.0.0.0")
                        + struct.pack("!H", 0))
         _Tunnel(client, upstream).start()

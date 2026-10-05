@@ -234,11 +234,45 @@ loopback destinations, so the fixture appends
 *appends*: every routing flag the product emits is still emitted. The
 consequence is that these tests do not cover the bypass list itself.
 
+### A mid-session proxy drop
+
+The roadmap's sharpest requirement, because a pre-launch probe is
+structurally unable to answer it: *"deliberately disconnect the proxy during
+a session and prove what happens next. For profiles requiring a fixed route,
+do not silently fall back to the host connection."*
+
+Measured by killing the proxy with the browser still running:
+
+| route | after the drop | verdict |
+|---|---|---|
+| SOCKS5 | **no request arrives at all** | ✅ |
+| HTTP | one request arrives, **from the proxy's address** (`127.0.0.2`) | ✅ no host fallback |
+
+**The host address never appears in either case**, which is the requirement.
+A WebSocket attempt is also confirmed to go through the proxy rather than
+around it — it is a separate code path in Chromium, not an HTTP request with
+a different header.
+
+**A limitation of the lab, stated rather than asserted around.** The lab
+proxy is a dumb pipe: once it has relayed the first request it is a
+bidirectional socket pair, so HTTP/1.1 keep-alive requests pass through its
+logic untouched. The destination's own log shows this directly — absolute-form
+paths (`http://127.0.0.1:PORT/dest?...`) that only a verbatim forward
+produces. A real proxy parses every request on the connection, so "the proxy
+is gone" and "the pipe is gone" are the same event there and not here.
+
+Severing every tracked socket still left one request arriving from
+`127.0.0.2` in origin form, meaning it reached the proxy's own handler after
+the listener was closed. **That lab behaviour is unexplained.** It is recorded
+rather than asserted around, because the security-relevant question is
+answered either way: the source was the proxy, never the host. Proving
+"requests stop entirely" for an HTTP proxy needs a faithful proxy, which is
+outstanding.
+
 **What is still outstanding.** No real third-party proxy over a real network:
 no NAT, no MTU, no latency, no IPv6 path, and no provider that can fail in
-ways a local process cannot. Also not yet covered: a mid-session proxy drop,
-WebSockets, downloads, and WebRTC through a proxy. Those are Phase 3's
-remaining items.
+ways a local process cannot. Also not yet covered: downloads, WebRTC through
+a proxy, and IPv6 egress.
 
 ---
 
