@@ -271,6 +271,147 @@ def test_a_signature_from_another_key_is_refused(channel, tmp_path):
     assert out.returncode != 0, out.stdout
 
 
+def _make_key(home: Path, name: str) -> str:
+    """A disposable signing key in its own GNUPGHOME; returns the fingerprint."""
+    home.mkdir(parents=True, exist_ok=True)
+    home.chmod(0o700)
+    params = home / f"params-{name}"
+    params.write_text(
+        "%no-protection\nKey-Type: eddsa\nKey-Curve: ed25519\n"
+        f"Name-Real: {name}\nName-Comment: DISPOSABLE\n"
+        f"Name-Email: {name.lower()}@multiprofile.invalid\n"
+        "Expire-Date: 0\n%commit\n"
+    )
+    env = {**os.environ, "GNUPGHOME": str(home)}
+    subprocess.run(["gpg", "--batch", "--quiet", "--gen-key", str(params)],
+                   check=True, env=env, capture_output=True)
+    listing = subprocess.run(
+        ["gpg", "--list-secret-keys", "--with-colons", f"<{name.lower()}@multiprofile.invalid>"],
+        check=True, env=env, capture_output=True, text=True,
+    ).stdout
+    return next(ln.split(":")[9] for ln in listing.splitlines() if ln.startswith("fpr"))
+
+
+@pytest.fixture()
+def rotation(channel, tmp_path):
+    """The channel re-signed by a second key, with both keys published.
+
+    This is the overlap window of a key rotation: the keyring carries the
+    outgoing and the incoming key, and either signature is acceptable.
+    """
+    old_key = channel["key"]
+    home = Path(channel["home"])
+    new_key = _make_key(home, "Successor")
+    repo = tmp_path / "rotated"
+    shutil.copytree(channel["repo"], repo)
+    out = subprocess.run(
+        [sys.executable, str(SCRIPTS / "release.py"), "--repo", str(repo),
+         "--key-id", new_key, "--also-publish-key", old_key,
+         "--gnupghome", str(home)],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    return {"repo": repo, "home": str(home), "old": old_key, "new": new_key}
+
+
+def test_a_rotation_publishes_both_keys(rotation):
+    """Both fingerprints must be in the published keyring, or the install
+    that fetches it cannot verify the channel it fetched it from."""
+    asc = (rotation["repo"] / "multiprofile-archive-keyring.asc").read_text()
+    assert asc.count("BEGIN PGP PUBLIC KEY BLOCK") == 2, asc[:200]
+    shown = subprocess.run(
+        ["gpg", "--batch", "--with-colons", "--import-options", "show-only",
+         "--import", str(rotation["repo"] / "multiprofile-archive-keyring.asc")],
+        capture_output=True, text=True,
+    ).stdout
+    fprs = {ln.split(":")[9] for ln in shown.splitlines() if ln.startswith("fpr:")}
+    assert rotation["old"] in fprs and rotation["new"] in fprs, fprs
+
+
+def test_the_verifier_accepts_the_rotated_channel(rotation):
+    out = subprocess.run(
+        [sys.executable, str(SCRIPTS / "verify_release.py"),
+         "--repo", str(rotation["repo"]), "--gnupghome", rotation["home"],
+         "--key-id", rotation["new"]],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+
+
+def test_a_client_holding_both_keys_accepts_the_new_signature(rotation, tmp_path):
+    """gpgv succeeds on any key in the keyring, which is what makes the
+    overlap window free: nothing has to be switched in lockstep."""
+    client = tmp_path / "client"
+    client.mkdir()
+    srv = _Server(rotation["repo"])
+    try:
+        env = _client_env(client, rotation["repo"], srv.url, installed="1.0.0")
+        out = _run_updater(env, "--check")
+        assert out.returncode == 10, out.stdout + out.stderr
+        assert "1.0.0 -> 1.1.0" in out.stdout
+    finally:
+        srv.close()
+
+
+def test_signing_with_an_unpublished_key_is_caught_before_it_ships(channel, tmp_path):
+    """The rotation footgun, as a check rather than as an outage.
+
+    Switching the signing key without publishing it produces a repository
+    that is internally correct and that every install refuses: the keyring
+    they fetch from the channel does not contain the key that signed it. The
+    verifier has to say so, because by the time an install says it the
+    update has already stopped working in the field.
+    """
+    home = tmp_path / "unpublished-gnupg"
+    new_key = _make_key(home, "Unpublished")
+    repo = tmp_path / "no-overlap"
+    shutil.copytree(channel["repo"], repo)
+    # Re-sign with the new key, but leave the published keyring as it was.
+    published_before = (repo / "multiprofile-archive-keyring.asc").read_text()
+    subprocess.run(
+        [sys.executable, str(SCRIPTS / "release.py"), "--repo", str(repo),
+         "--key-id", new_key, "--gnupghome", str(home)],
+        check=True, capture_output=True, text=True,
+    )
+    (repo / "multiprofile-archive-keyring.asc").write_text(published_before)
+
+    out = subprocess.run(
+        [sys.executable, str(SCRIPTS / "verify_release.py"),
+         "--repo", str(repo), "--gnupghome", str(home), "--key-id", new_key],
+        capture_output=True, text=True,
+    )
+    assert out.returncode != 0, out.stdout
+    assert "published keyring carries the signing key" in out.stdout, out.stdout
+
+
+def test_a_client_holding_only_the_old_key_refuses_the_new_signature(channel, tmp_path):
+    """Why the overlap window exists, stated as a test: no overlap means
+    every install stops updating, including on the update that would have
+    delivered the new key."""
+    home = tmp_path / "lockout-gnupg"
+    new_key = _make_key(home, "Lockout")
+    repo = tmp_path / "locked-out"
+    shutil.copytree(channel["repo"], repo)
+    old_asc = (repo / "multiprofile-archive-keyring.asc").read_text()
+    subprocess.run(
+        [sys.executable, str(SCRIPTS / "release.py"), "--repo", str(repo),
+         "--key-id", new_key, "--gnupghome", str(home)],
+        check=True, capture_output=True, text=True,
+    )
+    (repo / "multiprofile-archive-keyring.asc").write_text(old_asc)
+
+    client = tmp_path / "client"
+    client.mkdir()
+    srv = _Server(repo)
+    try:
+        env = _client_env(client, repo, srv.url, installed="1.0.0")
+        out = _run_updater(env, "--check")
+        assert out.returncode not in (0, 10), out.stdout + out.stderr
+        assert "signature" in (out.stdout + out.stderr).lower(), out.stdout + out.stderr
+    finally:
+        srv.close()
+
+
 # --------------------------------------------------------------------------
 # 3. Deltas
 # --------------------------------------------------------------------------

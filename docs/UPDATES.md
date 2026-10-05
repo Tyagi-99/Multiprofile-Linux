@@ -202,6 +202,79 @@ in CI means anyone who can push a workflow change can sign a release.
 The safer arrangement, if it is ever needed: build in CI, publish the
 unsigned artefacts, and sign on a machine a human controls.
 
+### 4.6 Rotating the signing key
+
+The key in §4.1 expires after two years, and a key can also need replacing
+sooner — a lost passphrase, a machine that should not have held it, a
+maintainer leaving. Rotation has one failure mode worth stating plainly,
+because it is silent and it is total:
+
+> **Signing with a key the fleet does not yet hold stops every install
+> updating — including the update that would have delivered the new key.**
+> The client keyring is pinned (`keyring =` in `update.conf`), and the
+> keyring on the channel is only consulted by a *new* install. An install
+> that already trusts the old key refuses a channel signed by the new one,
+> and the error reads like a tampered download.
+
+So the switch is staged, with an overlap window in which both keys are
+published and only the old key signs.
+
+**Step 1 — create the incoming key**, exactly as §4.1, with a new email or
+comment so the two are distinguishable.
+
+**Step 2 — publish both keys, still signing with the outgoing one.** This is
+what `--also-publish-key` is for:
+
+```bash
+python3 scripts/release.py \
+  --repo /srv/multiprofile-repo \
+  --key-id <OUTGOING_FPR> \
+  --also-publish-key <INCOMING_FPR> \
+  --gnupghome ~/.multiprofile-signing
+```
+
+Publish the incoming fingerprint out of band too, the same way §4.1 says to.
+
+**Step 3 — let installs pick the new keyring up.** They do not do this on
+their own: the keyring is an operator-installed file, so until someone
+re-runs the `curl … | gpg --dearmor` step from §4.4, that machine still holds
+only the old key. Give the fleet a release cycle, and tell operators.
+`gpgv` succeeds on any key in the keyring, so the window is free while open.
+
+**Step 4 — switch which key signs.** Keep publishing both:
+
+```bash
+python3 scripts/release.py \
+  --repo /srv/multiprofile-repo \
+  --key-id <INCOMING_FPR> \
+  --also-publish-key <OUTGOING_FPR> \
+  --gnupghome ~/.multiprofile-signing
+
+python3 scripts/verify_release.py \
+  --repo /srv/multiprofile-repo --key-id <INCOMING_FPR>
+```
+
+**Step 5 — drop the outgoing key** once no install can still be holding only
+it. Stop passing `--also-publish-key`, and destroy the old private key.
+
+`verify_release.py` now fails if the published keyring does not contain the
+key that signed, which turns the footgun in step 4 into a check that runs
+before anything ships rather than an outage discovered in the field. Five
+tests in `tests/test_update_channel.py` cover the rotation: both keys
+published, the verifier accepting the rotated channel, a client holding both
+keys accepting the new signature, the verifier catching an unpublished
+signing key, and a client holding only the old key refusing — the last being
+why the overlap exists.
+
+**Revocation** is different and is not a staged process. If a private key is
+believed compromised, generate a revocation certificate (`gpg
+--gen-revoke`), publish it, publish the replacement fingerprint out of band,
+and tell operators to replace the keyring immediately — a revoked key does
+not stop an attacker who holds it from signing something a client will still
+accept, so the only real remedy is the pinned keyring changing on each
+machine. Generate the revocation certificate **when the key is created**, not
+when it is needed; needing it usually means not being able to make it.
+
 ## 5. What remains unverified
 
 Stated plainly, because "signed builds are done" would not be true.
@@ -213,7 +286,7 @@ Stated plainly, because "signed builds are done" would not be true.
 | **`apt update` / `apt install` against a live repository** | The lifecycle installs with `dpkg -i` from a local HTTP repo. The apt sources line in §4.4 is written from the format's requirements, not from a run. |
 | **Upgrade across a genuine code change** | The two versions in the lifecycle differ only in their version markers, because that is enough to exercise the mechanism. A real upgrade also has to survive `postinst` against changed files and a running instance. |
 | **Anything but amd64, and anything but Debian/Ubuntu** | `Architecture: amd64` is hard-coded; there is no arm64 build and no `.rpm` or AppImage. |
-| **Key rotation and revocation** | No procedure is written. This matters before the two-year expiry, not after. |
+| **Key rotation, in the field** | The procedure is written (§4.6) and the mechanism is tested — both keys published, either signature accepted, an unpublished signing key refused before it ships. What is untested is a real fleet re-running the keyring step, which is the part that depends on operators rather than on code. |
 | **Unattended installing in the field** | Implemented and off by default (§2b). It has been exercised against a throwaway channel in CI, never against a real one, and never on a machine doing real work. |
 | **The daily checker against a live host** | The schedule, the signature gate and the refusals are tested; what is untested is a year of a real server answering, including the day it returns a 500 or a stale index. |
 

@@ -77,6 +77,37 @@ def verify_signature(repo: Path, suite: str, gnupghome: str | None,
                     f"{name} is signed by the expected key")
 
 
+def verify_published_keyring(repo: Path, key_id: str | None, c: Checker) -> None:
+    """The published key must contain whichever key actually signed.
+
+    This file is the trust root, so nothing signed can vouch for it -- an
+    operator compares its fingerprint out of band. What can be checked is
+    that it is internally consistent with the repository beside it. Signing
+    with a key the published keyring does not carry is the rotation footgun:
+    an install that adds the keyring from this channel then rejects the
+    channel, and the failure looks like a corrupt download rather than a
+    missing key.
+    """
+    asc = repo / "multiprofile-archive-keyring.asc"
+    if not c.check(asc.is_file(), "the public keyring is published"):
+        return
+    proc = subprocess.run(
+        ["gpg", "--batch", "--with-colons", "--import-options", "show-only",
+         "--import", str(asc)],
+        capture_output=True, text=True,
+    )
+    fprs = [ln.split(":")[9] for ln in proc.stdout.splitlines()
+            if ln.startswith("fpr:")]
+    c.check(bool(fprs), "the published keyring parses as a public key",
+            proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "")
+    if key_id and fprs:
+        want = key_id.upper().replace(" ", "")
+        c.check(any(f.upper().endswith(want) or want.endswith(f.upper())
+                    for f in fprs),
+                "the published keyring carries the signing key",
+                f"published {', '.join(fprs)}")
+
+
 def verify_release_hashes(repo: Path, suite: str, c: Checker) -> None:
     dist = repo / "dists" / suite
     release = dist / "Release"
@@ -189,6 +220,7 @@ def main(argv: list[str]) -> int:
         print("  --    skipped by request")
     else:
         verify_signature(args.repo, args.suite, args.gnupghome, args.key_id, c)
+        verify_published_keyring(args.repo, args.key_id, c)
     print("release indices")
     verify_release_hashes(args.repo, args.suite, c)
     print("packages")

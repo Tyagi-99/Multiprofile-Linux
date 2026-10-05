@@ -244,12 +244,30 @@ def _env(overrides: dict[str, str] | None) -> dict[str, str] | None:
     return merged
 
 
-def export_key(repo: Path, key_id: str, gnupghome: str | None) -> Path:
-    """The public key an installer adds to /etc/apt/keyrings."""
+def export_key(repo: Path, key_ids: str | list[str], gnupghome: str | None) -> Path:
+    """The public key(s) an installer adds to /etc/apt/keyrings.
+
+    More than one may be published at a time, and that is what makes a key
+    rotation survivable. The keyring is pinned on the client and is fetched
+    out of band, so an install only ever trusts the keys that were in the
+    keyring it already has. Signing with a new key before clients hold it
+    stops every install updating -- including the update that would have
+    delivered the new key. So a rotation publishes both keys, waits for the
+    fleet to pick the keyring up, and only then switches which key signs.
+    `gpgv` accepts a keyring with several keys and succeeds on any one of
+    them, so the overlap window costs nothing while it is open.
+    """
+    if isinstance(key_ids, str):
+        key_ids = [key_ids]
     out = repo / "multiprofile-archive-keyring.asc"
-    proc = _run(["gpg", "--batch", "--yes", "--armor", "--export", key_id],
-                env=_env({"GNUPGHOME": gnupghome} if gnupghome else None))
-    out.write_text(proc.stdout, encoding="utf-8")
+    blocks = []
+    for key_id in key_ids:
+        proc = _run(["gpg", "--batch", "--yes", "--armor", "--export", key_id],
+                    env=_env({"GNUPGHOME": gnupghome} if gnupghome else None))
+        if "BEGIN PGP PUBLIC KEY BLOCK" not in proc.stdout:
+            raise SystemExit(f"gpg exported no public key for {key_id}")
+        blocks.append(proc.stdout.strip() + "\n")
+    out.write_text("".join(blocks), encoding="utf-8")
     return out
 
 
@@ -264,6 +282,12 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--origin", default="Multiprofile")
     ap.add_argument("--key-id", help="gpg key to sign with; unsigned when omitted")
     ap.add_argument("--gnupghome", help="GNUPGHOME for the signing key")
+    ap.add_argument("--also-publish-key", action="append", default=[],
+                    metavar="KEY_ID",
+                    help="publish this public key alongside the signing key "
+                         "without signing with it (repeatable). Use it during "
+                         "a key rotation so installs trust both the outgoing "
+                         "and the incoming key; see docs/UPDATES.md 4.6.")
     args = ap.parse_args(argv[1:])
 
     repo: Path = args.repo
@@ -292,8 +316,11 @@ def main(argv: list[str]) -> int:
 
     if args.key_id:
         detached, inline = sign_release(release, args.key_id, args.gnupghome)
-        key = export_key(repo, args.key_id, args.gnupghome)
-        print(f"signed: {detached.name}, {inline.name}; public key at {key.name}")
+        published = [args.key_id] + [k for k in args.also_publish_key
+                                     if k != args.key_id]
+        key = export_key(repo, published, args.gnupghome)
+        print(f"signed: {detached.name}, {inline.name}; "
+              f"{len(published)} public key(s) at {key.name}")
     else:
         # Said out loud rather than produced quietly: an unsigned repository
         # is a development convenience and apt will refuse it without
