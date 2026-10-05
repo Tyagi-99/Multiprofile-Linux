@@ -684,6 +684,51 @@ def _screen_metrics_override(fingerprint: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def _note_identity_matrix(notes: list[str], fingerprint: dict[str, Any],
+                          profile_id: str) -> None:
+    """Tell the operator, at launch, what this profile's claim can be backed by.
+
+    The matrix is consulted at create time to pick a default, and reported in
+    ``/api/health`` and on the profile detail page. Neither of those is where
+    an operator is looking when they press Launch, and this is the moment the
+    decision becomes live -- so an experimental claim says so here as well.
+
+    Deliberately a plain note and **not** an identity fault. A fault means
+    something on the identity path failed; a cross-OS claim has not failed,
+    it is working exactly as asked on every surface the product controls,
+    with one surface known to contradict it. Recording it as a fault would
+    put a permanent entry in ``/api/health`` for a configuration the operator
+    chose on purpose, and would devalue the faults that do mean something
+    broke.
+    """
+    try:
+        from ..fingerprint.identity_matrix import EXPERIMENTAL, verdict_for
+
+        claimed = " ".join(
+            str(fingerprint.get(k) or "") for k in ("platform", "ch_platform")
+        ).lower()
+        if "win" in claimed:
+            claim = "windows"
+        elif "mac" in claimed:
+            claim = "macos"
+        elif "android" in claimed:
+            claim = "android"
+        elif "iphone" in claimed or "ios" in claimed:
+            claim = "iphone"
+        else:
+            claim = "linux"
+        verdict = verdict_for(claim)
+        if verdict.status != EXPERIMENTAL:
+            return
+        notes.append(
+            f"identity claim '{claim}' is EXPERIMENTAL on this host: "
+            f"{', '.join(verdict.contradicts)} contradict it. "
+            f"{verdict.reasons[0] if verdict.reasons else ''}".strip()
+        )
+    except Exception as e:  # noqa: BLE001 - never fatal to a launch
+        log.debug("identity matrix note unavailable for %s: %s", profile_id, e)
+
+
 def _start_identity_injection(
     profile_id: str,
     port: int,
@@ -1388,6 +1433,8 @@ def launch_profile(
         # Google Chrome, ignoring"), leaving every one of those three jobs
         # undone while the console reported the profile healthy. Runs first
         # so a page is never unfrozen before its identity is installed.
+        _note_identity_matrix(notes, fingerprint, profile_id)
+
         try:
             notes.extend(_start_identity_injection(
                 profile_id, debug_port, profile, fingerprint, net,

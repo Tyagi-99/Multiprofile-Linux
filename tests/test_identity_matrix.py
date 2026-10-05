@@ -199,3 +199,89 @@ def test_a_mobile_profile_is_not_stamped_desktop():
 
     profile = create_profile({"name": "mobile", "isMobile": True})
     assert not profile.get("userAgentId"), profile.get("userAgentId")
+
+
+# --------------------------------------------------------------------------
+# 3. The operator has to be able to see it
+# --------------------------------------------------------------------------
+#
+# "Enforced" that an operator cannot see is a policy nobody can act on. The
+# verdict reaches three places on purpose, because each answers a different
+# question at a different moment: /api/health for "what can this machine
+# back", the profile detail for "what does THIS profile claim", and a launch
+# note for the moment the decision goes live.
+
+
+def _client():
+    from multiprofile.api.server import create_app
+
+    return create_app().test_client()
+
+
+def test_health_reports_the_matrix():
+    body = _client().get("/api/health").get_json()
+    matrix = body.get("identityMatrix") or {}
+    assert matrix.get("host", {}).get("platformClaim"), matrix
+    assert matrix.get("supported"), matrix
+    assert matrix.get("experimental"), matrix
+    claims = {c["claim"] for c in matrix.get("claims") or []}
+    assert {"linux", "windows", "macos", "android", "iphone"} <= claims, claims
+
+
+def test_the_profile_detail_carries_its_own_verdict():
+    """A global diagnostic does not answer "is *this* profile safe to move an
+    account onto"."""
+    client = _client()
+    native = client.post("/api/profiles", json={"name": "d-native"}).get_json()
+    cross = client.post(
+        "/api/profiles", json={"name": "d-win", "userAgentId": "win_chrome"}
+    ).get_json()
+
+    def verdict(created):
+        pid = created["profile"]["id"]
+        body = client.get(f"/api/profiles/{pid}").get_json()
+        return (body.get("profile", body) or {}).get("identity") or {}
+
+    assert verdict(native).get("status") == "supported", verdict(native)
+    experimental = verdict(cross)
+    assert experimental.get("status") == "experimental", experimental
+    assert "fonts" in (experimental.get("contradicts") or []), experimental
+
+
+def test_an_experimental_claim_is_noted_at_launch():
+    """The moment the decision goes live, in the place the operator is
+    actually looking."""
+    from multiprofile.browser.launcher import _note_identity_matrix
+
+    notes: list[str] = []
+    _note_identity_matrix(notes, {"platform": "Win32", "ch_platform": "Windows"}, "p1")
+    assert notes, "an experimental claim produced no launch note"
+    assert "EXPERIMENTAL" in notes[0], notes
+    assert "fonts" in notes[0], notes
+
+
+def test_a_supported_claim_is_not_noted_at_launch():
+    """A note on every launch is a note nobody reads."""
+    from multiprofile.browser.launcher import _note_identity_matrix
+
+    notes: list[str] = []
+    _note_identity_matrix(
+        notes, {"platform": "Linux x86_64", "ch_platform": "Linux"}, "p2")
+    assert notes == [], notes
+
+
+def test_the_launch_note_is_not_recorded_as_an_identity_fault():
+    """A cross-OS claim has not *failed* -- it is doing what was asked on
+    every surface the product controls. Recording it as a fault would put a
+    permanent entry in /api/health for a configuration the operator chose,
+    and devalue the faults that mean something broke."""
+    from multiprofile.browser import identity_faults
+    from multiprofile.browser.launcher import _note_identity_matrix
+
+    before = len(identity_faults.recent(limit=100))
+    notes: list[str] = []
+    _note_identity_matrix(notes, {"platform": "Win32", "ch_platform": "Windows"}, "p3")
+    assert notes, "precondition: the note should have been produced"
+    assert len(identity_faults.recent(limit=100)) == before, (
+        "the experimental note was recorded as an identity fault"
+    )

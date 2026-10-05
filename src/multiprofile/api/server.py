@@ -262,7 +262,41 @@ def _with_effective_geo(row: dict) -> dict:
     row["effectiveLanguage"] = plan["language"] or row.get("language")
     row["geoSource"] = plan["source"]
     row["geoConflicts"] = plan["conflicts"]
+    row["identity"] = _identity_verdict_for_row(row)
     return row
+
+
+def _identity_verdict_for_row(row: dict) -> dict:
+    """What this profile claims, and whether this host can back it.
+
+    On the detail page rather than only in ``/api/health``, because the
+    matrix is a per-profile property: an operator deciding whether to move a
+    valuable account onto a profile needs it next to that profile, not in a
+    global diagnostic they have to go and read.
+    """
+    try:
+        from ..fingerprint import build_fingerprint
+        from ..fingerprint.identity_matrix import verdict_for
+
+        fingerprint = row.get("fingerprint") or build_fingerprint(row)
+        claimed = " ".join(
+            str(fingerprint.get(k) or "")
+            for k in ("platform", "ch_platform")
+        ).lower()
+        if "win" in claimed:
+            claim = "windows"
+        elif "mac" in claimed:
+            claim = "macos"
+        elif "android" in claimed:
+            claim = "android"
+        elif "iphone" in claimed or "ios" in claimed:
+            claim = "iphone"
+        else:
+            claim = "linux"
+        return verdict_for(claim).to_dict()
+    except Exception as e:  # noqa: BLE001 - a detail page must still render
+        log.debug("identity verdict unavailable for %s: %s", row.get("id"), e)
+        return {"status": "unknown", "error": str(e)}
 
 
 def _list_rows(profiles: list) -> list:
@@ -370,6 +404,28 @@ def _runtime_state_name(profile_id: str) -> str | None:
         return None
     state = getattr(rt, "launch_state", None)
     return getattr(state, "value", state)
+
+
+def _identity_matrix_block() -> "dict[str, object]":
+    """The supported-identity matrix, for ``/api/health``.
+
+    Never raises: a health endpoint that fails because a diagnostic failed is
+    worse than one that reports the diagnostic as unavailable.
+    """
+    try:
+        from ..fingerprint.identity_matrix import host_description, matrix
+
+        verdicts = [v.to_dict() for v in matrix()]
+        return {
+            "host": host_description(),
+            "claims": verdicts,
+            "supported": [v["claim"] for v in verdicts if v["status"] == "supported"],
+            "experimental": [v["claim"] for v in verdicts
+                             if v["status"] == "experimental"],
+        }
+    except Exception as e:  # noqa: BLE001 - reported, not swallowed
+        log.warning("identity matrix unavailable: %s", e)
+        return {"error": f"unavailable: {e}"}
 
 
 def create_app() -> Flask:
@@ -510,6 +566,12 @@ def create_app() -> Flask:
                 # "faults": [] is a statement, not an absence: nothing has
                 # been swallowed since this process started.
                 "identity": identity_faults.health_summary(),
+                # Which claimed platforms this host can back coherently, and
+                # which it cannot. The roadmap asks for the matrix to be
+                # *enforced*; enforcement an operator cannot see is a policy
+                # nobody can act on, so it is reported beside the faults
+                # rather than only consulted at create time.
+                "identityMatrix": _identity_matrix_block(),
                 # Files this process could not make owner-only (F11/F4).
                 # Same reasoning as the identity block: [] is a statement that
                 # every write and repair landed 0600, not an absence.
