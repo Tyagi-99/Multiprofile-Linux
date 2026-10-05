@@ -22,14 +22,20 @@ step "1. build two versions"
 bash build-deb.sh >/dev/null
 cp dist/multiprofile-native_1.9.0_all.deb "$WORK/"
 # A second version, so there is something to update *to* and a delta between
-# them. Only the version markers differ, which is enough: this tests the
-# mechanism, not the diff.
+# them. The packaged Python changes too, not just the control fields: the
+# whole point of an update is that the code on disk is different afterwards,
+# and a lifecycle whose two versions ship byte-identical code cannot tell an
+# update that replaced the files from one that only rewrote the dpkg
+# database. __version__ is what /api/health reports, so the difference is
+# observable from outside the package.
 sed -i 's/^VERSION=1.9.0/VERSION=1.9.1/' build-deb.sh
 sed -i 's/^Version: 1.9.0/Version: 1.9.1/' packaging/debian/control
+sed -i 's/^__version__ = "1.9.0"/__version__ = "1.9.1"/' src/multiprofile/__init__.py
 bash build-deb.sh >/dev/null
 cp dist/multiprofile-native_1.9.1_all.deb "$WORK/"
 sed -i 's/^VERSION=1.9.1/VERSION=1.9.0/' build-deb.sh
 sed -i 's/^Version: 1.9.1/Version: 1.9.0/' packaging/debian/control
+sed -i 's/^__version__ = "1.9.1"/__version__ = "1.9.0"/' src/multiprofile/__init__.py
 ls -l "$WORK"/multiprofile-native_*.deb
 
 step "2. the fallback builder must match dpkg-deb"
@@ -105,6 +111,20 @@ grep -q "applied a delta" "$WORK/update.log" || { echo "the delta path was not u
 test "$(dpkg-query --showformat='${Version}' --show multiprofile-native)" = "1.9.1" \
   || { echo "update did not take"; exit 1; }
 echo "updated 1.9.0 -> 1.9.1 via delta: ok"
+
+# dpkg says 1.9.1; the question is whether the *files* changed. Ask the
+# installed application, not the package database.
+( nohup multiprofile --server-only --port 8778 >"$WORK/app-new.log" 2>&1 & )
+sleep 10
+python3 - <<'NEWVER'
+import json, urllib.request
+body = json.loads(urllib.request.urlopen("http://127.0.0.1:8778/api/health", timeout=15).read())
+assert body["version"] == "1.9.1", f"the updated install still runs {body['version']}"
+print("the updated install serves 1.9.1:", body["ok"])
+NEWVER
+pkill -f "multiprofile --server-only --port 8778" || true
+sleep 2
+echo "the update replaced the code, not just the dpkg record: ok"
 
 step "10. a tampered channel must be refused"
 # Two separate gates, because they fail for different reasons and a channel
