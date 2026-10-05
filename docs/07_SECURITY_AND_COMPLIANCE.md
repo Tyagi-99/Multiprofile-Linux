@@ -196,22 +196,48 @@ abuse signals arrive with it, and so does the obligation to act on them.
 | Concern | Status |
 |---|---|
 | Dependency pinning | Python deps pinned; `npm` lockfile present |
-| Dependency scanning | **None in CI** |
-| Signed builds | **None** — F12 open |
-| Auto-update | **None** — F12 open |
-| Reproducible builds | Not attempted |
+| Dependency scanning | `pip-audit` and `npm audit --audit-level=high` on every push, **advisory** (see below) |
+| Signed builds | **Built and tested, not published** — F12. Detached and inline signatures, a verifier with 19 offline checks, exercised in CI on every push |
+| Auto-update | **Implemented, nothing to update from** — F12. Daily checking, off until a channel is configured; installing is opt-in. See [`UPDATES.md`](UPDATES.md) §2b |
+| Key rotation | Procedure and overlap window documented and tested — [`UPDATES.md`](UPDATES.md) §4.6 |
+| Reproducible builds | `scripts/build_deb.py` is deterministic — fixed epoch, sorted entries, normalised ownership. The *whole* build is not yet reproducible end to end |
 | SBOM | **None** |
 | Crash reporting | Not wired; Chromium's own crashpad writes locally |
 | Telemetry | **None.** Nothing reports to any server |
 
 The last row is worth stating positively: this product makes **no network
 requests of its own**. Traffic originates from the browsers it launches, via
-the operator's configured proxies. F14 (Next.js build-time telemetry) is a
-build-machine concern, not a runtime one, and remains open as a 5-minute fix.
+the operator's configured proxies. The one exception is the update check, and
+it is an exception only once an operator has written
+`/etc/multiprofile/update.conf`; with no channel configured nothing is
+contacted, which is the behaviour F14 established and F12 was built not to
+break.
 
-Distribution is the weakest column here. An unsigned `.deb` with no update
-channel cannot be recommended to a commercial buyer, and `build-deb.sh` cannot
-be exercised on the development machine, so packaging changes ship unverified.
+**The dependency-audit job is advisory on purpose.** It runs
+`continue-on-error: true`, because an advisory published upstream overnight
+must not turn `main` red on its own while still being visible. A failure there
+is a ticket, not a broken build.
+
+**Known accepted advisory, as of 2026-10-05:** `GHSA-vfj7-8cjw-p6xm`
+(stack-exhaustion DoS in `braces`) reaches the tree only through
+`eslint-config-next` → `@next/eslint-plugin-next` → `fast-glob` →
+`micromatch` → `braces`. Every link is a **dev dependency used at lint time**;
+none of it is in the console's static export, so none of it reaches an
+installed machine. There is no patched `braces` — the advisory's range is `*`
+and 3.0.3 is the latest release — and `npm`'s only proposed fix is a downgrade
+to `eslint-config-next@14.2.35`, which does not support the Next.js 16 this
+console is built on. It is accepted rather than suppressed: the job keeps
+reporting it, so a *second* advisory does not hide behind a muted first one.
+Revisit when `braces` ships a fix or when the console's Next.js major moves.
+
+Distribution is no longer the weakest column, but it is still incomplete:
+`build-deb.sh` runs on the development machine and in CI now, and the whole
+signed lifecycle — build, sign, publish, verify, install, delta-update,
+refuse two kinds of tampered channel, roll back — runs in a clean Debian
+container on every push. What is missing is a real signing identity and a
+host, so **no installed copy anywhere can yet receive an update.**
+[`UPDATES.md`](UPDATES.md) §5 lists what stays unverified until there is
+one.
 
 ---
 
@@ -219,7 +245,7 @@ be exercised on the development machine, so packaging changes ship unverified.
 
 What a tester would find already documented: F3 (hook detectability), the
 absence of TLS, the absence of rate limiting, unencrypted Chrome profile
-directories, and the unsigned build chain.
+directories, and the build chain's missing production signing identity.
 
 What has been verified by testing during this audit: fail-closed proxy routing
 (F17 — an unresolvable route launched on the host IP and reported success),
@@ -242,7 +268,7 @@ If asked today, the honest answers are:
 - **Is access controlled?** Yes for remote API callers, with scopes. There are no user accounts, so there is no per-person access control.
 - **Can we export/delete our data?** Yes, both, with documented omissions.
 - **Is it penetration tested?** No.
-- **Are builds signed?** No.
+- **Are builds signed?** The mechanism is built, tested and verified in CI; there is no production key yet, so what ships today is not signed with one. F12.
 - **Is it undetectable?** No. See F3.
 
 ---
