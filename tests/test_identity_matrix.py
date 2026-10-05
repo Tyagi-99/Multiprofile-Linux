@@ -186,11 +186,20 @@ def test_an_explicit_user_agent_is_not_overwritten():
     assert build_fingerprint(profile)["platform"] == "MacIntel"
 
 
-def test_a_device_preset_is_not_overridden_by_the_default():
-    """A preset carries its own platform; stamping one would fight it."""
+@pytest.mark.parametrize("field", ("deviceId", "device_id", "devicePresetId"))
+def test_a_device_preset_is_not_overridden_by_the_default(field):
+    """A preset carries its own platform; stamping one would fight it.
+
+    Every spelling, because the canonical field is `deviceId` and the first
+    version of this guard checked only `devicePresetId` -- so a real
+    `deviceId: pixel-9` profile was stamped with the host claim and lost its
+    Android User-Agent. `validation.py` already warns that this exact
+    confusion has cost a test before; parametrising is what stops it costing
+    another one.
+    """
     from multiprofile.storage.profiles import create_profile
 
-    profile = create_profile({"name": "preset", "devicePresetId": "pixel-8"})
+    profile = create_profile({"name": f"preset-{field}", field: "pixel-9"})
     assert not profile.get("userAgentId"), profile.get("userAgentId")
 
 

@@ -467,6 +467,58 @@ def check_proxy(proxy: ProxyConfig, *, timeout: float = 8.0) -> ProxyHealthResul
     return _health_manager.check(proxy, timeout=timeout)
 
 
+def unsupported_route_reason(network_config: "NetworkConfig") -> str | None:
+    """A route this engine cannot actually use, named before it is launched.
+
+    **Authenticated SOCKS5.** Chromium has never implemented the SOCKS5
+    username/password authentication method (RFC 1929). It offers only
+    ``NO AUTHENTICATION REQUIRED`` in its greeting, so a proxy that requires
+    credentials refuses the handshake and every connection dies before any
+    request is made.
+
+    Measured on Chromium 151 against a local SOCKS5 proxy requiring
+    credentials, with the profile configured exactly as an operator would::
+
+        launch ok                 True       <- the product reported success
+        destination requests      0          <- nothing loaded, ever
+        socks connections opened  0
+        socks auth failures       40         <- Chromium refused the method,
+                                                 forty times
+        launch note               "proxy auth=armed"
+
+    It fails *closed*, which is the one good thing about it: the destination
+    saw nothing, so there is no host-IP leak. But it fails **silently from
+    the operator's side** -- a green launch, a note claiming proxy auth is
+    armed, and a browser that cannot load a page. The "armed" note refers to
+    the CDP ``Fetch.authRequired`` handler, which answers an HTTP ``407``
+    from an HTTP proxy and has nothing to do with SOCKS5.
+
+    This matters more than its size suggests: authenticated SOCKS5 is what
+    most commercial proxy providers sell, so it is a configuration an
+    operator is likely to try first.
+
+    Blocking is consistent with the rest of this module. A launch that
+    reports success and cannot browse is worse than a refused launch with a
+    reason, which is the whole argument behind ``ProxyFallback.BLOCK`` and
+    F17.
+    """
+    proxy = network_config.proxy
+    if proxy is None:
+        return None
+    if proxy.scheme in ("socks5", "socks5h", "socks4") and (proxy.username or ""):
+        return (
+            "This profile uses a SOCKS5 proxy with a username and password, "
+            "and Chromium does not implement SOCKS5 authentication (RFC 1929) "
+            "-- it only offers 'no authentication', so the proxy refuses the "
+            "handshake and no page can load. Measured: 0 requests reached the "
+            "destination and the proxy rejected 40 handshakes. "
+            "Use an HTTP or HTTPS proxy with the same credentials, or an "
+            "IP-authorised SOCKS5 endpoint with no username. Launch blocked "
+            "rather than started into a browser that cannot browse."
+        )
+    return None
+
+
 def check_proxy_before_launch(
     network_config: NetworkConfig,
     *,

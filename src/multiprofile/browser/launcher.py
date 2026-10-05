@@ -35,6 +35,7 @@ from ..network import (
     check_proxy_before_launch,
     chrome_network_flags,
     network_config_for_profile,
+    unsupported_route_reason,
 )
 from ..storage import db as _db
 from ..storage.profiles import get_profile, set_runtime, update_profile
@@ -1078,6 +1079,27 @@ def launch_profile(
             "ok": False,
             "error": net.blocked_reason,
             "errors": ["route_unresolved"],
+        }
+
+    # An unusable *kind* of route, checked unconditionally. This is not a
+    # health question -- "is this proxy up right now" and "can this engine use
+    # this kind of route at all" are different, and
+    # MULTIPROFILE_PROXY_CHECK_ENABLED=0 answers only the first. Putting this
+    # inside the health gate meant disabling the probe also disabled it, and
+    # an authenticated SOCKS5 profile launched green into a browser that
+    # could not load a page.
+    unsupported_reason = unsupported_route_reason(net)
+    if unsupported_reason:
+        if slot_held:
+            browser_manager.release_slot(profile_id)
+        audit_log("launch_blocked_route_unsupported", profile_id=profile_id,
+                  ok=False, detail={"error": unsupported_reason})
+        _record_state(profile_id, ProfileState.ERROR,
+                      note="route_unsupported: this engine cannot use this route")
+        return {
+            "ok": False,
+            "error": unsupported_reason,
+            "errors": ["route_unsupported"],
         }
 
     if settings.proxy_check_enabled and net.needs_proxy_check():

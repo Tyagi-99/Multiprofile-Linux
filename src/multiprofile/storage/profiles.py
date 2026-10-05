@@ -415,9 +415,14 @@ def _default_identity_claim(profile: dict[str, Any]) -> None:
         return
     if (profile.get("userAgentId") or "").strip():
         return
-    if profile.get("devicePresetId"):
-        # A device preset carries its own platform; stamping one here would
-        # fight it.
+    # A device preset carries its own platform; stamping one here would fight
+    # it. Every spelling, because the canonical field is `deviceId` and
+    # `validation.py` already warns that this exact confusion has cost a test
+    # before -- guarding only `devicePresetId` let a `deviceId: pixel-9`
+    # profile be stamped linux_chrome, which overrode the Android preset's
+    # User-Agent and was caught by test_integration_v16.
+    if any(profile.get(key) for key in
+           ("deviceId", "device_id", "devicePresetId")):
         return
     if profile.get("isMobile"):
         return

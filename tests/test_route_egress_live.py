@@ -1,0 +1,395 @@
+"""Where the traffic actually left from, observed at the destination.
+
+Phase 3 of the parity roadmap: *"a prelaunch check cannot prove that a later
+disconnect, WebRTC path, DNS lookup, IPv6 connection, WebSocket, worker, or
+download stays on the intended route"* and *"this gate should be judged by
+measured traffic, not only the app's health-check response."*
+
+Everything already in the suite tests the **decision** -- whether a launch is
+blocked, whether a flag is emitted. Nothing tested the **egress**. These do,
+by giving each hop its own loopback source address so the destination's
+``remote_addr`` names the hop that reached it:
+
+    direct                   127.0.0.1
+    HTTP proxy               127.0.0.2
+    SOCKS5 proxy             127.0.0.3
+    HTTP proxy + auth        127.0.0.4
+    SOCKS5 proxy + auth      127.0.0.5
+
+See ``tests/_route_lab.py``. What this does **not** cover is a real
+third-party proxy over a real network: no NAT, no MTU, no latency, no IPv6
+path, and no provider that can fail in ways a local process cannot. Real-world
+proxy validation is outstanding and recorded as such in
+``docs/NETWORK_ISOLATION.md``.
+"""
+from __future__ import annotations
+
+import json
+import time
+import urllib.request
+
+import pytest
+
+pytestmark = pytest.mark.network
+
+
+def _chrome_available() -> bool:
+    try:
+        from multiprofile.browser.launcher import find_chrome
+
+        find_chrome()
+        return True
+    except Exception:
+        return False
+
+
+pytest.importorskip("websocket")
+if not _chrome_available():
+    pytest.skip("Chrome is not installed", allow_module_level=True)
+
+from _route_lab import (  # noqa: E402
+    Destination,
+    HttpConnectProxy,
+    Socks5Proxy,
+    loopback_alias_available,
+)
+
+if not all(loopback_alias_available(a) for a in
+           ("127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5")):
+    pytest.skip(
+        "this host does not allow binding loopback aliases, so a destination "
+        "cannot attribute a hop and every assertion here would be vacuous",
+        allow_module_level=True,
+    )
+
+
+@pytest.fixture
+def lab(tmp_path, monkeypatch):
+    """A destination, four proxies, and an isolated store.
+
+    **One lab artefact, stated plainly.** Chrome implicitly bypasses the
+    proxy for loopback and link-local destinations, so a profile pointed at
+    127.0.0.1 connects directly however its proxy is configured. That is
+    correct behaviour for real browsing and the product does not change it --
+    but it means nothing on loopback is observable without turning it off, so
+    this fixture appends ``--proxy-bypass-list=<-loopback>`` to whatever the
+    launcher built.
+
+    It *appends*: every routing flag the product emits is still emitted and
+    still exercised. What is disabled is an unrelated default, and the
+    consequence is that these tests do not cover the bypass list itself --
+    a real proxy on a real network would.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "g"))
+    monkeypatch.setenv("MULTIPROFILE_NO_BACKGROUND", "1")
+    # The pre-launch probe would reject a proxy that is up but has nothing
+    # behind it yet; these tests are about egress, and the fail-closed
+    # decision has its own suite (test_route_fail_closed.py).
+    monkeypatch.setenv("MULTIPROFILE_PROXY_CHECK_ENABLED", "0")
+
+    # See the docstring: without this, loopback never reaches a proxy.
+    import multiprofile.network as net_mod
+
+    original_flags = net_mod.chrome_network_flags
+
+    def flags_without_loopback_bypass(network_config):
+        flags = list(original_flags(network_config))
+        if any(f.startswith("--proxy-server=") for f in flags):
+            flags.append("--proxy-bypass-list=<-loopback>")
+        return flags
+
+    monkeypatch.setattr(net_mod, "chrome_network_flags",
+                        flags_without_loopback_bypass)
+    import multiprofile.browser.launcher as launcher_mod
+
+    if hasattr(launcher_mod, "chrome_network_flags"):
+        monkeypatch.setattr(launcher_mod, "chrome_network_flags",
+                            flags_without_loopback_bypass)
+
+    destination = Destination()
+    proxies = {
+        "http": HttpConnectProxy("127.0.0.2"),
+        "socks5": Socks5Proxy("127.0.0.3"),
+        "http_auth": HttpConnectProxy("127.0.0.4", username="lab-http"),
+        "socks5_auth": Socks5Proxy("127.0.0.5", username="lab-socks"),
+    }
+    try:
+        yield {"destination": destination, "proxies": proxies}
+    finally:
+        for proxy in proxies.values():
+            proxy.stop()
+        destination.close()
+
+
+def _fetch_in_page(port: int, url: str, timeout: float = 25.0) -> dict:
+    """Make the *browser* fetch the URL, and report what it saw.
+
+    Driven from inside the page rather than from Python, so the request goes
+    through the profile's own network stack.
+    """
+    import websocket
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/json", headers={"Host": f"localhost:{port}"}
+    )
+    targets = json.loads(urllib.request.urlopen(request, timeout=5).read())
+    target = next(t for t in targets if t.get("type") == "page")
+    ws = websocket.create_connection(
+        target["webSocketDebuggerUrl"], timeout=timeout + 10, suppress_origin=True
+    )
+    try:
+        expression = (
+            "(async () => { try {"
+            f"  const r = await fetch({json.dumps(url)}, {{cache: 'no-store'}});"
+            "   return JSON.stringify({ok: r.ok, status: r.status});"
+            "} catch (e) { return JSON.stringify({ok: false, error: String(e)}); }"
+            "})()"
+        )
+        ws.send(json.dumps({
+            "id": 1, "method": "Runtime.evaluate",
+            "params": {"expression": expression, "awaitPromise": True,
+                       "returnByValue": True},
+        }))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            message = json.loads(ws.recv())
+            if message.get("id") != 1:
+                continue
+            result = message.get("result") or {}
+            if result.get("exceptionDetails"):
+                return {"ok": False, "error": str(result["exceptionDetails"])}
+            raw = (result.get("result") or {}).get("value")
+            return json.loads(raw) if raw else {"ok": False, "error": "no value"}
+        return {"ok": False, "error": "timeout"}
+    finally:
+        ws.close()
+
+
+def _launch(payload: dict, start_url: str) -> tuple[str, int]:
+    """Launch on the destination's own origin.
+
+    `about:blank` is an opaque origin and cannot `fetch` an http:// URL at
+    all -- the first version of this file measured nothing but
+    "TypeError: Failed to fetch". Starting on the destination means the
+    initial navigation is itself routed traffic, which is the stronger
+    evidence anyway: it is the request a profile makes before any script of
+    ours has run.
+    """
+    import multiprofile.browser.launcher as L
+    from multiprofile.browser.runtime_state import get_runtime
+    from multiprofile.storage.profiles import create_profile
+
+    profile_id = create_profile({**payload, "startUrl": start_url})["id"]
+    result = L.launch_profile(profile_id, url=start_url, direct=False)
+    assert result.get("ok") is True, result
+    time.sleep(2.5)
+    return profile_id, get_runtime(profile_id).cdp_port
+
+
+ROUTES = (
+    # name,          profile fields,            expected destination-observed source
+    ("direct", {"proxyType": "none"}, "127.0.0.1"),
+    ("http", {"proxyType": "http"}, "127.0.0.2"),
+    ("socks5", {"proxyType": "socks5"}, "127.0.0.3"),
+    ("http_auth", {"proxyType": "http"}, "127.0.0.4"),
+    # socks5_auth is deliberately absent: Chromium cannot use it at all, and
+    # the launch is refused. See test_authenticated_socks5_is_refused below.
+)
+
+
+@pytest.mark.parametrize("name,fields,expected_source", ROUTES)
+def test_the_destination_sees_the_intended_hop(lab, name, fields, expected_source):
+    """The Phase 3 gate: measured egress, not a health response."""
+    import multiprofile.browser.launcher as L
+
+    destination = lab["destination"]
+    payload = {"name": f"route-{name}", **fields}
+    if name != "direct":
+        proxy = lab["proxies"][name]
+        payload |= {"proxyHost": "127.0.0.1", "proxyPort": proxy.port}
+        if proxy.username:
+            payload |= {"proxyUser": proxy.username, "proxyPass": proxy.password}
+
+    nav = f"http://127.0.0.1:{destination.port}/dest?route={name}"
+    profile_id, port = _launch(payload, nav)
+    try:
+        # The navigation already happened; a same-origin fetch adds a second
+        # request through the same route, so a one-off is distinguishable
+        # from the steady state.
+        result = _fetch_in_page(port, f"/dest?route={name}&fetch=1")
+        assert result.get("ok") is True, (name, result)
+        sources = destination.sources_for(f"route={name}")
+        assert sources, f"{name}: the destination saw no request at all"
+        assert set(sources) == {expected_source}, (
+            f"{name}: expected every request from {expected_source}, saw {sources}"
+        )
+        assert len(sources) >= 2, (
+            f"{name}: only {len(sources)} request(s) observed, so the "
+            "navigation or the fetch did not arrive"
+        )
+    finally:
+        L.stop_profile(profile_id)
+
+
+@pytest.mark.parametrize("name", ("http", "socks5", "http_auth"))
+def test_a_proxied_profile_never_reaches_the_destination_directly(lab, name):
+    """The assertion that matters more than the positive one.
+
+    "The proxy was used" and "the host address was never used" are different
+    claims, and only the second is a leak test.
+    """
+    import multiprofile.browser.launcher as L
+
+    destination = lab["destination"]
+    proxy = lab["proxies"][name]
+    payload = {
+        "name": f"leak-{name}",
+        "proxyType": "socks5" if "socks5" in name else "http",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+    }
+    if proxy.username:
+        payload |= {"proxyUser": proxy.username, "proxyPass": proxy.password}
+
+    nav = f"http://127.0.0.1:{destination.port}/dest?leak={name}"
+    profile_id, port = _launch(payload, nav)
+    try:
+        _fetch_in_page(port, f"/dest?leak={name}&fetch=1")
+        sources = destination.sources_for(f"leak={name}")
+        assert sources, f"{name}: no request arrived, so nothing was proven"
+        assert "127.0.0.1" not in sources, (
+            f"{name}: the host address reached the destination: {sources}"
+        )
+    finally:
+        L.stop_profile(profile_id)
+
+
+def test_an_authenticated_proxy_was_actually_challenged(lab):
+    """Otherwise "it worked" might mean the proxy never asked.
+
+    The CDP ``Fetch.authRequired`` path is what answers a 407, and a proxy
+    that never challenged would exercise none of it.
+    """
+    import multiprofile.browser.launcher as L
+
+    proxy = lab["proxies"]["http_auth"]
+    destination = lab["destination"]
+    nav = f"http://127.0.0.1:{destination.port}/dest?auth=1"
+    profile_id, port = _launch({
+        "name": "auth-challenge", "proxyType": "http",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+        "proxyUser": proxy.username, "proxyPass": proxy.password,
+    }, nav)
+    try:
+        result = _fetch_in_page(port, "/dest?auth=1&fetch=1")
+        assert result.get("ok") is True, result
+        assert proxy.auth_failures > 0, (
+            "the proxy never issued a 407, so the authentication path was "
+            "not exercised"
+        )
+        assert proxy.connections > 0
+        assert set(destination.sources_for("auth=1")) == {"127.0.0.4"}
+    finally:
+        L.stop_profile(profile_id)
+
+
+def test_the_proxy_resolved_the_hostname_not_the_browser(lab):
+    """The DNS claim in docs/NETWORK_ISOLATION.md §4.1, observed.
+
+    The doc says a proxied profile emits no DNS of its own because Chrome
+    hands the *name* to the proxy. A SOCKS5 proxy can see which: address type
+    0x03 is a domain name, 0x01 is a literal the client resolved itself.
+    """
+    import multiprofile.browser.launcher as L
+
+    proxy = lab["proxies"]["socks5"]
+    destination = lab["destination"]
+    # `localhost` is a name; 127.0.0.1 would be a literal and would prove
+    # nothing either way. The navigation carries it.
+    nav = f"http://localhost:{destination.port}/dest?dns=1"
+    profile_id, port = _launch({
+        "name": "dns-route", "proxyType": "socks5",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+    }, nav)
+    try:
+        result = _fetch_in_page(port, "/dest?dns=1&fetch=1")
+        assert result.get("ok") is True, result
+        assert "localhost" in proxy.requested_hostnames, (
+            "the browser did not hand the hostname to the proxy; it resolved "
+            f"it first. literals seen: {proxy.requested_literals}"
+        )
+    finally:
+        L.stop_profile(profile_id)
+
+
+def test_authenticated_socks5_is_refused_rather_than_launched_blind(lab):
+    """Chromium does not implement SOCKS5 authentication, so this cannot work.
+
+    Measured on Chromium 151 before the gate was added, with the profile
+    configured exactly as an operator would:
+
+        launch ok                 True     <- the product reported success
+        destination requests      0        <- nothing loaded, ever
+        socks connections opened  0
+        socks auth failures       40       <- the method was refused, 40 times
+        launch note               "proxy auth=armed"
+
+    It failed closed -- no host-IP leak, which is the one good thing about it
+    -- but silently from the operator's side: a green launch, a note claiming
+    proxy auth was armed, and a browser that could not load a page. That note
+    refers to the CDP Fetch.authRequired handler, which answers an HTTP 407
+    and has nothing to do with SOCKS5.
+
+    Authenticated SOCKS5 is what most commercial proxy providers sell, so it
+    is a configuration an operator is likely to try first.
+    """
+    import multiprofile.browser.launcher as L
+    from multiprofile.network import network_config_for_profile, unsupported_route_reason
+    from multiprofile.storage.profiles import create_profile
+
+    proxy = lab["proxies"]["socks5_auth"]
+    destination = lab["destination"]
+    nav = f"http://127.0.0.1:{destination.port}/dest?sa=1"
+    payload = {
+        "name": "socks5-auth", "proxyType": "socks5",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+        "proxyUser": proxy.username, "proxyPass": proxy.password,
+        "startUrl": nav,
+    }
+
+    # The reason is produced from the config alone, before any probe.
+    config = network_config_for_profile(dict(payload), commit=False)
+    reason = unsupported_route_reason(config)
+    assert reason, "an authenticated SOCKS5 route was not recognised as unusable"
+    assert "SOCKS5 authentication" in reason, reason
+
+    profile_id = create_profile(payload)["id"]
+    try:
+        result = L.launch_profile(profile_id, url=nav, direct=False)
+        assert result.get("ok") is not True, (
+            "the launch succeeded for a route that cannot load a page: "
+            f"{result}"
+        )
+        assert "SOCKS5" in str(result.get("error") or ""), result
+        # And still no leak: nothing reached the destination from anywhere.
+        assert destination.sources_for("sa=1") == [], destination.requests
+    finally:
+        L.stop_profile(profile_id)
+
+
+def test_an_ip_authorised_socks5_proxy_is_not_refused(lab):
+    """The gate must catch credentials, not SOCKS5 itself.
+
+    An IP-authorised SOCKS5 endpoint has no username and works fine -- it is
+    the route `test_the_destination_sees_the_intended_hop[socks5]` proves. A
+    gate that blocked all SOCKS5 would break the working case.
+    """
+    from multiprofile.network import network_config_for_profile, unsupported_route_reason
+
+    proxy = lab["proxies"]["socks5"]
+    config = network_config_for_profile({
+        "name": "socks5-noauth", "proxyType": "socks5",
+        "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
+    }, commit=False)
+    assert unsupported_route_reason(config) is None

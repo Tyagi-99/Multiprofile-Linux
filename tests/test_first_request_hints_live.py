@@ -139,8 +139,17 @@ def launched(xdg):
     from multiprofile.storage.profiles import create_profile
 
     echo = _Echo()
+    # `userAgentId` is explicit. This file measures whether a NEW TAB's first
+    # document request carries the *intended* platform -- the residual F1 --
+    # and the intended platform used to be Windows only because
+    # `_detect_pool("")` defaulted there. The default is now the host's own
+    # platform, and on a Linux host `sec-ch-ua-platform: "Linux"` cannot
+    # distinguish "we set it" from "the host leaked through", which is the
+    # failure this file exists to detect. A Windows claim on this host can
+    # only have come from us.
     pid = create_profile({
         "name": "first-request", "proxyType": "none", "startUrl": "about:blank",
+        "userAgentId": "win_chrome",
     })["id"]
     res = L.launch_profile(pid, url="about:blank", direct=True)
     assert res.get("ok") is True, res.get("error")

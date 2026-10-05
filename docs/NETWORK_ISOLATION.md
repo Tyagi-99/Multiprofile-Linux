@@ -58,6 +58,53 @@ Multiprofile Linux enforces a strict **fail-closed invariant**:
 > connection has to actually be on `BLOCK`. `/api/health` and the profile
 > detail endpoint report the effective mode.
 
+## 3b. Routes this engine cannot use
+
+### Authenticated SOCKS5 — refused at launch
+
+**Chromium has never implemented the SOCKS5 username/password method
+(RFC 1929).** It offers only `NO AUTHENTICATION REQUIRED` in its greeting, so
+a SOCKS5 proxy that requires credentials refuses the handshake and every
+connection dies before a request is made.
+
+Measured on Chromium 151 against a local SOCKS5 proxy requiring credentials,
+with the profile configured exactly as an operator would:
+
+| observation | value |
+|---|---|
+| launch reported | **`ok: true`** |
+| requests reaching the destination | **0** |
+| SOCKS connections completed | **0** |
+| SOCKS handshakes the proxy rejected | **40** |
+| launch note | `proxy auth=armed` |
+
+It failed **closed** — the destination saw nothing, so there was no host-IP
+leak, which is the one good thing about it. But it failed **silently from the
+operator's side**: a green launch, a note claiming proxy auth was armed, and a
+browser that could not load a page. That note refers to the CDP
+`Fetch.authRequired` handler, which answers an HTTP `407` from an HTTP proxy
+and has nothing to do with SOCKS5.
+
+This matters more than its size suggests, because **authenticated SOCKS5 is
+what most commercial proxy providers sell** — it is a configuration an
+operator is likely to try first.
+
+The launch is now **refused with that explanation**, consistent with
+`ProxyFallback.BLOCK` and F17: a launch that reports success and cannot browse
+is worse than a refused launch with a reason. The workarounds are an HTTP or
+HTTPS proxy with the same credentials, or an IP-authorised SOCKS5 endpoint
+with no username.
+
+The check is deliberately **not** inside the proxy health gate.
+`MULTIPROFILE_PROXY_CHECK_ENABLED=0` answers "is this proxy up right now";
+whether the engine can use this *kind* of route at all is a different
+question, and putting the check inside the health gate meant disabling the
+probe also disabled it. An IP-authorised SOCKS5 proxy is unaffected, and
+there is a test for that so the gate cannot grow into blocking SOCKS5
+generally.
+
+---
+
 ## 4. Leak Prevention Policies
 
 ### 4.1 DNS Leak Prevention (`DNSPolicy`)
@@ -153,6 +200,45 @@ Rules, enforced by tests (`tests/test_integration_v16.py`):
 The last diagnostic's country/timezone feed the consistency engine's `geo`
 domain (`GET /api/profiles/<id>/consistency`). Until a diagnostic has run,
 `geo` reports `WARNING` ("insufficient data") rather than guessing.
+
+---
+
+## 7b. Measured egress — `tests/test_route_egress_live.py`
+
+Everything in §8 tests the **decision**: whether a launch is blocked, whether
+a flag is emitted. Until 5 October 2026 nothing tested the **egress**, which
+is what the parity roadmap asks for: *"this gate should be judged by measured
+traffic, not only the app's health-check response."*
+
+`tests/_route_lab.py` gives each hop its own loopback source address, so the
+destination's `remote_addr` names the hop that reached it:
+
+| route | destination observed | result |
+|---|---|---|
+| direct | `127.0.0.1` | ✅ |
+| HTTP proxy | `127.0.0.2` | ✅ |
+| SOCKS5 (IP-authorised) | `127.0.0.3` | ✅ |
+| HTTP proxy + auth | `127.0.0.4` | ✅ (407 issued and answered) |
+| SOCKS5 + auth | — | **refused at launch**, see §3b |
+
+Each proxied route is also asserted **never** to have reached the destination
+from `127.0.0.1`: "the proxy was used" and "the host address was never used"
+are different claims and only the second is a leak test. And the SOCKS5 proxy
+records the address type, which makes the DNS claim in §4.1 observable rather
+than asserted — Chromium hands it the *hostname* (ATYP `0x03`), so the
+profile emitted no DNS of its own.
+
+**One lab artefact, stated plainly.** Chrome implicitly bypasses the proxy for
+loopback destinations, so the fixture appends
+`--proxy-bypass-list=<-loopback>` to whatever the launcher built. It
+*appends*: every routing flag the product emits is still emitted. The
+consequence is that these tests do not cover the bypass list itself.
+
+**What is still outstanding.** No real third-party proxy over a real network:
+no NAT, no MTU, no latency, no IPv6 path, and no provider that can fail in
+ways a local process cannot. Also not yet covered: a mid-session proxy drop,
+WebSockets, downloads, and WebRTC through a proxy. Those are Phase 3's
+remaining items.
 
 ---
 
