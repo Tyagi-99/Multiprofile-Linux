@@ -7,9 +7,16 @@ Everything below was executed on this machine unless marked **UNVERIFIED**.
 
 > **The brief says the primary dev machine is Ubuntu. It is not.** This machine is
 > **Arch Linux, kernel 7.1.9-arch1-2, Hyprland/Wayland**. That single fact changes
-> two Phase 0 answers: the `.deb` cannot be built here (no `dpkg-deb`), and the
-> installed desktop app is **not** the `.deb` — it is an editable dev install.
-> See §5 and §6.
+> two Phase 0 answers: the `.deb` could not be built here (no `dpkg-deb`), and
+> the installed desktop app is **not** the `.deb` — it is an editable dev
+> install. See §5 and §6.
+>
+> **Updated 5 October 2026 (F12).** The first half no longer holds.
+> `scripts/build_deb.py` writes the three-member `ar` archive from the standard
+> library, so `build-deb.sh` runs on this machine, and CI compares its output
+> against `dpkg-deb` on every push. The second half still holds and matters
+> more: the app you run is the working tree, so `git pull` is the update path
+> and nothing about the `.deb` channel affects it.
 
 ---
 
