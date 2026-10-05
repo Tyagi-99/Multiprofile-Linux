@@ -638,6 +638,52 @@ def _chrome_major_of(ua: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _screen_metrics_override(fingerprint: dict[str, Any]) -> dict[str, Any] | None:
+    """``Emulation.setDeviceMetricsOverride`` params for the claimed screen.
+
+    CSS ``device-width``/``device-height`` come from the compositor and no
+    JavaScript can reach them, so defining ``screen.width`` as a getter --
+    which is all ``evasion.js`` can do -- leaves a contradiction a page reads
+    in one line::
+
+        screen.width/height       1920 x 1080   the claim
+        CSS device-width/height   2560 x 1600   the display
+
+    Stock Chromium on the same host agrees with itself at 2560 x 1600, so the
+    disagreement is the product's.
+
+    ``width``, ``height`` and ``deviceScaleFactor`` are 0, which CDP reads as
+    *do not override the viewport*. Verified on Chromium 151: sending
+    ``screenHeight`` alone moved CSS ``device-height`` from 1600 to 1440
+    while ``innerWidth``, ``innerHeight``, ``outerWidth`` and ``outerHeight``
+    stayed byte-identical. That is what makes this safe to apply to every
+    profile rather than only the preset ones -- a viewport override letterboxes
+    and scales the operator's window, which is why the no-preset path skipped
+    it and carried the contradiction instead.
+
+    Device presets keep their own richer plan (``fingerprint.mobile``), which
+    sets the viewport deliberately because emulating a phone is supposed to
+    change it.
+    """
+    screen = fingerprint.get("screen") or {}
+    try:
+        width = int(screen.get("w") or 0)
+        height = int(screen.get("h") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        # 0 = leave the viewport alone. See above.
+        "width": 0,
+        "height": 0,
+        "deviceScaleFactor": 0,
+        "mobile": bool(fingerprint.get("touch")),
+        "screenWidth": width,
+        "screenHeight": height,
+    }
+
+
 def _start_identity_injection(
     profile_id: str,
     port: int,
@@ -711,6 +757,7 @@ def _start_identity_injection(
         worker_script=build_worker_identity_script(fingerprint),
         locale=aligned.get("language") or fingerprint.get("language") or None,
         geolocation=aligned.get("geolocation"),
+        screen_metrics=_screen_metrics_override(fingerprint),
         timezone_id=str(
             fingerprint.get("timezone") or profile.get("timezone") or ""
         ).strip() or None,

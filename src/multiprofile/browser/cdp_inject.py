@@ -381,6 +381,7 @@ class InjectionStatus:
     timezone_applied: bool = False
     locale_applied: bool = False
     geolocation_applied: bool = False
+    screen_metrics_applied: bool = False
     targets_seen: int = 0
     workers_identified: int = 0
     workers_ua_applied: int = 0
@@ -398,6 +399,7 @@ class InjectionStatus:
             "timezoneApplied": self.timezone_applied,
             "localeApplied": self.locale_applied,
             "geolocationApplied": self.geolocation_applied,
+            "screenMetricsApplied": self.screen_metrics_applied,
             "targetsSeen": self.targets_seen,
             "workersIdentified": self.workers_identified,
             "workersUaApplied": self.workers_ua_applied,
@@ -441,6 +443,7 @@ class IdentityInjector:
         worker_script: str | None = None,
         locale: str | None = None,
         geolocation: dict[str, Any] | None = None,
+        screen_metrics: dict[str, Any] | None = None,
         profile_id: str = "",
     ):
         self.port = int(port)
@@ -449,6 +452,7 @@ class IdentityInjector:
         self.worker_script = worker_script or ""
         self.locale = (locale or "").strip() or None
         self.geolocation = geolocation or None
+        self.screen_metrics = screen_metrics or None
         self.proxy_auth = proxy_auth
         self.cookies = cookies or []
         self.ua_override = ua_override or None
@@ -868,6 +872,30 @@ class IdentityInjector:
             self._send(UA_OVERRIDE_METHOD, self.ua_override, session_id=session_id)
             self.status.ua_override_applied = True
 
+        if self.screen_metrics:
+            # CSS `device-width` and `device-height` are resolved by the
+            # compositor from the real display. No JavaScript can reach them,
+            # so `screen.width` defined as a getter in evasion.js left a
+            # contradiction any page can read in one line. Measured on this
+            # host, profile with no device preset:
+            #
+            #   screen.width/height        1920 x 1080   (the claim, JS)
+            #   CSS device-width/height    2560 x 1600   (the display)
+            #
+            # and stock Chromium reported 2560 x 1600 on both.
+            #
+            # `width`/`height`/`deviceScaleFactor` are sent as 0, which CDP
+            # reads as "do not override the viewport". Verified on Chromium
+            # 151: `screenHeight` moved CSS device-height 1600 -> 1440 while
+            # innerWidth/innerHeight/outerWidth/outerHeight stayed
+            # byte-identical. That distinction is the whole reason this can be
+            # applied to every profile and not just the preset ones -- a
+            # viewport override would letterbox and scale the operator's
+            # window, which is why the no-preset path originally skipped it.
+            self._send("Emulation.setDeviceMetricsOverride",
+                       self.screen_metrics, session_id=session_id)
+            self.status.screen_metrics_applied = True
+
         if self.timezone_id:
             # The engine's own clock, not a patched one. evasion.js hooks
             # Intl.DateTimeFormat, resolvedOptions, getTimezoneOffset,
@@ -1010,6 +1038,7 @@ def start_injection(
     worker_script: str | None = None,
     locale: str | None = None,
     geolocation: dict[str, Any] | None = None,
+    screen_metrics: dict[str, Any] | None = None,
 ) -> InjectionStatus:
     """Start (and register) injection for a profile, replacing any previous one."""
     stop_injection(profile_id)
@@ -1023,6 +1052,7 @@ def start_injection(
         worker_script=worker_script,
         locale=locale,
         geolocation=geolocation,
+        screen_metrics=screen_metrics,
         profile_id=profile_id,
     )
     status = injector.start()
