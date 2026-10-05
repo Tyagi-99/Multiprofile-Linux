@@ -2,7 +2,7 @@ Package: multiprofile-native
 Version: 1.9.0
 Section: utils
 Priority: optional
-Architecture: amd64
+Architecture: all
 Depends: python3 (>= 3.11), python3-flask, python3-pkg-resources, python3-websocket
 Recommends: chromium | chromium-browser | google-chrome-stable, python3-webview, python3-keyring
 Maintainer: Multiprofile Native Maintainers <maintainers@localhost>

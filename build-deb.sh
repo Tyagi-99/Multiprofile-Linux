@@ -5,7 +5,12 @@ cd "$ROOT"
 VERSION=1.9.0
 NAME=multiprofile-native
 OUT="$ROOT/dist"
-STAGE="$OUT/${NAME}_${VERSION}_amd64"
+# Taken from the control file rather than written twice. The package is
+# `Architecture: all` -- it ships Python, a static export and icons, nothing
+# compiled -- and a filename that disagrees with the control field produces a
+# pool entry nothing downstream can find.
+ARCH="$(awk -F': ' '/^Architecture:/{print $2}' packaging/debian/control)"
+STAGE="$OUT/${NAME}_${VERSION}_${ARCH}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/DEBIAN" \
   "$STAGE/usr/bin" \
@@ -59,7 +64,7 @@ if ! grep -q '^Installed-Size:' "$STAGE/DEBIAN/control"; then
 fi
 
 mkdir -p "$OUT"
-DEB="$OUT/${NAME}_${VERSION}_amd64.deb"
+DEB="$OUT/${NAME}_${VERSION}_${ARCH}.deb"
 
 # F12: this used to be `dpkg-deb --build` and nothing else, so the script
 # could not run on the machine the product is developed on -- Arch has no

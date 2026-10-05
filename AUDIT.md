@@ -131,7 +131,7 @@ $ uv venv && uv pip install -e ".[all]"
 $ uv run pytest tests/ -q
 989 passed, 2 skipped in 67.01s
 $ bash build-deb.sh
-Built: dist/multiprofile-native_1.9.0_amd64.deb     # exit 0
+Built: dist/multiprofile-native_1.9.0_all.deb       # exit 0
 ```
 
 **Coverage — 72% overall (7980 statements, 2198 uncovered).**

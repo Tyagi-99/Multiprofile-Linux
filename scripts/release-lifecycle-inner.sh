@@ -20,14 +20,14 @@ step() { printf '\n---- %s %s\n' "$1" "$(printf '%.0s-' $(seq 1 $((60 - ${#1})))
 
 step "1. build two versions"
 bash build-deb.sh >/dev/null
-cp dist/multiprofile-native_1.9.0_amd64.deb "$WORK/"
+cp dist/multiprofile-native_1.9.0_all.deb "$WORK/"
 # A second version, so there is something to update *to* and a delta between
 # them. Only the version markers differ, which is enough: this tests the
 # mechanism, not the diff.
 sed -i 's/^VERSION=1.9.0/VERSION=1.9.1/' build-deb.sh
 sed -i 's/^Version: 1.9.0/Version: 1.9.1/' packaging/debian/control
 bash build-deb.sh >/dev/null
-cp dist/multiprofile-native_1.9.1_amd64.deb "$WORK/"
+cp dist/multiprofile-native_1.9.1_all.deb "$WORK/"
 sed -i 's/^VERSION=1.9.1/VERSION=1.9.0/' build-deb.sh
 sed -i 's/^Version: 1.9.1/Version: 1.9.0/' packaging/debian/control
 ls -l "$WORK"/multiprofile-native_*.deb
@@ -36,10 +36,10 @@ step "2. the fallback builder must match dpkg-deb"
 # dpkg-deb exists here, so build-deb.sh used it. Build the same stage with the
 # pure-Python path and confirm dpkg reads both identically -- that is what
 # makes the Arch-side build trustworthy.
-python3 scripts/build_deb.py dist/multiprofile-native_1.9.0_amd64 "$WORK/py.deb"
+python3 scripts/build_deb.py dist/multiprofile-native_1.9.0_all "$WORK/py.deb"
 dpkg-deb -I "$WORK/py.deb" >/dev/null && echo "dpkg-deb reads the Python-built package: ok"
 dpkg-deb -c "$WORK/py.deb" | awk '{print $6}' | sort > "$WORK/py.list"
-dpkg-deb -c "$WORK/multiprofile-native_1.9.0_amd64.deb" | awk '{print $6}' | sort > "$WORK/dpkg.list"
+dpkg-deb -c "$WORK/multiprofile-native_1.9.0_all.deb" | awk '{print $6}' | sort > "$WORK/dpkg.list"
 diff "$WORK/py.list" "$WORK/dpkg.list" && echo "identical file lists: ok"
 
 step "3. throwaway signing key"
@@ -61,7 +61,7 @@ echo "key: $KEY_ID (disposable)"
 
 step "4. publish a signed channel with deltas"
 python3 scripts/release.py --repo "$WORK/repo" \
-  --deb "$WORK/multiprofile-native_1.9.0_amd64.deb" --deb "$WORK/multiprofile-native_1.9.1_amd64.deb" \
+  --deb "$WORK/multiprofile-native_1.9.0_all.deb" --deb "$WORK/multiprofile-native_1.9.1_all.deb" \
   --key-id "$KEY_ID" --gnupghome "$GNUPGHOME"
 
 step "5. verify the channel"
@@ -69,9 +69,9 @@ python3 scripts/verify_release.py --repo "$WORK/repo" \
   --gnupghome "$GNUPGHOME" --key-id "$KEY_ID"
 
 step "6. install v1"
-dpkg -i "$WORK/multiprofile-native_1.9.0_amd64.deb" >/dev/null 2>&1 || true
+dpkg -i "$WORK/multiprofile-native_1.9.0_all.deb" >/dev/null 2>&1 || true
 apt-get install -y -qq -f >/dev/null 2>&1 || true
-dpkg -i "$WORK/multiprofile-native_1.9.0_amd64.deb" >/dev/null
+dpkg -i "$WORK/multiprofile-native_1.9.0_all.deb" >/dev/null
 dpkg-query --showformat='installed: ${Version}\n' --show multiprofile-native
 test -x /usr/bin/multiprofile
 test -x /usr/bin/multiprofile-update
@@ -92,7 +92,7 @@ arch = amd64
 keyring = /usr/share/keyrings/multiprofile-archive-keyring.gpg
 CONF
 # The updater needs the currently-installed .deb to apply a delta to.
-cp "$WORK/multiprofile-native_1.9.0_amd64.deb" /var/lib/multiprofile/updates/multiprofile-native_1.9.0_amd64.deb
+cp "$WORK/multiprofile-native_1.9.0_all.deb" /var/lib/multiprofile/updates/multiprofile-native_1.9.0_all.deb
 
 step "8. check reports an available update"
 set +e; multiprofile-update --check; rc=$?; set -e
@@ -142,11 +142,11 @@ expect_refusal() {
 
 # 10a. The package index rewritten by a mirror that cannot sign.
 tamper_dir "$WORK/repo" "$WORK/evil-index"
-printf 'evil' >> "$WORK/evil-index/pool/main/multiprofile-native_1.9.1_amd64.deb"
+printf 'evil' >> "$WORK/evil-index/pool/main/multiprofile-native_1.9.1_all.deb"
 python3 - "$WORK/evil-index" <<'PY'
 import gzip, hashlib, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
-deb = root / "pool/main/multiprofile-native_1.9.1_amd64.deb"
+deb = root / "pool/main/multiprofile-native_1.9.1_all.deb"
 idx = root / "dists/stable/main/binary-amd64/Packages"
 blocks = idx.read_text().split("\n\n")
 digest = hashlib.sha256(deb.read_bytes()).hexdigest()

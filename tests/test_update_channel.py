@@ -53,14 +53,15 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _stage(tmp: Path, version: str, payload: bytes = b"#!/bin/sh\nexit 0\n") -> Path:
-    stage = tmp / f"stage-{version}"
+def _stage(tmp: Path, version: str, payload: bytes = b"#!/bin/sh\nexit 0\n",
+           arch: str = "amd64") -> Path:
+    stage = tmp / f"stage-{version}-{arch}"
     (stage / "DEBIAN").mkdir(parents=True)
     (stage / "usr/bin").mkdir(parents=True)
     (stage / "DEBIAN/control").write_text(
         "Package: multiprofile-native\n"
         f"Version: {version}\n"
-        "Architecture: amd64\n"
+        f"Architecture: {arch}\n"
         "Maintainer: Test <test@localhost>\n"
         "Section: utils\nPriority: optional\n"
         "Description: test package\n"
@@ -70,12 +71,13 @@ def _stage(tmp: Path, version: str, payload: bytes = b"#!/bin/sh\nexit 0\n") -> 
     return stage
 
 
-def _build(tmp: Path, version: str, payload: bytes | None = None) -> Path:
+def _build(tmp: Path, version: str, payload: bytes | None = None,
+           arch: str = "amd64") -> Path:
     sys.path.insert(0, str(SCRIPTS))
     from build_deb import build_deb
 
-    stage = _stage(tmp, version, payload or b"#!/bin/sh\nexit 0\n")
-    return build_deb(stage, tmp / f"multiprofile-native_{version}_amd64.deb")
+    stage = _stage(tmp, version, payload or b"#!/bin/sh\nexit 0\n", arch)
+    return build_deb(stage, tmp / f"multiprofile-native_{version}_{arch}.deb")
 
 
 @pytest.fixture(scope="module")
@@ -408,6 +410,86 @@ def test_a_client_holding_only_the_old_key_refuses_the_new_signature(channel, tm
         out = _run_updater(env, "--check")
         assert out.returncode not in (0, 10), out.stdout + out.stderr
         assert "signature" in (out.stdout + out.stderr).lower(), out.stdout + out.stderr
+    finally:
+        srv.close()
+
+
+@pytest.fixture(scope="module")
+def arch_all_channel(tmp_path_factory, gnupghome):
+    """A channel whose package is `Architecture: all`, published for two
+    architectures. This is what the real package now is: Python, a static
+    export and icons, with nothing compiled in it."""
+    home, key_id = gnupghome
+    tmp = tmp_path_factory.mktemp("arch-all")
+    old = _build(tmp, "1.0.0", b"#!/bin/sh\necho one\n" + b"x" * 40_000, arch="all")
+    new = _build(tmp, "1.1.0", b"#!/bin/sh\necho two\n" + b"x" * 40_000, arch="all")
+    repo = tmp / "repo"
+    out = subprocess.run(
+        [sys.executable, str(SCRIPTS / "release.py"), "--repo", str(repo),
+         "--deb", str(old), "--deb", str(new),
+         "--key-id", key_id, "--gnupghome", home],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    return {"repo": repo, "home": home, "key": key_id}
+
+
+def test_an_arch_independent_package_is_indexed_for_every_arch(arch_all_channel):
+    """A client only fetches the index for its own architecture, so an index
+    that is not published is a machine that cannot install -- which is all
+    that `Architecture: amd64` ever meant here, since nothing in the package
+    is compiled."""
+    base = arch_all_channel["repo"] / "dists/stable/main"
+    for arch in ("amd64", "arm64"):
+        packages = base / f"binary-{arch}" / "Packages"
+        assert packages.is_file(), f"no index for {arch}"
+        text = packages.read_text()
+        assert "Architecture: all" in text, text[:200]
+        assert "pool/main/multiprofile-native_1.1.0_all.deb" in text
+
+
+def test_the_release_names_every_published_arch(arch_all_channel):
+    release = (arch_all_channel["repo"] / "dists/stable/Release").read_text()
+    line = next(ln for ln in release.splitlines()
+                if ln.startswith("Architectures:"))
+    assert set(line.partition(":")[2].split()) == {"amd64", "arm64"}, line
+    # ...and every index it names must be hashed by it, or the one that is not
+    # sits outside the signature.
+    for arch in ("amd64", "arm64"):
+        for name in ("Packages", "Packages.gz"):
+            path = arch_all_channel["repo"] / "dists/stable/main" / f"binary-{arch}" / name
+            assert _sha256(path) in release, f"binary-{arch}/{name} unhashed"
+
+
+def test_the_verifier_checks_every_arch_the_release_names(arch_all_channel, tmp_path):
+    """Defaulting to amd64 alone would let a broken arm64 index ship: the
+    only person who hits it is the arm64 operator, after release."""
+    evil = tmp_path / "evil-arm64"
+    shutil.copytree(arch_all_channel["repo"], evil)
+    idx = evil / "dists/stable/main/binary-arm64/Packages"
+    idx.write_text(idx.read_text().replace("Version: 1.1.0", "Version: 9.9.9"))
+    out = subprocess.run(
+        [sys.executable, str(SCRIPTS / "verify_release.py"), "--repo", str(evil),
+         "--gnupghome", arch_all_channel["home"], "--key-id", arch_all_channel["key"]],
+        capture_output=True, text=True,
+    )
+    assert out.returncode != 0, out.stdout
+
+
+def test_a_client_on_another_arch_finds_the_update(arch_all_channel, tmp_path):
+    """The arm64 path, as far as it can be driven on an amd64 host: the
+    client is configured as arm64, fetches the arm64 index, and finds the
+    same arch-independent package."""
+    client = tmp_path / "client-arm64"
+    client.mkdir()
+    srv = _Server(arch_all_channel["repo"])
+    try:
+        env = _client_env(client, arch_all_channel["repo"], srv.url, installed="1.0.0")
+        conf = client / "update.conf"
+        conf.write_text(conf.read_text().replace("arch = amd64", "arch = arm64"))
+        out = _run_updater(env, "--check")
+        assert out.returncode == 10, out.stdout + out.stderr
+        assert "1.0.0 -> 1.1.0" in out.stdout
     finally:
         srv.close()
 

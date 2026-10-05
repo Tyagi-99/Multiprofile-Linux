@@ -187,8 +187,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(grep -oP '^VERSION=\K\S+' build-deb.sh)
-          STAGE="dist/multiprofile-native_${VERSION}_amd64"
-          DEB="dist/multiprofile-native_${VERSION}_amd64.deb"
+          ARCH=$(awk -F': ' '/^Architecture:/{print $2}' packaging/debian/control)
+          STAGE="dist/multiprofile-native_${VERSION}_${ARCH}"
+          DEB="dist/multiprofile-native_${VERSION}_${ARCH}.deb"
           python3 scripts/build_deb.py "$STAGE" /tmp/py.deb
           dpkg-deb -I /tmp/py.deb > /dev/null
           dpkg-deb -c /tmp/py.deb | awk '{print $6}' | sort > /tmp/py.list

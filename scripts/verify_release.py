@@ -156,6 +156,23 @@ def verify_packages(repo: Path, suite: str, component: str, arch: str,
         c.check(str(deb.stat().st_size) == fields["Size"], f"{name}: Size matches Packages")
 
 
+def _released_arches(repo: Path, suite: str) -> list[str]:
+    """The architectures the Release claims, so every one of them is checked.
+
+    Defaulting to amd64 alone would have let a published-but-broken arm64
+    index pass verification, which is the failure an arm64 operator would
+    hit and nobody else.
+    """
+    release = repo / "dists" / suite / "Release"
+    if release.is_file():
+        for line in release.read_text().splitlines():
+            if line.startswith("Architectures:"):
+                arches = line.partition(":")[2].split()
+                if arches:
+                    return arches
+    return ["amd64"]
+
+
 def verify_deltas(repo: Path, c: Checker) -> None:
     manifest = repo / "deltas" / "deltas.json"
     if not manifest.is_file():
@@ -207,7 +224,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--repo", required=True, type=Path)
     ap.add_argument("--suite", default="stable")
     ap.add_argument("--component", default="main")
-    ap.add_argument("--arch", default="amd64")
+    ap.add_argument("--arch", action="append", default=[], metavar="ARCH",
+                    help="verify this architecture's index (repeatable); "
+                         "defaults to every architecture the Release names")
     ap.add_argument("--gnupghome")
     ap.add_argument("--key-id", help="fail unless this key made the signature")
     ap.add_argument("--skip-signature", action="store_true",
@@ -224,7 +243,8 @@ def main(argv: list[str]) -> int:
     print("release indices")
     verify_release_hashes(args.repo, args.suite, c)
     print("packages")
-    verify_packages(args.repo, args.suite, args.component, args.arch, c)
+    for arch in args.arch or _released_arches(args.repo, args.suite):
+        verify_packages(args.repo, args.suite, args.component, arch, c)
     print("deltas")
     verify_deltas(args.repo, c)
 

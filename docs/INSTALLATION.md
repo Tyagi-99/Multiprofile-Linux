@@ -32,7 +32,9 @@ Optional extras, all included by `[all]`:
 ./build-deb.sh
 ```
 
-Produces `dist/multiprofile-native_<version>_amd64.deb` and its `.sha256`.
+Produces `dist/multiprofile-native_<version>_all.deb` and its `.sha256`.
+The package is architecture-independent — it ships Python, a static
+export and icons — so the same file installs on amd64 and arm64.
 This runs anywhere, including on Arch: it prefers `dpkg-deb` when that exists
 and falls back to [`scripts/build_deb.py`](../scripts/build_deb.py), which
 writes the same archive from the standard library. CI diffs the two on every

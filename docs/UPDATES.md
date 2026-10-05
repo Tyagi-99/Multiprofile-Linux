@@ -142,7 +142,7 @@ it lives.
 bash build-deb.sh
 python3 scripts/release.py \
   --repo /srv/multiprofile-repo \
-  --deb dist/multiprofile-native_1.9.0_amd64.deb \
+  --deb dist/multiprofile-native_1.9.0_all.deb \
   --key-id <FINGERPRINT> \
   --gnupghome ~/.multiprofile-signing
 
@@ -185,6 +185,12 @@ EOF
 multiprofile-update --check
 sudo multiprofile-update --install
 ```
+
+`arch` is **the machine's** architecture, not the package's — it selects
+which `binary-<arch>` index to fetch. The package itself is
+`Architecture: all`, and `release.py` publishes an index for `amd64` and
+`arm64` by default, so an arm64 machine sets `arch = arm64` and installs the
+same file.
 
 Or through apt, which verifies the same signature:
 
@@ -285,7 +291,7 @@ Stated plainly, because "signed builds are done" would not be true.
 | **A real host** | Nothing is published. The channel has only ever been served from a local directory or a container. |
 | **`apt update` / `apt install` against a live repository** | The lifecycle installs with `dpkg -i` from a local HTTP repo. The apt sources line in §4.4 is written from the format's requirements, not from a run. |
 | **Upgrade across a genuine code change** | The two versions in the lifecycle differ only in their version markers, because that is enough to exercise the mechanism. A real upgrade also has to survive `postinst` against changed files and a running instance. |
-| **Anything but amd64, and anything but Debian/Ubuntu** | `Architecture: amd64` is hard-coded; there is no arm64 build and no `.rpm` or AppImage. |
+| **Anything but Debian/Ubuntu** | There is no `.rpm` and no AppImage. The package is now `Architecture: all` and is published for amd64 and arm64, since it contains nothing compiled — Python, a static export and icons. The arm64 index, and a client configured as arm64 finding the package in it, are tested; an **actual arm64 machine** is not, because CI has none. |
 | **Key rotation, in the field** | The procedure is written (§4.6) and the mechanism is tested — both keys published, either signature accepted, an unpublished signing key refused before it ships. What is untested is a real fleet re-running the keyring step, which is the part that depends on operators rather than on code. |
 | **Unattended installing in the field** | Implemented and off by default (§2b). It has been exercised against a throwaway channel in CI, never against a real one, and never on a machine doing real work. |
 | **The daily checker against a live host** | The schedule, the signature gate and the refusals are tested; what is untested is a year of a real server answering, including the day it returns a 500 or a stale index. |

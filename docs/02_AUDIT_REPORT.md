@@ -2836,7 +2836,11 @@ security-sensitive, unsigned unverifiable binaries are a hard blocker.
 > throwaway key inside a test. [`docs/UPDATES.md`](UPDATES.md) §4 has the exact
 > steps, and §5 lists what stays unverified until they are taken — including
 > `apt update` against a live repository, upgrade across a genuine code change,
-> anything but amd64, and key rotation.
+> and an actual arm64 machine. Key rotation and arch-independence have since
+> been built and tested: the package is `Architecture: all`, published for
+> amd64 and arm64, and a rotation publishes both keys through an overlap
+> window with the verifier refusing to ship a signature whose key is not in
+> the published keyring.
 >
 > **Automatic, and the part that deliberately is not.** The matrix row says
 > *auto*-update. Checking is automatic: a daily background check, started with

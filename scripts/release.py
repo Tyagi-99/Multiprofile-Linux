@@ -183,21 +183,32 @@ def build_deltas(repo: Path, component: str) -> Path | None:
     return manifest
 
 
-def build_release(repo: Path, suite: str, component: str, arch: str,
+def build_release(repo: Path, suite: str, component: str, arches: str | list[str],
                   origin: str, extra_files: list[Path]) -> Path:
-    """The Release file: one signed document covering every index."""
+    """The Release file: one signed document covering every index.
+
+    Several architectures may be published at once. The package is
+    `Architecture: all` -- Python, a static export and some icons, with
+    nothing compiled in it -- so the same file is listed in each
+    `binary-<arch>` index, which is the Debian convention for an
+    arch-independent package. A client only ever fetches the index for its
+    own architecture, so an index that is not published is a machine that
+    cannot install.
+    """
+    if isinstance(arches, str):
+        arches = [arches]
     dist = repo / "dists" / suite
-    indexed: list[Path] = [
-        dist / component / f"binary-{arch}" / "Packages",
-        dist / component / f"binary-{arch}" / "Packages.gz",
-        *extra_files,
-    ]
+    indexed: list[Path] = []
+    for arch in arches:
+        indexed.append(dist / component / f"binary-{arch}" / "Packages")
+        indexed.append(dist / component / f"binary-{arch}" / "Packages.gz")
+    indexed.extend(extra_files)
     lines = [
         f"Origin: {origin}",
         f"Label: {origin}",
         f"Suite: {suite}",
         f"Codename: {suite}",
-        f"Architectures: {arch}",
+        f"Architectures: {' '.join(arches)}",
         f"Components: {component}",
         f"Date: {datetime.now(timezone.utc).strftime('%a, %d %b %Y %H:%M:%S UTC')}",
         "Description: Multiprofile Linux update channel",
@@ -278,7 +289,12 @@ def main(argv: list[str]) -> int:
                     help="a .deb to add to the pool (repeatable)")
     ap.add_argument("--suite", default="stable")
     ap.add_argument("--component", default="main")
-    ap.add_argument("--arch", default="amd64")
+    ap.add_argument("--arch", action="append", default=[], metavar="ARCH",
+                    help="publish an index for this architecture (repeatable). "
+                         "Defaults to amd64 and arm64: the package is "
+                         "Architecture: all, so one file serves both, but each "
+                         "index has to exist for a client of that architecture "
+                         "to find it.")
     ap.add_argument("--origin", default="Multiprofile")
     ap.add_argument("--key-id", help="gpg key to sign with; unsigned when omitted")
     ap.add_argument("--gnupghome", help="GNUPGHOME for the signing key")
@@ -308,9 +324,11 @@ def main(argv: list[str]) -> int:
                 f"{fields.get('Architecture', 'all')}.deb")
         shutil.copy2(deb, pool / name)
 
-    build_packages_index(repo, args.suite, args.component, args.arch)
+    arches = args.arch or ["amd64", "arm64"]
+    for arch in arches:
+        build_packages_index(repo, args.suite, args.component, arch)
     manifest = build_deltas(repo, args.component)
-    release = build_release(repo, args.suite, args.component, args.arch,
+    release = build_release(repo, args.suite, args.component, arches,
                             args.origin, [manifest] if manifest else [])
     print(f"wrote {release.relative_to(repo)}")
 
