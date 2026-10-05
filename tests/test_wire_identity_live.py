@@ -135,15 +135,23 @@ def test_a_no_preset_profile_does_not_leak_the_host_identity(xdg):
     from multiprofile.storage.profiles import create_profile
 
     echo = _Echo()
+    # `userAgentId` is explicit. A no-preset profile now claims the host's own
+    # platform, and on a Linux host a Linux claim cannot distinguish "the
+    # launcher set this" from "the host leaked through" -- which is the F1
+    # failure this test exists to prove absent. A Windows claim on this host
+    # can only have come from the launcher, so it is the direction that
+    # actually proves the property. The claim is experimental per
+    # `fingerprint/identity_matrix.py`; it is not refused, and it must still
+    # reach the wire.
     profile = create_profile({
         "name": "f1-wire-live",
         "proxyType": "none",
         "os": "windows",
+        "userAgentId": "win_chrome",
         "startUrl": "about:blank",
     })
     pid = profile["id"]
     assert not profile.get("deviceId"), "this test is about the NO-preset path"
-    assert not profile.get("userAgent")
 
     try:
         res = L.launch_profile(pid, url="about:blank", direct=True)
