@@ -129,4 +129,7 @@ def test_ipv6_can_be_disabled():
                       proxy=ProxyConfig("http", "198.51.100.10", 8080),
                       ipv6_policy=IPv6Policy.DISABLED)
     )
-    assert "--disable-ipv6" in flags
+    # Not emitted any more: Chromium 151 ignores it (F57). The real
+    # mechanism is that Chromium hands IPv6 destinations to the proxy, which
+    # tests/test_route_leaks_live.py measures.
+    assert "--disable-ipv6" not in flags

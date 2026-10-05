@@ -484,3 +484,129 @@ class TlsObserver:
             self._listener.close()
         except OSError:
             pass
+
+
+class Ipv6Destination:
+    """The same destination, reachable only over IPv6 (``::1``).
+
+    Used to make ``--disable-ipv6`` observable: with IPv6 disabled a fetch to
+    ``http://[::1]:PORT/`` must fail, and with it enabled the same fetch must
+    succeed. Asserting only the first would pass on a host with no IPv6 at
+    all, so both directions are measured.
+    """
+
+    def __init__(self) -> None:
+        outer = self
+        self.requests: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):  # noqa: N802 - handler API
+                outer.requests.append({
+                    "path": self.path,
+                    "observedSource": self.client_address[0],
+                })
+                body = b'{"ipv6":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        class Server(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        self._server = Server(("::1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    @property
+    def url(self) -> str:
+        return f"http://[::1]:{self.port}/v6"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def ipv6_loopback_available() -> bool:
+    """Whether ``::1`` can be bound at all.
+
+    Checked rather than assumed: on a host with IPv6 disabled in the kernel
+    the "IPv6 was blocked" assertion would pass for the wrong reason, which
+    is the failure mode this whole lab exists to avoid.
+    """
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+class FileDestination:
+    """Serves an attachment, and records who fetched it.
+
+    A download is a separate path in Chromium from a page load -- it is
+    handled by the download manager, not the renderer -- so "the page went
+    through the proxy" does not imply "the download did".
+    """
+
+    def __init__(self, payload: bytes = b"x" * 4096) -> None:
+        outer = self
+        self.requests: list[dict] = []
+        self.payload = payload
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):  # noqa: N802 - handler API
+                outer.requests.append({
+                    "path": self.path,
+                    "observedSource": self.client_address[0],
+                })
+                if self.path.startswith("/file"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition",
+                                     'attachment; filename="probe.bin"')
+                    self.send_header("Content-Length", str(len(outer.payload)))
+                    self.end_headers()
+                    self.wfile.write(outer.payload)
+                    return
+                body = (b'<!doctype html><title>dl</title>'
+                        b'<a id="go" href="/file.bin" download>d</a>')
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    @property
+    def port(self) -> int:
+        return int(self._server.server_address[1])
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/page"
+
+    def sources_for(self, fragment: str) -> list[str]:
+        return [r["observedSource"] for r in self.requests if fragment in r["path"]]
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()

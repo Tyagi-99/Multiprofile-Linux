@@ -136,12 +136,49 @@ generally.
 > pins the distinction.
 
 ### 4.2 IPv6 Leak Prevention (`IPv6Policy`)
-- **Policy**: `IPv6Policy.DISABLED`
-- **Mechanism**: Many proxy configurations only tunnel IPv4 traffic. If dual-stack IPv6 is enabled on the host, Chromium might attempt direct IPv6 connections, bypassing the IPv4 proxy. Passing:
-  ```bash
-  --disable-ipv6
-  ```
-  disables IPv6 networking within the profile's network stack.
+- **Policy**: `IPv6Policy.DISABLED` for every proxied profile; IPv6 is left
+  alone for a direct profile, which has no proxy for v6 traffic to go around.
+- **Mechanism**: **No flag.** Chromium hands an IPv6 destination to the proxy
+  instead of connecting to it, so a proxied profile does not reach one
+  directly. `IPv6Policy` is a *description of that behaviour*, exactly like
+  `DNSPolicy.PROXY_RESOLVED`.
+
+> **Corrected 6 October 2026 (F57).** This section said the launcher passes
+> `--disable-ipv6` and that this "disables IPv6 networking within the
+> profile's network stack". **Chromium 151 ignores that flag**, and the claim
+> was the *mechanism*, not a detail — so the document advertised a protection
+> that did not exist.
+>
+> Measured against a destination bound to the host's own **global** IPv6
+> address — not `::1`, so Chrome's loopback bypass cannot be the explanation —
+> with a deliberately nonexistent flag as a control:
+>
+> | configuration | IPv6 destination reached |
+> |---|---|
+> | stock, no flag | yes |
+> | stock, `--disable-ipv6` | **yes** |
+> | stock, a flag that does not exist | yes |
+>
+> The flag has exactly the effect of a flag that is not there. It is removed:
+> a no-op that advertises a protection is worse than no flag at all.
+>
+> **The protection itself holds**, and by the same route as the DNS one.
+> Measured with a proxied profile and the same global-IPv6 destination, using
+> an IPv4-only proxy so the two outcomes are distinguishable:
+>
+> ```
+> proxy received CONNECT for   [<the host's global v6>]:PORT
+> destination direct hits      0
+> ```
+>
+> Chromium asked the proxy. `tests/test_route_leaks_live.py` pins that, and a
+> second test asserts the dead flag stays absent.
+>
+> **This is the fourth instance of one pattern in this codebase** — F49's
+> `switch-all-direct`, F50's `prefer_sandbox`, the `--host-resolver-rules`
+> correction, and now this. Each time the *behaviour* claim was true and the
+> *mechanism* cited was fiction, and each time the fiction was in a document
+> an operator would rely on.
 
 ### 4.3 WebRTC IP Leak Prevention (`WebRTCPolicy`)
 - **Browser Flags**:
@@ -269,10 +306,39 @@ answered either way: the source was the proxy, never the host. Proving
 "requests stop entirely" for an HTTP proxy needs a faithful proxy, which is
 outstanding.
 
+### WebRTC, IPv6 and downloads — `tests/test_route_leaks_live.py`
+
+Each is a separate path in Chromium, not an HTTP request wearing a different
+hat, which is why the roadmap names them individually.
+
+| path | measured | result |
+|---|---|---|
+| WebRTC, default | ICE gathers host candidates at all | ✅ control |
+| WebRTC, `disable_non_proxied_udp` | **no routable address** in any candidate | ✅ |
+| IPv6, direct profile | reaches a v6 destination | ✅ control |
+| IPv6, proxied profile | **handed to the proxy**, 0 direct hits | ✅ |
+| Download through a proxy | attachment fetched from `127.0.0.2` | ✅ |
+
+Every one has a control beside it. A one-sided assertion passes on a host
+where the capability is simply absent, which is the failure mode this lab
+exists to avoid: the WebRTC test first proves candidates are gathered, the
+IPv6 test first proves a direct profile can reach `::1`, and the download test
+first proves the page itself went through the proxy — because the download
+manager is a separate path from the renderer, so "the page was proxied" does
+not imply "the file was".
+
+The IPv6 tests use a destination on the host's **own global address** rather
+than `::1`, because Chrome bypasses the proxy for loopback and a hit there
+would prove nothing about routing. That address is read at runtime and never
+written to a report, a log line or an assertion message.
+
 **What is still outstanding.** No real third-party proxy over a real network:
-no NAT, no MTU, no latency, no IPv6 path, and no provider that can fail in
-ways a local process cannot. Also not yet covered: downloads, WebRTC through
-a proxy, and IPv6 egress.
+no NAT, no MTU, no latency, and no provider that can fail in ways a local
+process cannot. **Real-world proxy validation is therefore outstanding** and
+nothing here should be read as covering it. Also not covered: a proxy whose
+credentials are wrong rather than absent, and IPv6 egress *through* a
+v6-capable proxy (the lab proxy is IPv4-only, which is what makes the
+routing assertion above decidable).
 
 ---
 

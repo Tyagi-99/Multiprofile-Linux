@@ -613,9 +613,34 @@ def chrome_network_flags(network_config: NetworkConfig) -> list[str]:
     # DNSPolicy.PROXY_RESOLVED is therefore a description of what Chrome
     # already does with a proxy, not something that needs a flag.
 
-    # IPv6
-    if network_config.ipv6_policy in (IPv6Policy.DISABLED, IPv6Policy.PROXY_ONLY):
-        flags.append("--disable-ipv6")
+    # IPv6 -- nothing to add, for the same reason as DNS above.
+    #
+    # This appended `--disable-ipv6`, which **Chromium 151 ignores**. Measured
+    # with a destination bound to the host's own global IPv6 address (not
+    # ::1, so loopback cannot be the explanation) and a deliberately
+    # nonexistent flag as a control:
+    #
+    #     stock, no flag                 ipv6 destination reached:  yes
+    #     stock, --disable-ipv6          ipv6 destination reached:  yes
+    #     stock, --disable-features=...  ipv6 destination reached:  yes
+    #       (a flag that does not exist)
+    #
+    # The flag has exactly the effect of a flag that is not there. Keeping it
+    # advertised a protection that did not exist, which is worse than having
+    # no flag at all, because `docs/NETWORK_ISOLATION.md` §4.2 described it as
+    # the *mechanism*.
+    #
+    # The protection itself holds, and by the same route as the DNS one:
+    # Chromium hands an IPv6 destination to the proxy instead of connecting
+    # to it. Measured with a proxied profile and the same global-IPv6
+    # destination:
+    #
+    #     proxy received CONNECT for  [<global v6>]:PORT
+    #     destination direct hits     0
+    #
+    # So `IPv6Policy` is a description of what Chromium already does with a
+    # proxy, exactly like `DNSPolicy.PROXY_RESOLVED`, and not something a flag
+    # enforces. `tests/test_route_leaks_live.py` pins the real mechanism.
 
     # WebRTC
     if network_config.webrtc_policy == WebRTCPolicy.PROXY_ONLY:
