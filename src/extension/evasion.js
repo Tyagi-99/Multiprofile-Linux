@@ -196,6 +196,40 @@
   // Target Timezone (injected per-profile or default America/New_York)
   let rawTz = "__PROFILE_TIMEZONE__";
   let TARGET_TIMEZONE = (rawTz && !rawTz.startsWith("__")) ? rawTz : "America/New_York";
+  let MP_TZ_NEEDS_CANONICAL = true;
+
+  // canonicaliseTimezone(): spell it the way THIS engine spells it, not the way the profile stores it.
+  //
+  // `resolvedOptions().timeZone` used to return the configured string
+  // verbatim, and that produced a value no real browser on this build can
+  // return. Measured on Chromium 151:
+  //
+  //   Intl.DateTimeFormat('en-US',{timeZone:'Asia/Kolkata'})
+  //     .resolvedOptions().timeZone          -> 'Asia/Calcutta'
+  //   Intl.supportedValuesOf('timeZone')
+  //     .includes('Asia/Kolkata')            -> false
+  //
+  // So a profile stored as Asia/Kolkata had its page answering a zone that
+  // is not in the engine's own supported set -- F44's shape (an impossible
+  // value), detectable in one line with nothing to compare against. And
+  // every worker realm, which gets the zone from
+  // Emulation.setTimezoneOverride with no hook on top, answered
+  // 'Asia/Calcutta' -- so the page contradicted its own workers as well.
+  // Stock Chromium on the same host answers 'Asia/Calcutta' everywhere.
+  //
+  // Asking the engine to canonicalise means the hook can only ever agree
+  // with it. If the zone is not one the engine knows, the constructor
+  // throws and the configured string is kept, which is no worse than before.
+  function canonicaliseTimezone() {
+    if (!MP_TZ_NEEDS_CANONICAL) return;
+    MP_TZ_NEEDS_CANONICAL = false;
+    try {
+      const canonical = new Intl.DateTimeFormat('en-US', {timeZone: TARGET_TIMEZONE})
+        .resolvedOptions().timeZone;
+      if (canonical) TARGET_TIMEZONE = canonical;
+    } catch (e) {}
+  }
+
   let rawIp = "__PROFILE_ALLOCATED_IP__";
   const TARGET_IP = (rawIp && !rawIp.startsWith("__")) ? rawIp : "";
   let rawSeed = "__PROFILE_SEED__";
@@ -243,6 +277,7 @@
       if (MP_CFG.platform) TARGET_PLATFORM = MP_CFG.platform;
       if (MP_CFG.touch != null) TARGET_TOUCH = MP_CFG.touch;
       if (MP_CFG.timezone) TARGET_TIMEZONE = MP_CFG.timezone;
+      MP_TZ_NEEDS_CANONICAL = true;
       if (MP_CFG.seed != null) PROFILE_SEED = parseInt(MP_CFG.seed, 10) || PROFILE_SEED;
       if (Array.isArray(MP_CFG.languages) && MP_CFG.languages.length) {
         TARGET_LANGUAGES = MP_CFG.languages.slice();
@@ -821,6 +856,11 @@
     try {
       const scope = targetScope || window;
       if (!scope.Intl || !scope.Date) return;
+
+      // Before anything is patched: once `resolvedOptions` is hooked it
+      // returns TARGET_TIMEZONE verbatim, so asking the engine to
+      // canonicalise after that point would just echo the value back.
+      canonicaliseTimezone();
 
       function getTzOffsetMinutes(date, tz) {
         try {
