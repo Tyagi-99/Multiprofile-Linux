@@ -12,17 +12,16 @@ evaluated over CDP in three browsers on the same machine, in the same session:
 Host: Arch Linux, Wayland/Hyprland, **Chromium 151.0.7922.173**, 16 cores,
 16 GB. The control's window is 800×600 headless; the profiles are headful.
 
-**What was not done, and why it matters.** The brief asks for results "per
-checker site, with screenshots" — CreepJS, Pixelscan, BrowserLeaks,
-Iphey and similar. **No third-party checker site was visited.** Two reasons:
-doing so from this machine would send the operator's real IP and a real
-browsing fingerprint to third parties, and a run with no proxy configured
-would measure a configuration nobody ships. The vectors those sites test are
-measured directly below instead, which is reproducible and does not depend on
-someone else's scoring formula — but it is **not a substitute** for a real
-CreepJS trust score, and this document should not be read as one. Running the
-checkers is a half-day of work once a proxy is configured, and it belongs in
-the next pass.
+**Third-party checkers: run on 5 October 2026.** §1–§10 were written when
+none had been visited, and the header used to say so. They have now been
+visited, on one host, with one profile, on a direct route — see **§11**, which
+records what they found and the two contradictions that came out of it. The
+original reasons for not visiting them were real and still constrain what is
+published here: a run from this machine sends the operator's real IP and a
+real fingerprint to a third party, so **§11 is redacted** — no IP addresses,
+no fingerprint IDs, no font hashes. The vectors those sites test are also
+measured directly below, which is reproducible and does not depend on someone
+else's scoring formula.
 
 **Every run in §1–§10 used a profile with a proxy configured.** That was not
 a stated choice, it was an assumption, and it hid a defect for the whole of
@@ -301,7 +300,7 @@ Stated so the gaps are not mistaken for passes:
 |---|---|
 | **TLS / JA3 / JA4** | **No implementation.** A profile claiming Chrome-on-Windows presents Chromium-on-Linux's handshake. Unreachable from JavaScript. |
 | **HTTP/2 SETTINGS / frame order** | **No implementation.** Same category. |
-| CreepJS / Pixelscan / BrowserLeaks / Iphey scores | Not run — see the header |
+| CreepJS / Pixelscan / BrowserLeaks scores | **Run 5 October 2026 — see §11.** One host, one profile, direct route, redacted. Iphey still not run |
 | Behaviour under a real proxy | Not run; geo alignment is tested against synthetic exits. The **no-proxy** path is measured in §10 |
 | Mobile profiles under real conditions | Preset-level only |
 | Long-session drift | Not tested |
@@ -407,11 +406,107 @@ Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)
 ```
 
 **F3 is present and unchanged on this path too.** Nothing in this section
-narrows it. Third-party checkers still have not been run — see the header.
+narrows it. Third-party checkers were run on 5 October 2026 and are recorded in **§11**; they found two contradictions this document had not, both now fixed.
 
 ---
 
-## 11. Summary
+## 11. Third-party checkers — 5 October 2026, one host, one profile
+
+**Redaction.** This section carries no IP addresses, fingerprint IDs, font
+hashes or full vector dumps. The raw captures stay outside the repository.
+Both an IPv4 and an IPv6 address appeared in them and neither is reproduced.
+
+**Setup.** Arch Linux, Wayland/Hyprland, system Chromium 151.0.7922.173, one
+Multiprofile profile with **no device preset** on a **direct route** (no
+proxy), against a clean stock Chromium control with a throwaway profile on
+the same host, same engine build, same session.
+
+### 11.1 The two contradictions, and what they were
+
+| Surface | Product profile | Stock control | Verdict |
+|---|---|---|---|
+| page `userAgentData` | Google Chrome 151, **Windows 11** | Chromium 151, Linux x86_64 | spoof applied |
+| **service worker** `userAgentData` | Chromium 151, **Linux** | Chromium 151, Linux x86_64 | **contradiction** |
+| `screen.width/height` | **1366 × 768** | 2560 × 1600 | spoof applied |
+| **CSS `device-width/height`** | **2560 × 1600** | 2560 × 1600 | **contradiction** |
+
+Both are **fixed**, with regression tests that fail without the fix:
+
+- The worker leak was **not** every worker type. Probing each realm
+  separately (`tests/test_worker_realms_live.py`) splits it: dedicated
+  workers — blob, URL and module — were already correct, because a dedicated
+  worker runs in its owner document's renderer and inherits the page's
+  `Network.setUserAgentOverride`. Shared and service workers are their own
+  targets in their own processes and inherited nothing. CreepJS reports from
+  a `ServiceWorkerGlobalScope` where one is available, which is why it saw
+  this and a Blob-worker spot check did not. Fixed by sending the override to
+  those two target types.
+- The screen contradiction was **every profile without a device preset**.
+  `evasion.js` can only define `screen.*` as getters; CSS `device-width` is
+  resolved by the compositor and no script can reach it. Fixed with
+  `Emulation.setDeviceMetricsOverride` carrying `screenWidth`/`screenHeight`
+  and a zeroed viewport — measured on Chromium 151 to move CSS
+  `device-height` 1600 → 1440 while leaving `innerWidth`, `innerHeight`,
+  `outerWidth` and `outerHeight` byte-identical, which is what makes it safe
+  to apply outside the preset path.
+
+### 11.2 Checker headlines, and why none of them is a gate
+
+| Checker | Product | Stock control |
+|---|---|---|
+| pixelscan.net | "fingerprint is **inconsistent**", "**masking detected**", "no automated behavior detected" | **identical verdict** |
+| creepjs.org/checker | 1 inconsistency; **Fonts 51/100** | — |
+| CreepJS (abrahamjuliot) | 31% "like headless", 0% headless, **20% stealth** | 38% "like headless", 0% headless, **0% stealth** |
+
+**Pixelscan returned the same verdict for clean stock Chromium**, so that
+headline does not discriminate between this product and an unmodified browser
+on this host and cannot be read as a pass or a failure of either. This is the
+single most important line in this section.
+
+The CreepJS numbers are the useful pair: the product scores *better* on
+"like headless" (31% vs 38%) and *worse* on "stealth" (20% vs 0%). That is
+**F3's ceiling as a number rather than an argument** — the spoofing is doing
+its job and is itself visible. It is one run on one host; it is not a trend.
+
+### 11.3 Fonts — the claim is still unbacked, and the product says so
+
+CreepJS loaded **1 of 51** probe fonts for the product and **6 of 51** for
+stock Chromium, so the masking leaves the profile *sparser* than an
+unmodified browser, not more ordinary. The launcher already records this
+without being asked, as identity faults visible in `/api/health`:
+
+```
+font_claim_unbacked   windows fonts with no metric-compatible file on this
+                      host, left absent: Calibri, Cambria, Georgia, Verdana,
+                      Tahoma, Trebuchet MS, Segoe UI, Consolas, Impact,
+                      Microsoft Sans Serif, Palatino Linotype,
+                      Franklin Gothic Medium
+font_backer_name_visible
+                      metric backers remain enumerable under their own names
+                      because Chrome reads the font file's name table:
+                      Liberation Mono, Liberation Sans, Liberation Serif
+```
+
+So the honest statement is the one the fault channel already makes: **a
+Windows profile on this host does not have Windows fonts**, aliases resolve
+but the files' internal name tables do not change, and twelve expected faces
+are absent. Installing metric-compatible files would change the first fault,
+not the second.
+
+### 11.4 What this section does not establish
+
+- **One host, one profile, one route.** No proxy, no device preset, no second
+  distro, no second display system.
+- **No account-site evidence.** None of these checkers predicts whether a
+  real site accepts the browser.
+- **No matched cross-OS reference.** A Windows claim was not compared against
+  a genuine Windows browser of the same version; BrowserLeaks recorded a TLS
+  fingerprint with no matched reference trace, so no transport mismatch is
+  proven either way.
+
+---
+
+## 12. Summary
 
 | Area | Verdict |
 |---|---|

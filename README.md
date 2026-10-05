@@ -28,7 +28,7 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 - **Pre-Launch Health Gate**: `ProxyHealthManager` probes TCP socket connectivity and verifies HTTP egress before spawning Chromium.
 - **Fail-Closed by Default (`ProxyFallback.BLOCK`)**: Dead, timed-out, or unreachable proxies **abort launch immediately**. Chromium is never spawned against a failed route, eliminating silent fallback to the operator's real IP.
 - **Leak Elimination Policies**:
-  - **DNS**: Forces remote resolution via `--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost"`.
+  - **DNS**: A proxied profile emits no DNS of its own — Chrome hands the hostname to the HTTP or SOCKS5 proxy and the proxy resolves it. No flag is involved; `--host-resolver-rules` was removed because it also blocked the profile from reaching its own proxy (see `docs/NETWORK_ISOLATION.md` §4.1).
   - **IPv6**: Disables dual-stack bypass via `--disable-ipv6`.
   - **WebRTC**: Restricts UDP egress via `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` alongside DOM candidate traps.
 - **Credential Protection**: Passwords are never placed in CLI arguments (`ps aux` safe) and are dynamically authenticated via `chrome.webRequest.onAuthRequired`.

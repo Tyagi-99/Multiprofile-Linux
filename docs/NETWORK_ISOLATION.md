@@ -49,15 +49,44 @@ Multiprofile Linux enforces a strict **fail-closed invariant**:
 
 ---
 
+> **On "fail-closed".** The default is fail-closed and that default is load
+> bearing: `ProxyFallback.BLOCK` aborts the launch and the Chrome process is
+> never created. But `WARN` and `ALLOW` are real, opt-in, per-profile
+> settings, and **`WARN` launches the profile on the host IP** with a log
+> warning. So "this product is fail-closed" is true of the default and not of
+> every configuration, and a profile that must never touch the host
+> connection has to actually be on `BLOCK`. `/api/health` and the profile
+> detail endpoint report the effective mode.
+
 ## 4. Leak Prevention Policies
 
 ### 4.1 DNS Leak Prevention (`DNSPolicy`)
 - **Policy**: `DNSPolicy.PROXY_RESOLVED`
-- **Mechanism**: When a proxy is configured, the launcher injects:
-  ```bash
-  --host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost"
-  ```
-  This forces Chromium to delegate domain name resolution directly to the remote proxy server rather than issuing local UDP DNS queries through the host's `/etc/resolv.conf`.
+- **Mechanism**: **No flag.** Chrome hands the hostname to an HTTP or SOCKS5
+  proxy and lets the proxy resolve it, so a proxied profile emits no DNS of
+  its own. `DNSPolicy.PROXY_RESOLVED` is a *description of that behaviour*,
+  not something the launcher enforces.
+
+> **Corrected 5 October 2026.** This section previously said the launcher
+> injects `--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost"`. It
+> does not, and it must not. Measured on Chrome 151 with `strace` counting
+> `connect`/`sendto` to port 53, alongside a local proxy counting requests:
+>
+> | configuration | host DNS queries | proxy hits | page loaded |
+> |---|---:|---:|---|
+> | no proxy | 76 | 0 | no |
+> | proxy, no resolver rule | **0** | 2 | **yes** |
+> | proxy + the resolver rule | 0 | 0 | no |
+>
+> `MAP *` catches every hostname *including the proxy's own*, and
+> `EXCLUDE localhost` spares only the literal name `localhost`, not
+> `127.0.0.1`. The rule therefore stopped the profile reaching its proxy at
+> all — every proxied profile was unable to browse — while the DNS it was
+> meant to contain was already contained without it.
+>
+> `tests/test_dns_containment.py` asserts the flag is **absent** for every
+> proxy scheme, and `test_proxy_resolved_policy_is_a_description_not_a_flag`
+> pins the distinction.
 
 ### 4.2 IPv6 Leak Prevention (`IPv6Policy`)
 - **Policy**: `IPv6Policy.DISABLED`
@@ -134,6 +163,6 @@ The network isolation layer is validated in `tests/test_network.py` and `tests/t
 - `test_block_on_dead_proxy`: Verifies that a closed TCP socket triggers immediate pre-launch abort.
 - `test_warn_on_dead_proxy_allows_launch`: Verifies that explicit `WARN` fallback is honored.
 - `test_proxy_credentials_not_in_flags`: Verifies that `chrome_network_flags()` contains no passwords.
-- `test_dns_proxy_resolved_flag`: Verifies `--host-resolver-rules` emission.
+- `tests/test_dns_containment.py::test_no_resolver_rule_for_any_proxy_scheme`: verifies `--host-resolver-rules` is **not** emitted, for every proxy scheme. (This line previously cited a `test_dns_proxy_resolved_flag` asserting the opposite; no such test exists — it was replaced when the flag was removed.)
 - `test_ipv6_disabled_flag`: Verifies `--disable-ipv6` emission.
 - `test_webrtc_proxy_only_flag`: Verifies WebRTC UDP restriction flags.

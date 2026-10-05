@@ -970,7 +970,10 @@ def _measure_dns(net_config: NetworkConfig, timeout: float) -> dict[str, Any]:
         return {
             "status": _DNS_NOT_RUN,
             "detail": "DNS is delegated to the proxy; remote resolution cannot be "
-                      "observed from here. Chrome enforces it via --host-resolver-rules.",
+                      "observed from here. Chrome hands the hostname to an HTTP "
+                      "or SOCKS5 proxy and the proxy resolves it -- no flag is "
+                      "involved. Measured with strace on Chrome 151: a proxied "
+                      "profile emits 0 DNS queries of its own.",
         }
     return {
         "status": _DNS_NOT_RUN,
