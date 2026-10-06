@@ -217,3 +217,59 @@ def read_marker(port: int) -> dict:
 
 def read_marker_b(port: int) -> dict:
     return _evaluate(port, MARKER_B)
+
+
+# ---------------------------------------------------------------------------
+# The coverage gate
+# ---------------------------------------------------------------------------
+
+#: When set to ``1``, a browser that cannot load unpacked extensions is a
+#: **failure** rather than a skip.
+REQUIRE_ENV = "MP_REQUIRE_EXTENSION_TESTS"
+
+
+def require_unpacked_support(module: str) -> object:
+    """Gate a live extension module on the engine, and fail if coverage is required.
+
+    Skipping was the right default and the wrong outcome. CI skipped these
+    suites for the entire life of the feature -- the runner image ships branded
+    Google Chrome, ``--load-extension`` is gone from branded Chrome 137+, so the
+    capability gate correctly refused and twelve acceptance tests quietly did
+    not run. The job stayed green. A PR was then described as having passing
+    extension coverage in CI when it had none, which had to be corrected in the
+    PR body after the fact.
+
+    ``-rs`` made the skip visible; it did not make it *fail*. So the job that is
+    responsible for this coverage sets ``MP_REQUIRE_EXTENSION_TESTS=1`` and a
+    missing engine becomes red. A developer on branded Chrome still gets a skip,
+    which is honest for them: their browser genuinely cannot do it.
+
+    Returns the resolved capability so the caller can report the binary it got.
+    """
+    import pytest
+
+    from multiprofile.engine_choice import resolve
+
+    cap = resolve()
+    if cap.unpacked:
+        return cap
+
+    detail = (
+        f"{module}: this browser cannot load unpacked extensions: {cap.reason} "
+        f"(binary={cap.binary}, origin={cap.origin})"
+    )
+    import os
+
+    if os.environ.get(REQUIRE_ENV) == "1":
+        pytest.fail(
+            detail
+            + f"\n\n{REQUIRE_ENV}=1, so this is a failure and not a skip. This "
+            "environment is responsible for extension acceptance coverage and "
+            "has no engine that can provide it. Install Chromium or Chrome for "
+            "Testing and point MULTIPROFILE_ENGINE_BINARY at it. Branded Google "
+            "Chrome 137+ cannot load unpacked extensions and no flag changes "
+            "that.",
+            pytrace=False,
+        )
+    pytest.skip(detail, allow_module_level=True)
+    return cap

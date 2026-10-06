@@ -51,18 +51,18 @@ pytest.importorskip("websocket")
 if not _chrome_available():
     pytest.skip("Chrome is not installed", allow_module_level=True)
 
-from multiprofile.engine_choice import resolve as _resolve_engine  # noqa: E402
+from _extension_lab import require_unpacked_support  # noqa: E402
 
 # Through the resolver, not capability.detect() directly. detect() with
 # no argument falls back to the PATH search, so a pinned engine could
 # not reach this gate -- the same bug find_chrome() had, in the tests
 # that exist to catch it. Observed in CI: the job pinned a capable
 # Chromium and this still skipped, naming the PATH-resolved Chrome.
-_CAP = _resolve_engine()
-if not _CAP.unpacked:
-    pytest.skip(f"this browser cannot load unpacked extensions: {_CAP.reason} "
-        f"(binary={_CAP.binary}, origin={_CAP.origin})",
-                allow_module_level=True)
+#
+# A skip here is honest for a developer on branded Chrome and dishonest for
+# the job that owes this coverage, so MP_REQUIRE_EXTENSION_TESTS=1 turns it
+# into a failure. See _extension_lab.require_unpacked_support.
+_CAP = require_unpacked_support("test_extension_acceptance_live.py")
 
 # The measurement helpers live in `_extension_lab`, imported the way
 # `_route_lab` is. A `from tests.test_extension_live import ...` resolved

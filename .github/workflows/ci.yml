@@ -111,38 +111,98 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             xvfb dbus dbus-x11 fonts-liberation \
             libasound2 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Chrome for Testing
+        id: cft
+        # The extension feature needs a browser that still accepts
+        # --load-extension. The runner image ships branded Google Chrome,
+        # which has not accepted it since 137, so for the whole life of the
+        # feature the capability gate refused and the extension suites
+        # skipped -- silently, until `-rs` was added.
+        #
+        # Chrome for Testing is the supported answer and the one this
+        # product's own remediation text names. It is installed BESIDE the
+        # image's Chrome rather than replacing it, and only the extension
+        # step is pinned to it (see below).
+        run: |
+          set -euo pipefail
+          npx --yes @puppeteer/browsers install chrome@stable \
+            --path "$HOME/cft" | tee /tmp/cft.txt
+          # The installer prints "<build> <path>"; take the path.
+          BIN=$(awk '{print $NF}' /tmp/cft.txt | tail -1)
+          test -x "$BIN"
+          echo "binary=$BIN" >> "$GITHUB_OUTPUT"
+          "$BIN" --version
       - name: Install the project
         run: uv sync --all-extras --dev
+      - name: Chrome for Testing must actually launch headful here
+        # A preflight, because the last attempt to give this job a capable
+        # engine pinned a Chromium snapshot that could not start headful on
+        # this image, and the result was 29 failures and 192 errors -- a
+        # cascade that said nothing about the real problem. This fails at the
+        # engine, with the engine's own stderr, before any test runs.
+        env:
+          MULTIPROFILE_ENGINE_BINARY: ${{ steps.cft.outputs.binary }}
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- \
+              uv run python - <<'PY'
+          import os, subprocess, sys, tempfile
+          from multiprofile.engine_choice import resolve
+          cap = resolve()
+          print(f"resolved: binary={cap.binary} brand={cap.brand} "
+                f"version={cap.version} unpacked={cap.unpacked} origin={cap.origin}")
+          if not cap.unpacked:
+              sys.exit(f"this engine cannot load unpacked extensions: {cap.reason}")
+          with tempfile.TemporaryDirectory() as d:
+              p = subprocess.run(
+                  [cap.binary, f"--user-data-dir={d}", "--ozone-platform=x11",
+                   "--no-first-run", "--no-default-browser-check",
+                   "--remote-debugging-port=0", "--dump-dom", "about:blank"],
+                  capture_output=True, text=True, timeout=120)
+          if p.returncode != 0:
+              sys.exit(f"headful launch failed rc={p.returncode}\n"
+                       f"stdout={p.stdout[-2000:]}\nstderr={p.stderr[-2000:]}")
+          print("headful launch ok")
+          PY
       - name: Isolation and live launch tests
         env:
           PYTHONPATH: src
-          # NOT pinned to the Chromium setup-chrome installs.
-          #
-          # Pinning it was tried and reverted: the extension suites still
-          # skipped (see below) and the job went from 1 failure to 29 failed
-          # and 192 errors, because that snapshot build does not run headful
-          # in this environment. A broken live job is worse than an uncovered
-          # feature.
-          #
-          # So the extension live suites DO NOT RUN HERE. The runner image
-          # ships branded Google Chrome, BROWSER_BINARIES prefers
-          # google-chrome-stable over chromium, and branded Chrome 137+ cannot
-          # load unpacked extensions, so the capability gate correctly refuses:
-          #
-          #   SKIPPED tests/test_extension_live.py: this browser cannot load
-          #   unpacked extensions: Google Chrome 154 removed --load-extension
-          #
-          # -rs below is what made that visible. Covering the feature here
-          # needs a Chromium that runs headful on this image, which is a
-          # separate piece of work.
+          # Deliberately NOT pinned. This step keeps running against whatever
+          # the image resolves (branded Google Chrome), because that is the
+          # configuration these 650-odd tests are known green on, and the one
+          # previous attempt to repin the whole job took it to 29 failed and
+          # 192 errors. The extension suites get their own step below with
+          # their own engine.
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             dbus-run-session -- \
-              uv run pytest tests/ -q -rs -m network -p no:randomly
+              uv run pytest tests/ -q -rs -m network -p no:randomly \
+                --ignore=tests/test_extension_live.py \
+                --ignore=tests/test_extension_acceptance_live.py
         # -rs prints the reason for every skip. Under plain -q a module-level
         # skip is a single `s` with no explanation, which is how a twelve-test
         # live suite went missing from a run without anything going red. A
         # suite that silently stops running is worse than one that fails.
+      - name: Extension acceptance tests (Chrome for Testing)
+        env:
+          PYTHONPATH: src
+          MULTIPROFILE_ENGINE_BINARY: ${{ steps.cft.outputs.binary }}
+          # The point of this step. A skip here is a failure: this is the only
+          # environment responsible for extension coverage, so it is not
+          # allowed to quietly provide none. See
+          # _extension_lab.require_unpacked_support.
+          MP_REQUIRE_EXTENSION_TESTS: "1"
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- \
+              uv run pytest -q -rs -m network -p no:randomly \
+                tests/test_extension_live.py \
+                tests/test_extension_acceptance_live.py
 
   frontend:
     name: Console
