@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiMessage, get, post } from "../../lib/api";
+import { navigate } from "../../lib/router";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardContent } from "../ui/card";
@@ -235,13 +236,16 @@ export function ExtensionsTab() {
           ) : (
             <div className="flex items-center gap-3">
               <Badge tone={data?.extension_ok ? "ok" : "warn"}>
-                {data?.extension_ok ? "yes" : "no"}
+                {data?.extension_ok ? "present" : "missing"}
               </Badge>
               <div>
-                <p className="text-sm font-medium text-ink-1">Bundled extension</p>
+                <p className="text-sm font-medium text-ink-1">Identity script</p>
                 <p className="text-xs text-ink-3">
-                  The backend ships one bundled extension used for fingerprint/CDP injection. It is
-                  loaded automatically when profiles launch.
+                  The bundled anti-detect bundle is the <em>source</em> of the
+                  identity script, which the backend injects over CDP. It is not
+                  loaded as a browser extension and nothing is staged per
+                  profile — the copy that used to be loaded ran twice on
+                  Chromium and not at all on Chrome.
                 </p>
               </div>
             </div>
@@ -250,8 +254,9 @@ export function ExtensionsTab() {
         </CardContent>
       </Card>
       <EmptyState
-        title="No extension management API"
-        description="The current backend does not expose per-profile extension install/uninstall endpoints, so there is nothing to list or manage here."
+        title="Browser extensions moved"
+        description="Importing extensions and assigning them to profiles now has its own section."
+        action={{ label: "Open Extensions", onClick: () => navigate({ name: "extensions" }) }}
       />
     </div>
   );

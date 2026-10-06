@@ -2233,14 +2233,27 @@ def create_app() -> Flask:
             return _ext_error(e)
         body = result.to_dict()
         body["missingProfileIds"] = missing
-        audit_log("extension_assign", ok=body["ok"],
+        # A caller that named five profiles and got three must not be told
+        # "ok". resolve_profiles drops IDs that do not exist -- which is right,
+        # a nonexistent profile is not a failed install -- but reporting the
+        # remainder as an unqualified success is how a bulk operation silently
+        # does less than it was asked to.
+        complete = body["ok"] and not missing
+        audit_log("extension_assign", ok=complete,
                   detail={"extensionId": ext_uuid, "total": body["total"],
-                          "failed": body["failed"]})
-        # 207: a bulk operation where some profiles succeeded and some did
-        # not. A flat 200 would let the console call the whole batch a
-        # success, which is the bug this status exists to prevent.
-        status = 200 if body["ok"] else (207 if body["succeeded"] else 400)
-        return jsonify({"ok": body["ok"], **body}), status
+                          "failed": body["failed"], "missing": len(missing)})
+        if missing:
+            body["note"] = (
+                f"{len(missing)} requested profile(s) no longer exist and were "
+                f"skipped: {', '.join(missing[:5])}."
+            )
+        # 207: a bulk operation where some targets succeeded and some did not.
+        # A flat 200 would let the console call the whole batch a success,
+        # which is the bug this status exists to prevent.
+        status = 200 if complete else (207 if body["succeeded"] else 400)
+        # `**body` carries its own "ok" from BulkResult, so the corrected
+        # value goes last or the spread silently overwrites it.
+        return jsonify({**body, "ok": complete}), status
 
     @app.post("/api/extensions/<ext_uuid>/retry")
     def extensions_retry(ext_uuid: str):
@@ -2261,7 +2274,7 @@ def create_app() -> Flask:
             return _ext_error(e)
         body = result.to_dict()
         status = 200 if body["ok"] else (207 if body["succeeded"] else 400)
-        return jsonify({"ok": body["ok"], **body}), status
+        return jsonify({**body, "ok": body["ok"]}), status
 
     @app.post("/api/extensions/<ext_uuid>/unassign")
     def extensions_unassign(ext_uuid: str):

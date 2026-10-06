@@ -8,6 +8,7 @@ import { TrashPageView } from "../trash/trash-page";
 import { UsagePageView } from "../usage/usage-page";
 import { FingerprintsPage } from "../fingerprint/fingerprints-page";
 import { JobsPage } from "../jobs/jobs-page";
+import { ExtensionsPage } from "../extensions/extensions-page";
 import { SettingsPage } from "../settings/settings-page";
 import { NetworkPage } from "../network/network-page";
 import { Overview } from "../dashboard/overview";
@@ -67,11 +68,13 @@ const SECTION_PHASE: Record<Route["name"], { title: string; phase: string }> = {
   network: { title: "Network", phase: "Phase 9" },
   fingerprints: { title: "Fingerprints", phase: "Phase 8" },
   automation: { title: "Automation", phase: "a later phase" },
+  // Extensions is a real view now; the entry stays so the placeholder map
+  // remains exhaustive over Route names.
+  extensions: { title: "Extensions", phase: "shipped" },
   jobs: { title: "Jobs", phase: "Phase 10" },
   gateways: { title: "Gateways", phase: "Phase 9" },
   trash: { title: "Trash", phase: "Phase 11" },
   usage: { title: "Usage", phase: "Phase 11" },
-  extensions: { title: "Extensions", phase: "a later phase" },
   audit: { title: "Audit Log", phase: "Phase 11" },
   settings: { title: "Settings", phase: "Phase 12" },
 };
@@ -90,7 +93,7 @@ function RoutedView({ route }: { route: Route }) {
   if (route.name === "trash") return <TrashPageView />;
   if (route.name === "audit") return <AuditPageView />;
   if (route.name === "settings") return <SettingsPage />;
-  if (route.name === "extensions") return <SettingsPage initialTab="extensions" />;
+  if (route.name === "extensions") return <ExtensionsPage />;
   const meta = SECTION_PHASE[route.name];
   return <SectionPlaceholder title={meta.title} phase={meta.phase} />;
 }
