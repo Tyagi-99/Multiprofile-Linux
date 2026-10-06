@@ -51,12 +51,18 @@ from _extension_lab import (
     read_marker as _read_marker,
 )
 
-from multiprofile.extensions.capability import detect as _detect  # noqa: E402
+from multiprofile.engine_choice import resolve as _resolve_engine  # noqa: E402
 
-_CAP = _detect()
+# Through the resolver, not capability.detect() directly. detect() with
+# no argument falls back to the PATH search, so a pinned engine could
+# not reach this gate -- the same bug find_chrome() had, in the tests
+# that exist to catch it. Observed in CI: the job pinned a capable
+# Chromium and this still skipped, naming the PATH-resolved Chrome.
+_CAP = _resolve_engine()
 if not _CAP.unpacked:
     pytest.skip(
-        f"this browser cannot load unpacked extensions: {_CAP.reason}",
+        f"this browser cannot load unpacked extensions: {_CAP.reason} "
+        f"(binary={_CAP.binary}, origin={_CAP.origin})",
         allow_module_level=True,
     )
 
