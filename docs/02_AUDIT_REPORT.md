@@ -2819,7 +2819,7 @@ with the author's idea of the API.
 
 ---
 
-### F59–F61 — the double-application pass of 6 October 2026
+### F59–F62 — the double-application pass of 6 October 2026
 
 All four came out of replacing a *comparison* with a *prediction*. The
 suite's canvas check hashed a render in each realm and compared the hashes.
@@ -2957,6 +2957,61 @@ can be recovered from the read and the one-pass and two-pass predictions
 computed from it. Agreement alone cannot catch two realms being wrong
 together, which is the mistake that let F59 sit under a passing test.
 **FIXED**
+
+**F62 — the residual canvas disagreement was Chromium's, not ours, and a
+control is what showed it.** After F59–F61, CI still failed three canvas
+assertions, in `shared` and `service` only — the two realms that run in their
+own process. Locally they passed. That is the shape of a real intermittent
+defect, and it would have been easy to keep chasing.
+
+The mask instrument ruled it out in one step: **every** mask check passed in
+CI, in all six realms, so the noise was applied exactly once at the right
+coordinates everywhere. Whatever differed was the render *underneath* the
+noise. Every surviving failure drew text; every passing check drew flat grey.
+
+Text metrics localised it to one row — a family that **exists nowhere**:
+
+| family | page / dedicated worker | shared / service |
+|---|---|---|
+| `__NoSuchFontAnywhere__` | 170.672 (serif) | 170.625 (sans) |
+
+Chromium's last-resort font family is a per-process preference, and a shared
+or service worker does not get the page's. Every family that showed a
+divergence had exactly those two values, i.e. none of them resolved and each
+process fell back to its own default.
+
+**Stock Chromium, same host, same probe, no profile and no fontconfig
+override, gives the identical split.** So this is engine behaviour. Asserting
+agreement on it would have been asserting that the product differs from
+Chrome — and the suite was doing exactly that, invisibly, because `12px serif`
+resolves on this host and does not in CI.
+
+Two corrections to my own reasoning, both recorded because each was wrong in a
+way worth seeing:
+
+*I first read it as a font-restriction leak* — the host's real font set
+readable through a service worker while the page hid it, the F53 shape. The
+measurement disproved it: under a Windows claim, every rejected Linux family
+measured exactly like the absent control in the page, a dedicated worker, a
+shared worker and a service worker alike.
+
+*I then wrote a test asserting that a restricted family is hidden in every
+realm, and removed it*, because it cannot be sound. It inferred "hidden" from
+a family measuring the same as the absent control — and a family that **does**
+resolve measures the same as that control whenever its metrics match the
+realm's last-resort font. An own-process worker's last-resort family is sans
+here, so `Liberation Sans` is resolved there and indistinguishable from
+absent, and the test duly reported it hidden. Width alone cannot separate the
+two cases; proving the restriction holds needs a channel that distinguishes
+*resolved* from *fell back*, which `measureText` does not provide. The reason
+is recorded in the test file so it is not rewritten.
+
+The fix is to the probes, not the engine. The realm canvas hash in
+`identity_probe.py` and in `test_worker_realms_live.py` now draws flat shapes,
+which measures the canvas noise those assertions are about. The text render is
+kept as `textHash`, recorded and not compared, so the observation survives.
+Text metrics are compared separately and only for families that resolved.
+**Not a defect; probes corrected.**
 
 **The class, now at five.** F49's `switch-all-direct`, F50's `prefer_sandbox`,
 the `--host-resolver-rules` correction, F57's `--disable-ipv6`, and this. Each

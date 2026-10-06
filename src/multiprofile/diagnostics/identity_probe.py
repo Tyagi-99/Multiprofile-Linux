@@ -77,7 +77,27 @@ REALM_FIELDS = (
     "glVendor:(()=>{try{const c=new OffscreenCanvas(8,8).getContext('webgl');"
     "const d=c.getExtension('WEBGL_debug_renderer_info');"
     "return String(c.getParameter(d.UNMASKED_VENDOR_WEBGL));}catch(e){return null}})(),"
+    # Flat shapes, no glyph. This drew `12px serif` text until a control run
+    # showed what that was actually measuring: Chromium's last-resort font
+    # family is a per-process preference, so a page and an own-process worker
+    # (shared, service) resolve an unresolvable family differently. Measured
+    # on this host with a family that exists nowhere, in **stock** Chromium:
+    #
+    #     page / dedicated worker   170.672   (serif)
+    #     shared / service worker   170.625   (sans)
+    #
+    # So a glyph in this bitmap made the hash disagree between realms wherever
+    # the family did not resolve -- which is environment-dependent, passed
+    # locally, failed in CI, and would have been asserting that the product
+    # differs from Chrome. The canvas noise is what has to agree, and this
+    # measures that. The text render is kept below as `textHash`, recorded but
+    # not compared, so the observation is not lost.
     "canvasHash:(()=>{try{const c=new OffscreenCanvas(20,20);const x=c.getContext('2d');"
+    "x.fillStyle='rgb(128,128,128)';x.fillRect(0,0,20,20);"
+    "x.fillStyle='#f30';x.fillRect(2,2,7,11);x.fillStyle='#08f';x.fillRect(11,5,6,9);"
+    "const d=x.getImageData(0,0,20,20).data;let h=0;"
+    "for(let i=0;i<d.length;i++)h=(h*31+d[i])>>>0;return h;}catch(e){return null}})(),"
+    "textHash:(()=>{try{const c=new OffscreenCanvas(20,20);const x=c.getContext('2d');"
     "x.fillStyle='#f30';x.fillRect(0,0,20,20);x.fillStyle='#08f';"
     "x.font='12px serif';x.fillText('Ab',1,14);"
     "const d=x.getImageData(0,0,20,20).data;let h=0;"

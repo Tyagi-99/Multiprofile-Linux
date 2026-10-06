@@ -79,9 +79,28 @@ _FIELDS = (
     "gl:(()=>{try{const c=new OffscreenCanvas(8,8).getContext('webgl');"
     "const d=c.getExtension('WEBGL_debug_renderer_info');"
     "return String(c.getParameter(d.UNMASKED_RENDERER_WEBGL));}catch(e){return 'n/a'}})(),"
+    # Flat shapes, no glyph. This drew `12px serif` text, and a control run
+    # against stock Chromium showed that a glyph makes this hash measure
+    # something else entirely: Chromium's last-resort font family is a
+    # per-process preference, so a page and an own-process worker resolve an
+    # unresolvable family differently. With a family that exists nowhere, in
+    # **stock** Chromium on this host:
+    #
+    #     page / dedicated worker   170.672   (serif)
+    #     shared / service worker   170.625   (sans)
+    #
+    # That is why this assertion passed locally and failed in CI for `shared`
+    # and `service` only: wherever `serif` did not resolve, the two processes
+    # fell back to different families and the glyph pixels differed. Keeping
+    # the glyph would be asserting that the product differs from Chrome.
+    #
+    # The canvas noise is what must agree between realms, and flat shapes
+    # measure exactly that. `tests/test_canvas_noise_live.py` checks it harder
+    # still, against the mask the profile's seed predicts, and covers text
+    # metrics separately and soundly.
     "cv:(()=>{try{const c=new OffscreenCanvas(20,20);const x=c.getContext('2d');"
-    "x.fillStyle='#f30';x.fillRect(0,0,20,20);x.fillStyle='#08f';"
-    "x.font='12px serif';x.fillText('Ab',1,14);"
+    "x.fillStyle='rgb(128,128,128)';x.fillRect(0,0,20,20);"
+    "x.fillStyle='#f30';x.fillRect(2,2,7,11);x.fillStyle='#08f';x.fillRect(11,5,6,9);"
     "const d=x.getImageData(0,0,20,20).data;let h=0;"
     "for(let i=0;i<d.length;i++)h=(h*31+d[i])>>>0;return h;}catch(e){return 'n/a'}})()"
 )

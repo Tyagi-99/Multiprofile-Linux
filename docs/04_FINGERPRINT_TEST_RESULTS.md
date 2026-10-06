@@ -795,6 +795,55 @@ wrong together, which is precisely what hid §11.7's two defects.
 
 ---
 
+### 11.10 The residual canvas disagreement was the engine's, and a control proved it
+
+**Closed 6 October 2026.** After §11.6, §11.7 and §11.9, CI still failed three
+canvas assertions in `shared` and `service` only, while they passed locally.
+
+The mask instrument settled it immediately: **every mask check passed in CI,
+in all six realms**, so the noise was applied exactly once at the right
+coordinates everywhere, and whatever differed lay underneath it. Every
+surviving failure drew text; every passing check drew flat grey.
+
+Text metrics localised it to one row — a family that exists nowhere:
+
+| family | page / dedicated worker | shared / service |
+|---|---|---|
+| `__NoSuchFontAnywhere__` | 170.672 (serif) | 170.625 (sans) |
+
+Chromium's last-resort family is a per-process preference, and an own-process
+worker does not get the page's. Every divergent family had exactly those two
+values — none resolved, and each process fell back to its own default.
+
+**Stock Chromium, same host, same probe, no profile and no fontconfig
+override, gives the identical split.** Engine behaviour, not a product tell.
+The suite had been asserting the opposite without saying so, and got away with
+it only because `12px serif` resolves on this host and does not in CI.
+
+Two of my own readings were wrong on the way, and both are worth keeping:
+
+- I first read it as the **font restriction leaking past the page** — the F53
+  shape. Disproved: under a Windows claim, every rejected Linux family
+  measured exactly like the absent control in the page, a dedicated worker, a
+  shared worker and a service worker alike.
+- I then wrote a test asserting a restricted family is hidden in every realm,
+  and **removed it as unsound**. "Hidden" was inferred from matching the
+  absent control, and a family that *does* resolve matches that control
+  whenever its metrics match the realm's last-resort font — so `Liberation
+  Sans`, resolved in an own-process worker whose fallback is sans, was
+  reported hidden. Width alone cannot separate the two. Proving the
+  restriction holds needs a channel distinguishing *resolved* from *fell
+  back*; `measureText` is not one. This sits beside §11.5 as a second thing
+  the font surface will not tell us by width probing.
+
+The fix is to the probes. `identity_probe.py` and
+`tests/test_worker_realms_live.py` now hash flat shapes — which is what those
+assertions are about — and keep the text render as `textHash`, recorded and
+not compared. Text metrics are compared separately, only for families that
+resolved in both realms.
+
+---
+
 ### 11.8 What this section does not establish
 
 - **One host, one profile, one route.** No proxy, no device preset, no second

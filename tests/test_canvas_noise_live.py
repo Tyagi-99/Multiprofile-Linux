@@ -150,13 +150,51 @@ async () => {
   catch (e) { out.mask = 'E:' + e; }
   try { out.maskOff = maskOf(grey(S + OX * 4, S + OY * 4).getImageData(OX, OY, S, S).data); }
   catch (e) { out.maskOff = 'E:' + e; }
+  // Exported from a canvas with NO TEXT on it. This test is about whether the
+  // export path carries the profile's noise; a glyph in the bitmap confounds
+  // that with how the realm's process rasterises fonts, which is a separate
+  // and still-open divergence (see textWidth below).
+  try {
+    const c = new OffscreenCanvas(S, S), x = c.getContext('2d');
+    x.fillStyle = 'rgb(' + B + ',' + B + ',' + B + ')';
+    x.fillRect(0, 0, S, S);
+    x.fillStyle = '#f30';
+    x.fillRect(2, 2, 7, 11);          // flat shapes only
+    const b = await c.convertToBlob();
+    out.blob = hash(new Uint8Array(await b.arrayBuffer()));
+  } catch (e) { out.blob = 'E:' + e; }
+
+  // --- the text surfaces, measured rather than assumed ------------------
+  // CI fails the text-drawing canvas hashes in `shared` and `service` only,
+  // while every mask check above passes in all six realms. The noise is
+  // therefore right and the BASE RENDER differs -- and those two are exactly
+  // the realms that run in their own process rather than the page's. Text
+  // metrics say whether the cause is font selection.
+  try {
+    const c = new OffscreenCanvas(S, S), x = c.getContext('2d');
+    const w = f => { x.font = '32px ' + f; return x.measureText('mmmwwwiii').width; };
+    // The control: a family that exists nowhere. Chromium's last-resort
+    // family is a per-process preference, so this value legitimately differs
+    // between a page and an own-process worker -- measured identically in
+    // STOCK Chromium on this host, page/dedicated 170.672 against
+    // shared/service 170.625. Anything measuring the same as this did not
+    // resolve, and realms are not required to agree about it.
+    out.absent = w('"__NoSuchFontAnywhere__"').toFixed(3);
+    const widths = {};
+    for (const f of ['serif', 'sans-serif', 'monospace',
+                     '"Liberation Sans"', '"Liberation Mono"', '"Arial"',
+                     '"Times New Roman"', '"DejaVu Sans"']) {
+      widths[f] = w(f).toFixed(3);
+    }
+    out.textWidth = JSON.stringify(widths);
+  } catch (e) { out.textWidth = 'E:' + e; }
+
   try {
     const c = new OffscreenCanvas(S, S), x = c.getContext('2d');
     x.fillStyle = '#f30'; x.fillRect(0, 0, S, S);
     x.fillStyle = '#08f'; x.font = '12px serif'; x.fillText('Ab', 1, 14);
-    const b = await c.convertToBlob();
-    out.blob = hash(new Uint8Array(await b.arrayBuffer()));
-  } catch (e) { out.blob = 'E:' + e; }
+    out.textRender = hash(x.getImageData(0, 0, S, S).data);
+  } catch (e) { out.textRender = 'E:' + e; }
   return out;
 }
 """.replace("__SIDE__", str(SIDE)).replace("__BASE__", str(BASE)) \
@@ -220,6 +258,12 @@ _PAGE_PROBE = r"""
 
 #: Every realm the noise has to reach. ``top`` is tested separately because it
 #: is the one the others are compared against in the older suite.
+#: CSS generics. These always resolve, so "measures the same as a font that
+#: exists nowhere" carries no information about them -- on this host the page's
+#: own last-resort family is serif, which makes `serif` collide with the
+#: control by coincidence.
+GENERIC_FAMILIES = frozenset({"serif", "sans-serif", "monospace"})
+
 WORKER_REALMS = ("worker_blob", "worker_url", "worker_module", "shared", "service")
 ALL_REALMS = ("top", *WORKER_REALMS)
 
@@ -362,10 +406,65 @@ def test_the_noise_follows_canvas_position_not_the_read_origin(noise, realm):
 
 @pytest.mark.parametrize("realm", WORKER_REALMS)
 def test_the_realm_exports_the_same_png_as_its_page(noise, realm):
-    """The export path, which the worker script did not hook at all."""
+    """The export path, which the worker script did not hook at all.
+
+    Flat shapes only, deliberately. This asserted over a bitmap with a glyph
+    in it until CI showed `shared` and `service` failing it while every mask
+    check passed -- so the assertion was failing on font rasterisation, not on
+    the hook it names. See ``test_the_realm_measures_text_like_its_page``.
+    """
     assert isinstance(noise[realm]["blob"], int), (realm, noise[realm]["blob"])
     assert noise[realm]["blob"] == noise["top"]["blob"], (
         realm, noise[realm]["blob"], noise["top"]["blob"])
+
+
+# ---------------------------------------------------------------------------
+# the text surfaces -- a separate, open divergence (F62)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("realm", WORKER_REALMS)
+def test_the_realm_measures_resolvable_fonts_like_its_page(noise, realm):
+    """A page and its own worker must agree about a font that EXISTS.
+
+    Scoped to resolvable families deliberately, and the scoping is the
+    finding. An unresolvable family falls back to Chromium's last-resort
+    font, which is a per-process preference, so a page and an own-process
+    worker legitimately differ there -- measured in **stock Chromium** on this
+    host, with a family that exists nowhere:
+
+        page / dedicated worker   170.672   (serif)
+        shared / service worker   170.625   (sans)
+
+    Asserting agreement on that would assert that the product differs from
+    Chrome. So this compares only families that actually resolved, which still
+    catches the thing worth catching: a font visible in one realm and hidden
+    in another, which is what a font restriction leaking past the page would
+    look like. Recorded as F62.
+    """
+    got = json.loads(noise[realm]["textWidth"])
+    top = json.loads(noise["top"]["textWidth"])
+    for family, width in top.items():
+        if family not in GENERIC_FAMILIES and (
+                width == noise["top"]["absent"]
+                or got[family] == noise[realm]["absent"]):
+            continue    # did not resolve in one of the two; see the docstring
+        assert got[family] == width, (realm, family, got[family], width)
+
+
+# A test that asked "is a restricted family hidden in every realm?" by width
+# comparison was written here and then removed, because it cannot be sound.
+# "Hidden" was inferred from a family measuring the same as a family that
+# exists nowhere -- and a family that DOES resolve measures the same as that
+# control whenever its metrics match the realm's last-resort font. On this
+# host, an own-process worker's last-resort family is sans, so "Liberation
+# Sans" is resolved there and indistinguishable from absent, and the test
+# reported it hidden. Width alone cannot separate the two cases.
+#
+# What the measurement does support, at that strength: under a Windows claim
+# every rejected Linux family measured exactly like the absent control in the
+# page, a dedicated worker, a shared worker and a service worker alike, so
+# there is no evidence of the restriction stopping at the page. Proving it
+# would need a channel that distinguishes "resolved" from "fell back", which
+# measureText does not provide.
 
 
 def test_the_measurement_is_not_vacuous(noise):
@@ -376,6 +475,13 @@ def test_the_measurement_is_not_vacuous(noise):
     assert expected_mask(seed, 0, 0), "the seed predicts no noise at all"
     assert noise["top"]["mask"], "nothing was noised in the page"
     assert isinstance(noise["top"]["blob"], int), noise["top"]["blob"]
+    assert isinstance(noise["top"]["textRender"], int), noise["top"]["textRender"]
+    families = json.loads(noise["top"]["textWidth"])
+    assert len(families) >= 5, families
+    # at least one family must actually resolve, or the font tests above skip
+    # every family and assert nothing
+    resolved = [f for f, w in families.items() if w != noise["top"]["absent"]]
+    assert resolved, (families, noise["top"]["absent"])
     # and the offset prediction is genuinely a different mask, or the
     # position test is comparing a value against itself
     assert expected_mask(seed, OFF_X, OFF_Y) != expected_mask(seed, 0, 0)
