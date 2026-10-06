@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -2016,6 +2018,397 @@ def create_app() -> Flask:
         log.info("metrics routes not present (Workstream 2 pending)")
     except Exception as e:  # noqa: BLE001 - broad by design; the failure is logged, not hidden; not covered - defensive
         log.warning("metrics routes not registered: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  Extensions                                                        #
+    #                                                                    #
+    #  A web frontend cannot install a browser extension by itself, and  #
+    #  it should not pretend to. Every install path goes through here,   #
+    #  where the local process can read a folder the operator chose,     #
+    #  write into managed storage and put a flag on a browser command    #
+    #  line. The console only ever asks.                                 #
+    #                                                                    #
+    #  The status vocabulary is deliberate. `packageState` describes      #
+    #  bytes on disk (imported / downloaded). Per-profile `state` is the  #
+    #  only thing that may say installed, and only after the browser was  #
+    #  observed running the extension. See extensions/manager.py.        #
+    # ------------------------------------------------------------------ #
+
+    def _ext_error(e: Exception, default_code: int = 400):
+        from ..extensions.package import PackageError
+
+        if isinstance(e, PackageError):
+            status = 404 if e.code == "not_found" else default_code
+            return jsonify({"ok": False, "error": e.message, "code": e.code}), status
+        log.exception("extension operation failed")
+        return jsonify({"ok": False, "error": str(e), "code": "internal"}), 500
+
+    @app.get("/api/extensions/capability")
+    def extensions_capability():
+        """What the installed browser will actually do. Read fresh, never
+        cached: the operator can change MULTIPROFILE_ENGINE_BINARY between
+        two launches, and a stale yes here becomes a false install claim."""
+        from ..extensions.capability import detect
+
+        return jsonify({"ok": True, "capability": detect().to_dict()})
+
+    @app.get("/api/extensions")
+    def extensions_list():
+        from ..extensions import store as ext_store
+        from ..extensions.capability import detect
+
+        counts = ext_store.assignment_counts()
+        items = []
+        for ext in ext_store.list_extensions():
+            assignments = ext_store.list_assignments(ext_uuid=ext["id"])
+            by_state: dict[str, int] = {}
+            for a in assignments:
+                by_state[a["state"]] = by_state.get(a["state"], 0) + 1
+            payload_present = Path(ext["payloadPath"], "manifest.json").is_file()
+            items.append({
+                **ext,
+                "assignedProfileCount": counts.get(ext["id"], 0),
+                "assignmentStates": by_state,
+                "verifiedProfileCount": by_state.get(
+                    ext_store.STATE_INSTALLED_VERIFIED, 0),
+                "payloadPresent": payload_present,
+                "assignments": assignments,
+            })
+        return jsonify({
+            "ok": True,
+            "extensions": items,
+            "capability": detect().to_dict(),
+            "stateLabels": ext_store.STATE_LABELS,
+        })
+
+    @app.get("/api/extensions/<ext_uuid>")
+    def extensions_get(ext_uuid: str):
+        from ..extensions import store as ext_store
+
+        ext = ext_store.get_extension(ext_uuid)
+        if ext is None:
+            return jsonify({"ok": False, "error": "No such extension",
+                            "code": "not_found"}), 404
+        return jsonify({
+            "ok": True,
+            "extension": {
+                **ext,
+                "assignments": ext_store.list_assignments(ext_uuid=ext_uuid),
+                "versions": ext_store.list_versions(ext_uuid),
+                "payloadPresent": Path(ext["payloadPath"], "manifest.json").is_file(),
+            },
+        })
+
+    @app.post("/api/extensions/preview")
+    def extensions_preview():
+        """Validate without writing anything, so permissions can be shown
+        before installation."""
+        from ..extensions.capability import detect
+        from ..extensions.manager import preview_zip
+        from ..extensions.package import PackageError, inspect_folder
+
+        payload = request.get_json(force=True, silent=True) or {}
+        zip_path = (payload.get("zipPath") or "").strip()
+        folder = (payload.get("folder") or "").strip()
+        try:
+            if zip_path:
+                return jsonify({"ok": True, **preview_zip(zip_path)})
+            if folder:
+                manifest = inspect_folder(folder)
+                return jsonify({
+                    "ok": True,
+                    "manifest": manifest.to_dict(),
+                    "root": folder,
+                    "capability": detect().to_dict(),
+                    "missingReferencedFiles": [],
+                })
+            raise PackageError("Provide zipPath or folder.", code="bad_request")
+        except Exception as e:  # noqa: BLE001 - mapped to a reason below
+            return _ext_error(e)
+
+    @app.post("/api/extensions/import")
+    def extensions_import():
+        """Import from a ZIP path or an unpacked folder on this machine."""
+        from ..extensions.manager import import_folder, import_zip
+        from ..extensions.package import PackageError
+
+        payload = request.get_json(force=True, silent=True) or {}
+        zip_path = (payload.get("zipPath") or "").strip()
+        folder = (payload.get("folder") or "").strip()
+        try:
+            if zip_path and folder:
+                raise PackageError("Provide zipPath or folder, not both.",
+                                   code="bad_request")
+            if zip_path:
+                ext = import_zip(zip_path)
+            elif folder:
+                ext = import_folder(folder)
+            else:
+                raise PackageError("Provide zipPath or folder.", code="bad_request")
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e)
+        audit_log("extension_import", ok=True,
+                  detail={"extensionId": ext["id"], "name": ext["name"],
+                          "version": ext["version"], "source": ext["source"]})
+        return jsonify({"ok": True, "extension": ext}), 201
+
+    @app.post("/api/extensions/upload")
+    def extensions_upload():
+        """Accept an uploaded ZIP from the console.
+
+        The bytes land in a temporary file and are validated before anything
+        is extracted, so a hostile archive never reaches managed storage.
+        """
+        import tempfile
+
+        from ..extensions.manager import import_zip
+
+        file = request.files.get("file")
+        if file is None or not file.filename:
+            return jsonify({"ok": False, "error": "No file in the request.",
+                            "code": "bad_request"}), 400
+        name = Path(file.filename).name
+        if name.lower().endswith(".crx"):
+            from ..extensions.package import crx_rejection
+
+            return _ext_error(crx_rejection(name))
+        tmp_dir = tempfile.mkdtemp(prefix="mp-ext-upload-")
+        tmp_path = Path(tmp_dir) / name
+        try:
+            file.save(tmp_path)
+            ext = import_zip(tmp_path, source_detail=name)
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        audit_log("extension_import", ok=True,
+                  detail={"extensionId": ext["id"], "name": ext["name"],
+                          "version": ext["version"], "source": "upload"})
+        return jsonify({"ok": True, "extension": ext}), 201
+
+    @app.post("/api/extensions/resolve-profiles")
+    def extensions_resolve_profiles():
+        """Resolve a bulk selection to the exact profile list, now.
+
+        The console calls this to show the final target list before the
+        operator commits, and the same function runs the selection when the
+        operation starts -- so what they confirm is what happens.
+        """
+        from ..extensions.manager import resolve_profiles
+
+        payload = request.get_json(force=True, silent=True) or {}
+        profiles, missing = resolve_profiles(
+            profile_ids=payload.get("profileIds"),
+            search=payload.get("search") or "",
+            tags=payload.get("tags") or [],
+            running=(payload.get("running") or "any"),
+            select_all_matching=bool(payload.get("selectAllMatching")),
+        )
+        return jsonify({
+            "ok": True,
+            "count": len(profiles),
+            "missingProfileIds": missing,
+            "profiles": [
+                {"id": p["id"], "name": p.get("name"),
+                 "tags": p.get("tags") or [], "isRunning": bool(p.get("isRunning"))}
+                for p in profiles
+            ],
+        })
+
+    @app.post("/api/extensions/<ext_uuid>/assign")
+    def extensions_assign(ext_uuid: str):
+        from ..extensions.manager import assign, resolve_profiles
+
+        payload = request.get_json(force=True, silent=True) or {}
+        profiles, missing = resolve_profiles(
+            profile_ids=payload.get("profileIds"),
+            search=payload.get("search") or "",
+            tags=payload.get("tags") or [],
+            running=(payload.get("running") or "any"),
+            select_all_matching=bool(payload.get("selectAllMatching")),
+        )
+        try:
+            result = assign(ext_uuid, [p["id"] for p in profiles])
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e)
+        body = result.to_dict()
+        body["missingProfileIds"] = missing
+        audit_log("extension_assign", ok=body["ok"],
+                  detail={"extensionId": ext_uuid, "total": body["total"],
+                          "failed": body["failed"]})
+        # 207: a bulk operation where some profiles succeeded and some did
+        # not. A flat 200 would let the console call the whole batch a
+        # success, which is the bug this status exists to prevent.
+        status = 200 if body["ok"] else (207 if body["succeeded"] else 400)
+        return jsonify({"ok": body["ok"], **body}), status
+
+    @app.post("/api/extensions/<ext_uuid>/retry")
+    def extensions_retry(ext_uuid: str):
+        """Retry only the profiles that failed."""
+        from ..extensions import store as ext_store
+        from ..extensions.manager import assign
+
+        failed = [
+            a["profileId"] for a in ext_store.list_assignments(ext_uuid=ext_uuid)
+            if a["state"] == ext_store.STATE_FAILED
+        ]
+        if not failed:
+            return jsonify({"ok": True, "total": 0, "succeeded": 0, "failed": 0,
+                            "results": [], "note": "No failed profiles to retry."})
+        try:
+            result = assign(ext_uuid, failed)
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e)
+        body = result.to_dict()
+        status = 200 if body["ok"] else (207 if body["succeeded"] else 400)
+        return jsonify({"ok": body["ok"], **body}), status
+
+    @app.post("/api/extensions/<ext_uuid>/unassign")
+    def extensions_unassign(ext_uuid: str):
+        """Remove from one profile. Other profiles keep theirs."""
+        from ..extensions.manager import unassign
+
+        payload = request.get_json(force=True, silent=True) or {}
+        profile_id = (payload.get("profileId") or "").strip()
+        if not profile_id:
+            return jsonify({"ok": False, "error": "profileId is required.",
+                            "code": "bad_request"}), 400
+        result = unassign(ext_uuid, profile_id)
+        audit_log("extension_unassign", profile_id=profile_id, ok=True,
+                  detail={"extensionId": ext_uuid})
+        return jsonify({"ok": True, "result": result.to_dict()})
+
+    @app.post("/api/extensions/<ext_uuid>/enabled")
+    def extensions_set_enabled(ext_uuid: str):
+        from ..extensions import store as ext_store
+
+        payload = request.get_json(force=True, silent=True) or {}
+        profile_id = (payload.get("profileId") or "").strip()
+        enabled = bool(payload.get("enabled"))
+        if not profile_id:
+            return jsonify({"ok": False, "error": "profileId is required.",
+                            "code": "bad_request"}), 400
+        got = ext_store.set_enabled(ext_uuid, profile_id, enabled)
+        if got is None:
+            return jsonify({"ok": False, "error": "No such assignment.",
+                            "code": "not_found"}), 404
+        return jsonify({"ok": True, "assignment": got,
+                        "note": "Takes effect on the profile's next launch."})
+
+    @app.post("/api/extensions/<ext_uuid>/default-for-new")
+    def extensions_default_for_new(ext_uuid: str):
+        """Separate from installing into existing profiles, on purpose.
+
+        Marking an extension a default for NEW profiles must not retroactively
+        push it into profiles the operator already has.
+        """
+        from ..extensions import store as ext_store
+
+        payload = request.get_json(force=True, silent=True) or {}
+        ext = ext_store.update_extension(
+            ext_uuid, default_for_new=bool(payload.get("enabled")))
+        if ext is None:
+            return jsonify({"ok": False, "error": "No such extension",
+                            "code": "not_found"}), 404
+        return jsonify({"ok": True, "extension": ext,
+                        "note": "Applies to profiles created from now on. "
+                                "Existing profiles are unchanged."})
+
+    @app.post("/api/extensions/<ext_uuid>/update")
+    def extensions_update(ext_uuid: str):
+        from ..extensions.manager import update_extension
+
+        payload = request.get_json(force=True, silent=True) or {}
+        try:
+            ext = update_extension(
+                ext_uuid,
+                zip_path=(payload.get("zipPath") or None),
+                folder=(payload.get("folder") or None),
+            )
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e)
+        audit_log("extension_update", ok=True,
+                  detail={"extensionId": ext_uuid, "version": ext["version"]})
+        return jsonify({
+            "ok": True, "extension": ext,
+            "note": "Assigned profiles pick the new version up on their next "
+                    "launch. Running profiles keep the old one until restarted.",
+        })
+
+    @app.post("/api/extensions/<ext_uuid>/rollback")
+    def extensions_rollback(ext_uuid: str):
+        from ..extensions.manager import rollback
+
+        try:
+            ext = rollback(ext_uuid)
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e)
+        audit_log("extension_rollback", ok=True,
+                  detail={"extensionId": ext_uuid, "version": ext["version"]})
+        return jsonify({"ok": True, "extension": ext})
+
+    @app.delete("/api/extensions/<ext_uuid>")
+    def extensions_delete(ext_uuid: str):
+        from ..extensions.manager import delete
+
+        force = str(request.args.get("force", "")).lower() in ("1", "true", "yes")
+        try:
+            result = delete(ext_uuid, force=force)
+        except Exception as e:  # noqa: BLE001 - mapped to a reason
+            return _ext_error(e, default_code=409)
+        audit_log("extension_delete", ok=True,
+                  detail={"extensionId": ext_uuid, **result})
+        return jsonify({"ok": True, **result})
+
+    @app.post("/api/extensions/webstore")
+    def extensions_webstore():
+        """Open a Chrome Web Store listing in a chosen profile.
+
+        This is the supported install route and it is deliberately the only
+        Web Store path offered. The browser's own flow does the install, in
+        that profile, with the operator present -- which is what makes it a
+        real Web Store installation rather than a file copied into a
+        directory. Nothing is fetched or unpacked by this product, and no
+        third-party CRX mirror is involved.
+        """
+        from ..browser.launcher import open_url_in_profile
+
+        payload = request.get_json(force=True, silent=True) or {}
+        profile_id = (payload.get("profileId") or "").strip()
+        ext_id = (payload.get("webstoreId") or "").strip()
+        url = (payload.get("url") or "").strip()
+        if not profile_id:
+            return jsonify({"ok": False, "error": "profileId is required.",
+                            "code": "bad_request"}), 400
+        if ext_id:
+            if not re.fullmatch(r"[a-p]{32}", ext_id):
+                return jsonify({
+                    "ok": False, "code": "bad_request",
+                    "error": "webstoreId must be a 32-character Chrome "
+                             "extension ID.",
+                }), 400
+            url = f"https://chromewebstore.google.com/detail/{ext_id}"
+        if not url.startswith("https://chromewebstore.google.com/"):
+            return jsonify({
+                "ok": False, "code": "bad_request",
+                "error": "Only chromewebstore.google.com URLs are opened by "
+                         "this route. Third-party CRX mirrors are not used.",
+            }), 400
+        result = open_url_in_profile(profile_id, url)
+        audit_log("extension_webstore_open", profile_id=profile_id,
+                  ok=bool(result.get("ok")), detail={"url": url})
+        return jsonify(result), (200 if result.get("ok") else 409)
+
+    @app.post("/api/profiles/<profile_id>/extensions-page")
+    def profile_extensions_page(profile_id: str):
+        """Open chrome://extensions in this profile -- the browser's own
+        Developer Mode and Load unpacked live there, and this product does not
+        reimplement them."""
+        from ..browser.launcher import open_url_in_profile
+
+        result = open_url_in_profile(profile_id, "chrome://extensions")
+        return jsonify(result), (200 if result.get("ok") else 409)
+
     # ------------------------------------------------------------------ #
     #  v1.7.0 startup sequence: control-plane recovery + durable job      #
     #  workers + browser supervisor. Order matters: recover() FIRST so   #

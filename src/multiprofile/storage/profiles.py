@@ -488,12 +488,28 @@ def fleet_capacity() -> dict[str, int]:
     return {"stored": stored, "capacity": cap, "free": max(0, cap - stored)}
 
 
+def _apply_default_extensions(profile_id: str) -> None:
+    """Assign any default-for-new extensions to a profile just created.
+
+    Guarded and imported lazily: profile creation is the product's most basic
+    operation and must not start failing because the extension manager is
+    unavailable or its tables have not been created yet.
+    """
+    try:
+        from ..extensions.manager import apply_defaults_to_new_profile
+
+        apply_defaults_to_new_profile(profile_id)
+    except Exception as e:  # noqa: BLE001 - never block profile creation
+        log.warning("default extensions not applied to %s: %s", profile_id, e)
+
+
 def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
     _ensure_ready()
     profile = _new_profile(payload)
     # Capacity is enforced here, not only in the bulk endpoint: a cap that a
     # loop of single creates can walk straight past is not a cap.
     db.insert_profiles([_for_storage(profile)], capacity=max_profiles())
+    _apply_default_extensions(profile["id"])
     return profile
 
 

@@ -433,6 +433,28 @@ def unassign(ext_uuid: str, profile_id: str) -> ProfileResult:
         name)
 
 
+def apply_defaults_to_new_profile(profile_id: str) -> list[str]:
+    """Assign every extension marked default-for-new to a freshly made profile.
+
+    Deliberately only reachable from profile creation. The default flag and
+    installing into existing profiles are different operations with different
+    blast radius -- flipping a default must not reach backwards into profiles
+    the operator already has, which is why nothing here iterates over
+    existing profiles.
+    """
+    assigned: list[str] = []
+    for ext in store.defaults_for_new_profiles():
+        try:
+            result = assign(ext["id"], [profile_id])
+        except Exception as e:  # noqa: BLE001 - creation must not fail over this
+            log.warning("default extension %s not applied to %s: %s",
+                        ext["id"], profile_id, e)
+            continue
+        if result.ok:
+            assigned.append(ext["id"])
+    return assigned
+
+
 # ---------------------------------------------------------------------------
 # launch integration
 # ---------------------------------------------------------------------------

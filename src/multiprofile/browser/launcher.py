@@ -441,6 +441,80 @@ def _verify_assigned_extensions(
         return {"assigned": len(assigned), "error": str(e)}
 
 
+def open_url_in_profile(profile_id: str, url: str) -> dict[str, Any]:
+    """Open a URL in a profile that is already running, over CDP.
+
+    Used for the two things this product must NOT reimplement: the Chrome Web
+    Store install flow, and ``chrome://extensions`` with the browser's own
+    Developer Mode and *Load unpacked*. Both belong to the browser. Pointing a
+    real browser window at them, in the right profile, is a supported route;
+    writing files into a profile directory and calling it a Web Store install
+    is not.
+
+    Requires the profile to be running, and says so rather than launching it:
+    a Web Store install needs the operator in front of the window, so starting
+    a browser behind their back would be the wrong favour.
+    """
+    import json as _json
+    import urllib.request as _url
+
+    from .runtime_state import get_runtime
+
+    runtime = get_runtime(profile_id)
+    port = getattr(runtime, "cdp_port", None) if runtime else None
+    if not port or not _cdp_port_open(int(port)):
+        return {
+            "ok": False,
+            "errors": ["profile_not_running"],
+            "error": (
+                "This profile is not running, so there is no window to open "
+                "the page in. Launch it first."
+            ),
+        }
+    try:
+        ws_url = _json.loads(
+            _url.urlopen(
+                _url.Request(f"http://127.0.0.1:{port}/json/version",
+                             headers={"Host": f"localhost:{port}"}),
+                timeout=5,
+            ).read()
+        )["webSocketDebuggerUrl"]
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return {"ok": False, "errors": ["cdp_unreachable"],
+                "error": f"Could not reach the browser's debugger: {e}"}
+
+    try:
+        import websocket  # type: ignore
+    except ImportError:
+        return {"ok": False, "errors": ["dependency_missing"],
+                "error": "websocket-client is required to open a page in a "
+                         "running profile."}
+    try:
+        ws = websocket.create_connection(ws_url, timeout=10, suppress_origin=True)
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return {"ok": False, "errors": ["cdp_unreachable"], "error": str(e)}
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "Target.createTarget",
+                             "params": {"url": url}}))
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            msg = _json.loads(ws.recv())
+            if msg.get("id") == 1:
+                if msg.get("error"):
+                    return {"ok": False, "errors": ["cdp_error"],
+                            "error": str(msg["error"].get("message") or msg["error"])}
+                return {"ok": True, "url": url,
+                        "targetId": (msg.get("result") or {}).get("targetId"),
+                        "profileId": profile_id}
+    finally:
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001,S110 - teardown
+            pass
+    return {"ok": False, "errors": ["cdp_timeout"],
+            "error": "The browser did not answer in time."}
+
+
 def _reconcile_with_preset(
     fingerprint: dict[str, Any], preset_cfg: dict[str, Any]
 ) -> dict[str, Any]:
