@@ -884,6 +884,14 @@
   // ==========================================
   try {
     const origIFrameContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow')?.get;
+    // Keyed on the frame's current `document`, not on `contentWindow`. A
+    // WindowProxy keeps its identity across a navigation while the realm
+    // behind it is replaced, so a WeakSet of windows would skip a frame that
+    // had navigated to a document with no identity at all. The document
+    // object does change, which is exactly the granularity wanted here: the
+    // probe below costs a 16x16 canvas read, and `contentWindow` is a getter
+    // a page may touch in a loop.
+    const framesDecided = new WeakSet();
     if (origIFrameContentWindow) {
       Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
         get: makeNative(function() {
@@ -896,17 +904,53 @@
               // parent. Patch it while this frame still has no hooks of its
               // own to describe.
               applyNativeMasking(win);
+
+              // Everything below is a FALLBACK, for a frame the injector's
+              // new-document script did not reach.
+              //
+              // When this walk was written it was the only thing reaching an
+              // iframe at all, and the comment here recorded why the audio
+              // and rect calls were added: "an audio or rect fingerprint
+              // taken inside a frame returned the host's". That was true
+              // then. It is not any more --
+              // Page.addScriptToEvaluateOnNewDocument reaches every
+              // same-origin frame realm, measured on this host for srcdoc,
+              // about:blank and URL frames alike, which is why canvas noise
+              // (applied only by that script, never here) was already correct
+              // inside all three.
+              //
+              // So this walk became a SECOND application, and three of these
+              // spoofs are additive rather than idempotent -- audio nudges
+              // each sample, rects nudge each coordinate, WebGL readPixels
+              // nudges each pixel, and each copy keeps its own "already
+              // nudged" record. Measured before this guard, page against
+              // every one of its own iframes:
+              //
+              //   audio  124.043476408231  vs  124.043477541301
+              //   rect    11.687566983437  vs   11.687633966873
+              //
+              // deterministic, all three frame kinds. A page comparing its
+              // own audio fingerprint against the one its own iframe reports
+              // saw two different machines.
+              //
+              // The masking above stays unconditional: it is about a page
+              // borrowing a pristine Function.prototype.toString out of a
+              // fresh realm, which is a property of the parent's hooks, not
+              // the frame's.
+              const doc = win.document;
+              if (doc && framesDecided.has(doc)) return win;
+              if (identityAlreadyApplied(win)) {
+                if (doc) framesDecided.add(doc);
+                return win;
+              }
+              if (doc) framesDecided.add(doc);
+
               applyHardwareSpoofs(win.navigator, win.Navigator ? win.Navigator.prototype : null);
               applyScreenSpoofs(win);
               applyTimezoneSpoofs(win);
               if (win.WebGLRenderingContext) hookWebGLProto(win.WebGLRenderingContext.prototype);
               if (win.WebGL2RenderingContext) hookWebGLProto(win.WebGL2RenderingContext.prototype);
               applyWebRTCSpoofs(win);
-              // Surfaces added after this hook was written were not reaching
-              // iframes: an audio or rect fingerprint taken inside a frame
-              // returned the host's, while the same read in the top document
-              // returned the profile's. One page disagreeing with itself is
-              // the tell these spoofs exist to prevent.
               applyAudioSpoofs(win);
               applyRectSpoofs(win);
               applyWebGPUSpoofs(win);
