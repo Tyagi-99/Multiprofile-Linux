@@ -41,7 +41,10 @@ jobs:
         run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
 
       - name: Lint
-        run: uvx ruff check src/ tests/
+        # scripts/ and sdk/ too: the release tooling, the parity and
+        # endurance harnesses and both SDKs are code an operator runs,
+        # and they were outside the gate until 6 October 2026.
+        run: uvx ruff check src/ tests/ scripts/ sdk/
 
       - name: Test
         env:
