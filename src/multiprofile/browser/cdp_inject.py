@@ -267,15 +267,65 @@ _WORKER_SCRIPT_TEMPLATE = r"""
       }
     }
   }
+  // The page keys the noise to canvas POSITION, so a read whose origin is not
+  // (0,0) has to be noised at that origin or the two realms disagree on the
+  // same drawing. Measured on this host before this fix, getImageData(5,7,
+  // 20,20) against the page's own read of the same rect:
+  //
+  //     page     noise keyed to (5,7)
+  //     worker   noise keyed to (0,0)    <- 12 of 12 runs, every worker type
+  //
+  // Every probe in the suite read from (0,0), where the two agree by
+  // coincidence, which is why this sat under a passing realm test.
+  const noiseRect = (img, sx, sy, sw, sh) => {
+    const ox = Math.floor(sw < 0 ? sx + sw : sx);
+    const oy = Math.floor(sh < 0 ? sy + sh : sy);
+    addNoise(img.data, ox, oy, img.width, img.height);
+  };
   try {
     if (self.OffscreenCanvasRenderingContext2D) {
       const orig = self.OffscreenCanvasRenderingContext2D.prototype.getImageData;
+      const origPut = self.OffscreenCanvasRenderingContext2D.prototype.putImageData;
       self.OffscreenCanvasRenderingContext2D.prototype.getImageData = native(
         function getImageData(sx, sy, sw, sh) {
           const img = orig.apply(this, arguments);
-          try { addNoise(img.data, 0, 0, img.width, img.height); } catch (e) {}
+          try { noiseRect(img, sx, sy, sw, sh); } catch (e) {}
           return img;
         }, 'getImageData');
+
+      // The export path, which was not hooked here at all while the page
+      // hooked it. Measured before this fix, a worker's convertToBlob() over
+      // the same drawing, on three profiles with different seeds:
+      //
+      //     page     378539371 / 116989659 / 2291625482   (moves with the seed)
+      //     worker   3394833805 / 3394833805 / 3394833805
+      //
+      // One value for every profile on the machine: the worker was handing
+      // out the host's raw render as a PNG. That is a cross-profile
+      // identifier, and it contradicts the worker's own page in a single
+      // comparison, which is the thing this script exists to prevent.
+      const origToBlob = self.OffscreenCanvas
+        ? self.OffscreenCanvas.prototype.convertToBlob : null;
+      if (origToBlob && origPut) {
+        self.OffscreenCanvas.prototype.convertToBlob = native(
+          function convertToBlob() {
+            let copy = null;
+            try {
+              const w = this.width, h = this.height;
+              if (w && h && w * h <= 4000000) {
+                copy = new self.OffscreenCanvas(w, h);
+                const ctx = copy.getContext('2d', {willReadFrequently: true});
+                ctx.drawImage(this, 0, 0);
+                const img = orig.call(ctx, 0, 0, w, h);   // unhooked read
+                addNoise(img.data, 0, 0, w, h);
+                origPut.call(ctx, img, 0, 0);
+              }
+            } catch (e) { copy = null; }
+            // On any failure fall through to the original so the caller sees
+            // exactly the error or result it would natively.
+            return origToBlob.apply(copy || this, arguments);
+          }, 'convertToBlob');
+      }
     }
   } catch (e) {}
   try {
