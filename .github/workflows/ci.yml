@@ -94,6 +94,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install Chrome
+        id: chrome
         uses: browser-actions/setup-chrome@v1
       - name: Install a display and a session bus
         # The product launches Chromium **headful** with --ozone-platform=x11,
@@ -115,6 +116,22 @@ jobs:
       - name: Isolation and live launch tests
         env:
           PYTHONPATH: src
+          # Pin the runtime this job installs.
+          #
+          # Without it the extension suites never ran here, and nothing said
+          # so: the runner image ships branded Google Chrome, BROWSER_BINARIES
+          # prefers google-chrome-stable over chromium, and branded Chrome
+          # 137+ cannot load unpacked extensions. The capability gate
+          # correctly refused and skipped both live suites --
+          #
+          #   SKIPPED tests/test_extension_live.py: this browser cannot load
+          #   unpacked extensions: Google Chrome 154.0.8037.57 removed
+          #   --load-extension (branded builds, 137+)
+          #
+          # -- which is the exact scenario engine_choice exists for, happening
+          # to CI. setup-chrome installs a capable Chromium; this points the
+          # product at it so the extension feature is actually exercised.
+          MULTIPROFILE_ENGINE_BINARY: ${{ steps.chrome.outputs.chrome-path }}
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             dbus-run-session -- \
