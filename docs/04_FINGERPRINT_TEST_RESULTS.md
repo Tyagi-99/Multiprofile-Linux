@@ -600,110 +600,202 @@ FONTCONFIG_FILE=<profile>/fonts.conf fc-list  | grep 'Liberation Serif'  # -> pr
 
 ---
 
-### 11.6 Open: worker canvas noise agrees with its page only *most* of the time
+### 11.6 Resolved: the page applied the canvas noise twice
 
-**Open, intermittent, and more serious than a flaky test.** Found 6 October
-2026 while chasing a CI failure.
+**Closed 6 October 2026.** Recorded here as *open* the same day; the entry
+below replaces that one and corrects where it pointed.
 
 `tests/test_worker_realms_live.py::test_the_realm_renders_canvas_the_same_way`
 asserts that every worker realm hashes a canvas render identically to its
-page — the property that stops a site comparing its own render against a
-worker's and seeing a difference. It **fails roughly half the time**:
+page. It failed about one run in six, with the page disagreeing with all five
+workers while the workers agreed with each other.
+
+The previous entry hypothesised a **worker-side** race — a worker given the
+identity script twice, or not at all. That was wrong, and the shape of the
+data already said so: if the five worker realms agree with each other and only
+the page differs, the page is the outlier. What it got right was the final
+sentence: *"double application somewhere remains the leading candidate."*
+
+#### The instrument that settled it
+
+A canvas hash tells you two realms differ. It cannot tell you *how*, which is
+why eight runs of hashes produced three eliminated hypotheses and no cause.
+So the measurement was changed: fill a canvas with a **uniform opaque grey**,
+read it back, and report the **mask** — which pixels moved, on which channel,
+in which direction. No text is drawn, so nothing in the mask comes from the
+engine's font stack.
+
+`pixelHash` is integer arithmetic over canvas position, so the mask can be
+**predicted in Python from the profile's seed** and every realm compared
+against the prediction rather than against each other. The Python port was
+cross-checked against the JavaScript in Node first: for seed 1 at (0,0) both
+give `654898832`, and both select 34 of 400 pixels for seed 12345.
+
+A second application nudges the same pixels on the same channels in the same
+directions, so against a base of 128 it reads **±2 instead of ±1** — which
+makes "applied twice" distinguishable from "wrong seed" and from "not applied"
+in one read, where a hash makes them all look alike.
+
+#### What it found, in one line
 
 ```
-run 1   5 failed        run 5   passed
-run 2   5 passed        run 6   5 failed
-run 3   5 passed        run 7   5 failed
-run 4   5 passed        run 8   passed
+settle=0.6  top  cv=885035865  APPLIED TWICE
 ```
 
-Eight runs of the same files, same binary, no code change between them. An
-earlier note here said "about one run in four" from the first four; the
-fuller series says closer to half, and the figure is corrected rather than
-left flattering.
+Bit-exact against the two-pass prediction. Not noise over noise producing
+something unpredictable — one clean second application. Confirmed from the
+other side by a counter appended to the injected script by the harness:
+`runs=2` in one document, 1 of 11 samples at that timing.
 
-Reproduced in CI more than once. In the second run it was **not** confined to
-workers:
+#### Two causes, both of them stale comments
 
-```
-first_load   page 2314293678   iframe  3530764874   <- iframe disagrees
-new_tab      page 3530764874   service 2616201375
-restart      page 2314293678   iframe  3530764874
-```
+**The guard was dead.** `evasion.js` protected against stacking with
 
-Note that the iframe's hash equals the *new tab's page* hash, and that
-`first_load` and `restart` agree with each other. So there are two stable
-renders, and which one a realm gets depends on when it was created. The
-identity gate also failed `canvasHash` **across states**, which is the
-sharper version of the same thing: a profile that renders differently on a
-new tab than on its first tab is one that re-identifies itself mid-session.
-
-**Why this is not merely a test problem.** When it fails, the workers agree
-with *each other* and disagree with the page. A page can message any of its
-workers, so a profile in that state answers two different canvas
-fingerprints for one browser — which is the contradiction the noise exists to
-prevent, appearing intermittently. A site that samples both does not care
-that it only happens sometimes.
-
-**Ruled out: the shared/service-worker UA override added for F53.** With that
-send disabled the canvas tests still pass and still flake, and the failure
-predates the change — the override sets `Network.setUserAgentOverride` and
-touches nothing in the render path.
-
-**Hypothesis, untested, recorded as a hypothesis.** The worker identity
-script is evaluated over CDP while the worker is frozen by
-`waitForDebuggerOnStart`, and it is that script which applies the canvas
-noise. Two races could produce this, and `cdp_inject.py` already carries a
-comment warning about the second:
-
-1. a worker that begins executing before the evaluate lands gets **no**
-   noise;
-2. a worker attached twice gets the script **twice**, and noise applied to an
-   already-noised buffer is different noise.
-
-The existing dedupe (`self._attached`) covers (2) for a target id it has
-already seen, so (1) and a dedupe miss are both still open.
-
-**A fix attempted and reverted, recorded so it is not tried twice.** CI also
-logs, on the same runs:
-
-```
-CDP injection command failed — Page.reload: Not attached to an active page
+```js
+const alreadyShielded = Object.prototype.hasOwnProperty.call(origToDataURL, 'toString');
 ```
 
-The injector reloads a page that already existed when it attached, because
-`addScriptToEvaluateOnNewDocument` only affects the *next* document. That
-reload fails in CI — the start page's target is stale by the time it goes
-out — and the obvious reading was that the start page therefore never got the
-script, which would explain two stable renders exactly.
+— true of a hooked function, false of a native one. That held when it was
+written. The **F3 native-masking fix then moved the claimed source into a
+WeakMap precisely so that nothing is written onto the hooked function**, which
+left this check reading a property that no longer exists, constant false, and
+the guard silently disarmed. The comment above it still described the
+mechanism that used to make it work.
 
-Replacing the reload with a direct `Runtime.evaluate` of the script **made it
-worse**: 2 of 3 runs failing instead of roughly half. The reason is in the
-call it sits next to — `addScriptToEvaluateOnNewDocument` is already sent
-with `runImmediately: True`, which applies the script to the existing context
-too. So the evaluate was a *second* application, and noise over noise is
-different noise. The failing reload is therefore **redundant rather than
-load-bearing** for script application, and it is not the cause.
+**The injector sent both ways of applying the identity to one document.** For
+a page that was already open it sent
+`addScriptToEvaluateOnNewDocument(runImmediately: True)` — which applies the
+script to the document open *now* — **and** `Page.reload`, which replaces that
+document with one that runs the registered copy from its first line. Whether
+both landed in the same document depends on whether the reload commits before
+the immediate evaluation is dispatched, which is exactly why it was
+intermittent. The comment on the reload still read *"addScriptToEvaluateOnNewDocument
+only affects the NEXT document"*, which stopped being true when
+`runImmediately` was added beside it.
 
-(The unconditional `status.detail` entry claiming the page "was reloaded"
-even when the reload failed is a separate, smaller honesty problem in the
-same block, and is not fixed here.)
+This is the **same class as F49, F50, `--host-resolver-rules` and F57** — the
+behaviour claim true, the mechanism cited fiction — with one difference worth
+noting: here the fiction was load-bearing. The guard did not merely describe
+itself wrongly; it stopped working, and nothing said so.
 
-**Next instrument:** log `workers_identified` and the attach/evaluate
-ordering per run, and correlate a failing run against them. A run that
-identified a realm *twice*, or zero times, distinguishes the two hypotheses
-immediately. Given the two-stable-renders pattern and that `runImmediately`
-already covers the current context, double application somewhere remains the
-leading candidate.
+#### The fixes
 
-**Status of the gate.** The assertion is left exactly as it was — it has
-teeth and it is catching something real. It is not skipped, not relaxed and
-not marked flaky, because the thing it catches is a genuine intermittent
-contradiction rather than test noise.
+- The two applications are now **exclusive**: `runImmediately` is sent only
+  when the page will *not* be reloaded. The reload is preferred where it
+  applies, because it runs the page under the identity from document start
+  rather than patching a document that has already run site script.
+- If the reload **fails**, the script is applied to the live document
+  directly, and the status says so. Previously the status appended *"reloaded
+  a pre-existing page to apply identity"* when the command was **sent**, so a
+  failed reload still reported success — the one place an operator would look
+  to find out. It is now recorded when the reload answers.
+- `evasion.js` asks the **behaviour** instead of inspecting a property: draw a
+  known opaque value where `pixelHash` says a nudge lands, read it back, and
+  see whether something already moved it. There is no property left to
+  inspect and that is deliberate — a hook built to be indistinguishable from a
+  native one cannot find itself by looking. A page could run this same probe,
+  so it reveals nothing new.
+
+#### After
+
+24 consecutive samples at the timing that reproduced it: **no** double
+application, **no** `runs=2`, every realm bit-exact against the one-pass
+prediction. 12 consecutive runs of the realm suite and the new suite pass.
+
+The flake rate was 1 in 6, so 24 clean samples is strong evidence and not
+proof; what carries the conclusion is that the mechanism is identified, the
+unit tests pin both halves of it, and the live mask test now checks an
+**absolute** property rather than agreement between realms.
 
 ---
 
-### 11.4 What this section does not establish
+### 11.7 Two more worker canvas gaps, found by the same instrument
+
+Both **deterministic**, both invisible to every probe that existed, because
+every probe read from (0,0) and compared realms against each other.
+
+**The worker noised the wrong pixels.** The page keys noise to canvas
+*position*; the worker script always keyed it to (0,0). Reading from (0,0) —
+which all of them did — hides it completely:
+
+| read | page | worker |
+|---|---|---|
+| `getImageData(0,0,20,20)` | noise at (0,0) | noise at (0,0) ✅ |
+| `getImageData(5,7,20,20)` | noise at (5,7) | noise at **(0,0)** ❌ |
+
+12 of 12 runs, all five worker types. A page and a worker reading the same
+rect of the same drawing therefore returned different pixels.
+
+**The worker's PNG export carried no noise at all.** The page hooks
+`OffscreenCanvas.convertToBlob`; the worker script hooked only
+`getImageData`. Three profiles with different seeds, same drawing:
+
+| profile seed | page `convertToBlob` | worker `convertToBlob` |
+|---|---|---|
+| 111111 | 378539371 | **3394833805** |
+| 999999 | 116989659 | **3394833805** |
+| derived | 2291625482 | **3394833805** |
+
+The page's moves with the seed. The worker's is one value for every profile on
+the machine: the host's raw render. That is a **stable cross-profile
+identifier available to any page that asks a worker to export a canvas**, and
+it contradicts the worker's own page in a single comparison — which is worse
+than the divergence it was found alongside.
+
+Both fixed in `build_worker_identity_script`. `tests/test_canvas_noise_live.py`
+covers both, and was confirmed to fail on the pre-fix code with the diagnosis
+in the assertion message rather than a bare hash mismatch.
+
+---
+
+### 11.9 Resolved: a page disagreed with its own iframes, every time
+
+**Closed 6 October 2026.** Not found by a failing test — nothing was failing.
+Found by asking the question §11.6 raised: *which other spoofs are additive,
+and does anything else apply them twice?* No probe in the suite compared a
+page against an iframe on any of these surfaces.
+
+Most spoofs are substitutions and are idempotent. Three are not: audio noise
+nudges every sample, rect noise nudges every coordinate, WebGL `readPixels`
+nudges every pixel, and each copy of the script keeps its own record of what
+it has already nudged.
+
+Two paths reach an iframe — the injector's new-document script in the frame's
+own realm, and the parent walking `contentWindow` (`evasion.js` section 8).
+Section 8 predates the first; its own comment records the measurement that put
+the audio and rect calls there. Both now run:
+
+| surface | page | iframe (srcdoc, about:blank, URL — all three) |
+|---|---|---|
+| audio | 124.043476408231 | **124.043477541301** |
+| rect x | 11.687566983437 | **11.687633966873** |
+| rect y | 3.2967806701… | **3.2966863403…** |
+
+**The noise was causing the contradiction it exists to prevent**, on every
+load rather than one in six.
+
+After the guard:
+
+| surface | page | iframe (all three) |
+|---|---|---|
+| audio | 124.043475512859 | 124.043475512859 ✅ |
+| rect | 11.687041395616 \| 3.2973366818… | identical ✅ |
+
+That the injected script reaches frame realms is measured, not assumed:
+canvas noise is applied only by that script and never by section 8, and it
+was already correct inside all three frame kinds. Section 8 is now a fallback
+that asks whether the frame already carries the identity and stops if it does.
+
+`tests/test_iframe_additive_live.py` checks the rect **absolutely** as well as
+by agreement. The nudge is deterministic in the original coordinate and Blink
+has already quantised that coordinate to 1/64 px — two orders coarser than the
+5e-4 px nudge — so the pre-noise value is recoverable from the read and both
+predictions computable from it. Agreement alone cannot catch two realms being
+wrong together, which is precisely what hid §11.7's two defects.
+
+---
+
+### 11.8 What this section does not establish
 
 - **One host, one profile, one route.** No proxy, no device preset, no second
   distro, no second display system.
@@ -724,8 +816,10 @@ contradiction rather than test noise.
 | Timezone / geo / locale | ✅ engine-level, per-exit **and with no proxy** (F43) |
 | GPU / WebGL / WebGPU | ✅ mutually consistent |
 | Canvas / audio / rects noise | ✅ per-profile, plausible magnitude |
+| Canvas noise, applied **once** | ✅ fixed this pass (F60); checked against the seed's predicted mask, not realm agreement |
+| Canvas noise, worker surfaces | ✅ fixed this pass (F59); offset reads and `convertToBlob` were both wrong |
 | OS-shaped APIs | ✅ battery, voices, bluetooth, media |
-| Realm agreement | ✅ all five worker types + iframes |
+| Realm agreement | ✅ all five worker types + iframes; additive surfaces fixed this pass (F61) |
 | Fonts | 🟡 documented residual, product reports it |
 | Config exposure | ✅ fixed this pass (F41) |
 | Hook source and shape | ✅ masked and native-shaped, all realms (F3) |

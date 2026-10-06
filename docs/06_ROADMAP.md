@@ -247,7 +247,7 @@ changes the distribution model entirely.
 ## 7. Sequencing, independent of the fork
 
 ```
-DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F58
+DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F61
          └─ F3's JavaScript surface
 
 NOW      ├─ Publish the channel                  ← needs a key + a host

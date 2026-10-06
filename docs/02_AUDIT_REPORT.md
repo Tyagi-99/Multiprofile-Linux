@@ -2819,6 +2819,156 @@ with the author's idea of the API.
 
 ---
 
+### F59–F61 — the double-application pass of 6 October 2026
+
+All four came out of replacing a *comparison* with a *prediction*. The
+suite's canvas check hashed a render in each realm and compared the hashes.
+That detects a disagreement but cannot say which realm is wrong, and it is
+blind to anything two realms get wrong together — which is how three defects
+lived under a passing test for as long as they did.
+
+The replacement fills a canvas with a **uniform opaque grey** (no text, so
+nothing comes from the font stack), reads it back, and reports the **mask**:
+which pixels moved, on which channel, in which direction. `pixelHash` is
+integer arithmetic over canvas position, so that mask can be **predicted in
+Python from the profile's seed** — cross-checked against the JavaScript in
+Node before being trusted — and every realm compared against the prediction.
+Two applications nudge the same pixels by ±2 instead of ±1, so *applied
+twice*, *wrong seed* and *not applied* become three different answers instead
+of three identical hash mismatches.
+
+**F59 — a worker's canvas noise was keyed to the wrong coordinates, and its
+PNG export carried no noise at all.** Both deterministic, both invisible to
+every probe that existed because every probe read from (0,0).
+
+The page keys noise to canvas *position*; the worker script always keyed it to
+(0,0). `getImageData(5,7,20,20)` on the same drawing: page noised at (5,7),
+worker at (0,0), on **12 of 12 runs in all five worker types**.
+
+Worse, the page hooks `OffscreenCanvas.convertToBlob` and the worker script
+did not hook it at all. Three profiles with different seeds, same drawing:
+
+| profile seed | page `convertToBlob` | worker `convertToBlob` |
+|---|---|---|
+| 111111 | 378539371 | **3394833805** |
+| 999999 | 116989659 | **3394833805** |
+| derived | 2291625482 | **3394833805** |
+
+The page's moves with the seed, as it must. The worker's is **one value for
+every profile on the machine** — the host's raw render. Any page that asks a
+worker to export a canvas gets a stable cross-profile identifier, and a
+contradiction against that worker's own page, in about five lines. Same shape
+as the service-worker platform leak of F53's pass, in the one surface nobody
+had read from an offset.
+
+Both fixed in `build_worker_identity_script`. **FIXED**
+
+**F60 — the page applied the canvas noise twice, because the F3 fix disarmed
+the guard that stopped it.** This is the defect that had been reported as
+flakiness: the realm canvas test failed about one run in six with the page
+disagreeing with all five workers, and three hypotheses had already been
+eliminated against it. The mask put it beyond argument in one line —
+`APPLIED TWICE`, bit-exact against the two-pass prediction — and a counter
+appended to the injected script confirmed it from the other side, `runs=2` in
+one document.
+
+Two causes, both of them a comment that had stopped being true.
+
+`evasion.js` guarded against stacking with
+`hasOwnProperty.call(origToDataURL, 'toString')` — true of a hooked function,
+false of a native one. **F3's native-masking fix then moved the claimed
+source into a WeakMap precisely so that nothing is written onto the hooked
+function.** The guard was left reading a property that no longer exists,
+constant false, dead, with the comment above it still explaining the
+mechanism that used to make it work.
+
+And the injector sent *both* ways of applying the identity to a document that
+already existed: `addScriptToEvaluateOnNewDocument(runImmediately: True)`,
+which applies the script to the document open now, **and** `Page.reload`,
+which replaces it with one that runs the registered copy. Whether both landed
+in one document depended on whether the reload committed before the immediate
+evaluation was dispatched — which is the whole of the intermittency. The
+comment on the reload still read *"addScriptToEvaluateOnNewDocument only
+affects the NEXT document"*, which stopped being true when `runImmediately`
+was added beside it.
+
+The two are now exclusive, with the reload preferred where it applies because
+it runs the page under the identity from document start. A reload that
+**fails** now applies the script to the live document and says so — it used to
+append *"reloaded a pre-existing page to apply identity"* when the command was
+merely *sent*, so a failed reload reported success in the one place an
+operator would look. And `evasion.js` now asks the behaviour rather than
+inspecting a property: draw a known value where `pixelHash` says a nudge
+lands, read it back, see whether something already moved it. There is nothing
+left to inspect, and that is deliberate — **a hook built to be
+indistinguishable from a native one cannot find itself by looking.**
+
+24 consecutive samples at the timing that reproduced it are clean. The flake
+rate was 1 in 6, so that is strong evidence and not proof; what carries the
+conclusion is that the mechanism is identified, unit tests pin both halves,
+and the live test now checks an absolute property instead of agreement between
+realms. **FIXED**
+
+**F61 — a page disagreed with its own iframes on audio, client rects and
+WebGL pixels, every time.** Found by asking the question F60 raised — *which
+other spoofs are additive, and does anything else apply them twice?* — rather
+than by another test failing. Nothing was failing: no probe in the suite
+compared a page against an iframe on any of these three surfaces.
+
+Most spoofs here are substitutions, and applying a substitution twice changes
+nothing. Three are not. Audio noise nudges every sample, rect noise nudges
+every coordinate, WebGL `readPixels` nudges every pixel, and each copy of the
+script keeps its own record of what it has already nudged.
+
+Two paths reach an iframe: the injector's new-document script, in the frame's
+own realm, and the parent walking `contentWindow` (`evasion.js` section 8) to
+apply the spoofs from outside. Section 8 was written when it was the only path
+there was, and its own comment recorded the measurement that justified adding
+the audio and rect calls — *"an audio or rect fingerprint taken inside a frame
+returned the host's"*. That was true then. Once
+`addScriptToEvaluateOnNewDocument` began reaching frame realms, both paths
+ran:
+
+| surface | page | every iframe |
+|---|---|---|
+| audio | 124.043476408231 | **124.043477541301** |
+| rect x | 11.687566983437 | **11.687633966873** |
+
+Deterministic, on srcdoc, `about:blank` and URL frames alike. **The noise was
+causing the contradiction it exists to prevent** — a page comparing its own
+audio fingerprint against the one its own iframe reports saw two machines, and
+unlike F60 this one happened on every single load.
+
+That the injected script now reaches frame realms is not assumed; it is
+measured. Canvas noise is applied *only* by that script and never by section
+8, and canvas noise was already correct inside all three frame kinds. That
+also supplies the guard: section 8 is now a fallback that asks whether the
+frame already carries the identity — by the one spoof only the injected copy
+applies — and does nothing more if it does. The native-function masking stays
+unconditional, because that is about a page borrowing a pristine
+`Function.prototype.toString` out of a fresh realm, which is a property of the
+parent's hooks rather than the frame's.
+
+`tests/test_iframe_additive_live.py` covers all three surfaces, and checks the
+rect noise **absolutely** rather than by agreement: the nudge is deterministic
+in the original coordinate and Blink has already quantised that coordinate to
+1/64 px — two orders coarser than the 5e-4 px nudge — so the pre-noise value
+can be recovered from the read and the one-pass and two-pass predictions
+computed from it. Agreement alone cannot catch two realms being wrong
+together, which is the mistake that let F59 sit under a passing test.
+**FIXED**
+
+**The class, now at five.** F49's `switch-all-direct`, F50's `prefer_sandbox`,
+the `--host-resolver-rules` correction, F57's `--disable-ipv6`, and this. Each
+time the behaviour claim was true and the mechanism cited was fiction. F60 is
+the first where the fiction was **load-bearing**: the guard did not merely
+describe itself wrongly, it stopped working, and nothing in the code or the
+tests said so. The lesson generalises past canvas — **a fix that removes an
+observable property can silently break every check that read it**, and there
+is no compiler for that.
+
+---
+
 ### F53–F56 — the parity pass of 5 October 2026
 
 Four findings from the work in
