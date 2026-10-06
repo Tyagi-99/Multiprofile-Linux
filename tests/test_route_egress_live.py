@@ -212,6 +212,32 @@ def _launch(payload: dict, start_url: str) -> tuple[str, int]:
     return profile_id, get_runtime(profile_id).cdp_port
 
 
+def _route_evidence(lab, name: str, result: dict | None = None) -> str:
+    """What the proxy and the destination actually saw.
+
+    The authenticated-HTTP cases fail in CI and not here, with
+    ``TypeError: Failed to fetch`` and "no request arrived". Those are two
+    different stories -- the browser never reached the proxy, or it reached it
+    and the auth exchange failed -- and the assertion message could not tell
+    them apart. A reduced failure count cannot either, which is why this
+    records the counters instead of inferring from how often it happens.
+    """
+    proxy = lab["proxies"].get(name)
+    destination = lab["destination"]
+    bits = [f"route={name}"]
+    if result is not None:
+        bits.append(f"fetch={result}")
+    if proxy is not None:
+        bits.append(
+            f"proxy[connections={getattr(proxy, 'connections', '?')}, "
+            f"auth_failures={getattr(proxy, 'auth_failures', '?')}, "
+            f"rejected={getattr(proxy, 'rejected', '?')}, "
+            f"authenticated={bool(getattr(proxy, 'username', None))}]"
+        )
+    bits.append(f"destination_sources={destination.sources_for(f'route={name}')}")
+    return " ".join(bits)
+
+
 ROUTES = (
     # name,          profile fields,            expected destination-observed source
     ("direct", {"proxyType": "none"}, "127.0.0.1"),
@@ -243,15 +269,19 @@ def test_the_destination_sees_the_intended_hop(lab, name, fields, expected_sourc
         # request through the same route, so a one-off is distinguishable
         # from the steady state.
         result = _fetch_in_page(port, f"/dest?route={name}&fetch=1")
-        assert result.get("ok") is True, (name, result)
+        assert result.get("ok") is True, _route_evidence(lab, name, result)
         sources = destination.sources_for(f"route={name}")
-        assert sources, f"{name}: the destination saw no request at all"
+        assert sources, (
+            f"{name}: the destination saw no request at all. "
+            + _route_evidence(lab, name, result))
         assert set(sources) == {expected_source}, (
-            f"{name}: expected every request from {expected_source}, saw {sources}"
+            f"{name}: expected every request from {expected_source}, saw {sources}. "
+            + _route_evidence(lab, name, result)
         )
         assert len(sources) >= 2, (
             f"{name}: only {len(sources)} request(s) observed, so the "
-            "navigation or the fetch did not arrive"
+            "navigation or the fetch did not arrive. "
+            + _route_evidence(lab, name, result)
         )
     finally:
         L.stop_profile(profile_id)
@@ -279,9 +309,16 @@ def test_a_proxied_profile_never_reaches_the_destination_directly(lab, name):
     nav = f"http://127.0.0.1:{destination.port}/dest?leak={name}"
     profile_id, port = _launch(payload, nav)
     try:
-        _fetch_in_page(port, f"/dest?leak={name}&fetch=1")
+        result = _fetch_in_page(port, f"/dest?leak={name}&fetch=1")
         sources = destination.sources_for(f"leak={name}")
-        assert sources, f"{name}: no request arrived, so nothing was proven"
+        assert sources, (
+            f"{name}: no request arrived, so nothing was proven. "
+            f"fetch={result} proxy[connections={proxy.connections}, "
+            f"auth_failures={getattr(proxy, 'auth_failures', '?')}, "
+            f"rejected={proxy.rejected}, "
+            f"authenticated={bool(proxy.username)}] -- connections=0 means "
+            f"the browser never reached the proxy at all."
+        )
         assert "127.0.0.1" not in sources, (
             f"{name}: the host address reached the destination: {sources}"
         )
@@ -307,10 +344,19 @@ def test_an_authenticated_proxy_was_actually_challenged(lab):
     }, nav)
     try:
         result = _fetch_in_page(port, "/dest?auth=1&fetch=1")
-        assert result.get("ok") is True, result
+        assert result.get("ok") is True, (
+            "the browser could not fetch through the authenticated proxy. "
+            f"fetch={result} proxy[connections={proxy.connections}, "
+            f"auth_failures={proxy.auth_failures}, rejected={proxy.rejected}] "
+            f"destination_sources={destination.sources_for('auth=1')} -- "
+            "connections=0 means the browser never arrived; "
+            "auth_failures>0 with connections=0 means it arrived, was "
+            "challenged, and never came back."
+        )
         assert proxy.auth_failures > 0, (
             "the proxy never issued a 407, so the authentication path was "
-            "not exercised"
+            f"not exercised. proxy[connections={proxy.connections}, "
+            f"rejected={proxy.rejected}]"
         )
         assert proxy.connections > 0
         assert set(destination.sources_for("auth=1")) == {"127.0.0.4"}

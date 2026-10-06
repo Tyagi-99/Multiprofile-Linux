@@ -242,6 +242,163 @@ claims to be one.
 
 ---
 
+## 7b. Which browser runs, and how that is kept predictable
+
+The install resolves one browser, in this order, and the answer is visible in
+`GET /api/engine` and on the Extensions page:
+
+1. `MULTIPROFILE_ENGINE_BINARY` — a per-process pin.
+2. The **persisted choice** in `~/.config/multiprofile/engine.json`, set from
+   the console or `POST /api/engine/choose`.
+3. The `PATH` search.
+
+**Why this exists.** `engine.BROWSER_BINARIES` prefers `google-chrome-stable`
+over `chromium`, and branded Chrome 137+ cannot load unpacked extensions. So
+installing Chrome on a working Chromium install would move every profile onto
+a runtime where the extension manager stops working. Worse, until this
+release a pin could not prevent it, because the launcher never read one.
+Measured with `MULTIPROFILE_ENGINE_BINARY=/usr/bin/true`:
+
+```
+launcher find_chrome()         -> /usr/bin/chromium      (what actually ran)
+engine_policy.identify_engine  -> /usr/bin/true          (what was reported)
+```
+
+`find_chrome()` called `find_browser_binary()`, which walks `PATH` and has
+never looked at the configured engine — while its own comment claimed the two
+were the same binary, and [`09_ENGINE_PROGRAM`](09_ENGINE_PROGRAM.md) called
+naming a build in `engine_binary` "the whole of" using a maintained core.
+Both are now true.
+
+The runtime that `PATH` answers is recorded, so a change of answer is
+reportable rather than silent. A change from a capable runtime to an incapable
+one **refuses to launch a profile that has extensions assigned**, naming both
+binaries and stating that nothing was switched. A profile with no extensions
+is never blocked by any of this.
+
+---
+
+## 7c. The installed package, verified
+
+The `.deb` was built (`multiprofile-native_1.9.0_all.deb`, 2 025 278 bytes)
+and checked:
+
+| check | result |
+|---|---|
+| Packaged `static/` vs source `src/static` | **byte-identical** (`diff -r`, no differences) |
+| `extensions/` package shipped | all six modules present |
+| `engine_choice.py` shipped | present |
+| Import → permissions → selection → launch → verified execution → restart → persistence, run against the **packaged** tree only | **all pass** |
+| v7 → v8 on a database with pre-existing profiles | v8, all 4 profiles preserved, `idx_jobs_batch` intact |
+| Extension rows + assignments written post-migration, surviving a close/reopen | **pass** |
+
+`sys.path` held only the packaged tree, and `MULTIPROFILE_EXTENSION` pointed
+at the package's own identity bundle, so the bytes under test were the ones
+the package carries rather than the repository's.
+
+**What this does not cover.** A real `dpkg -i` needs root. This host has no
+passwordless sudo and the invoking user is not in the `docker` group, so
+neither a native install nor a disposable Debian container could be run.
+**dpkg's own install, the `postinst` script, and dependency resolution from
+the `Depends:` line are therefore unverified**, and the only honest word for
+that is blocked. The declared line is:
+
+```
+Depends: python3 (>= 3.11), python3-flask, python3-pkg-resources, python3-websocket
+Recommends: chromium | chromium-browser | google-chrome-stable, python3-webview, python3-keyring
+```
+
+Note that the browser is a **Recommends**, not a **Depends** — so an install
+that resolves only `Depends` has no browser, and the extension manager
+reports that through the capability gate rather than failing obscurely.
+
+---
+
+## 7d. Unresolved diagnostics
+
+**Authenticated HTTP proxy, CI only.** Passes locally — 3 consecutive runs of
+`test_route_egress_live.py`, 14 tests each, including every `http_auth` case.
+Fails intermittently in CI, and the failure count varies between runs (3, then
+1), which is why a falling count is *not* taken as evidence that the lab is at
+fault. The assertions now capture the proxy's own counters, so the next CI
+failure distinguishes the two possible stories: `connections=0` means the
+browser never reached the proxy; `auth_failures>0` with no completed request
+means it arrived, was challenged and never returned. **Cause not established.**
+
+**Migration flake, unexplained.** `test_opening_an_upgraded_database_twice_is_fine`
+failed once in CI with `assert 1 == 0` on a commit whose only difference from
+a passing one was a Markdown file. The *mechanism* is understood:
+`profiles._ensure_ready` seeds the demo profile once per database **path**, so
+any call to a `profiles` accessor while a test's database is active will seed
+it. The *trigger* is not. Ruled out by inspection: the parking sweeper
+(`parking_enabled` defaults False, and every test that builds an app sets
+`MULTIPROFILE_NO_BACKGROUND=1`), the job workers, the update checker and the
+supervisor — all behind the same guard. Not reproduced in four local
+full-coverage runs. The test now asserts its real property (the second open
+does not migrate again, and the unconditional index stays idempotent) and
+keeps the contamination check as a **named diagnostic** that prints the
+offending row and the database path. **Not resolved.**
+
+**`braces` advisory — analysed, and the offered fix rejected.** The path is
+`eslint-config-next@16.3.6 → @next/eslint-plugin-next → fast-glob → micromatch
+→ braces@3.0.3`, entirely inside a **devDependency**. The `.deb` ships
+`src/static` and no `node_modules` at all, so there is no shipped exposure;
+the advisory is a lint-time stack-exhaustion DoS requiring hostile glob input.
+`npm audit`'s only remedy is downgrading `eslint-config-next` to **14.2.35**,
+a semver-major move away from the Next 16 this console is built with — taking
+it would mismatch the framework to silence a tool that never runs outside CI.
+**Rejected as an incompatible remediation.**
+
+One advisory in the same report *was* actionable and is fixed:
+`source-map-js@1.2.1` sat in the **production** tree via `next → postcss`, and
+`1.2.2` resolves it. Pinned with an `overrides` entry, and
+`npm audit --omit=dev` is now **0 vulnerabilities**. The CI job is split
+accordingly: what could reach a build artefact is a real gate, and dev-only
+advisories are reported without gating.
+
+---
+
+## 7e. Chrome Web Store — prepared, human step blocked
+
+Driven as far as it goes without a person. A profile was launched, the store
+was opened in **that** profile through the product's own route, and the
+renderer confirmed it:
+
+```
+open_url_in_profile -> {"ok": true, "url": "https://chromewebstore.google.com/", ...}
+renderer says: {"host":"chromewebstore.google.com","ready":"interactive","title":"Chrome Web Store"}
+```
+
+Completing an install requires confirming the browser's own *Add to Chrome*
+dialog, which is deliberately not scriptable — and that is the reason this
+route hands the job to the browser rather than writing files into a profile
+directory. **Nothing was installed. The install click is blocked on a human.**
+
+---
+
+## 7f. T1–T5 are not these gates
+
+T1–T5 are defined in [`09_ENGINE_PROGRAM`](09_ENGINE_PROGRAM.md) §6 and are
+**detection-parity** gates for the browser-engine programme, not extension
+gates. Their status is unchanged by any of this work:
+
+| gate | scope | status |
+|---|---|---|
+| T1 Cross-OS transport reference | same-version Chrome on a real Windows host | **not started** |
+| T2 HTTP/2 + HTTP/3 behaviour | SETTINGS, frame order, QUIC parameters | **not started** |
+| T3 Font coherence on a claimed OS | the claimed OS's font files and metadata probes | **not started** |
+| T4 Third-party checker delta | re-run captures against a core build | **not started** |
+| T5 Account-site acceptance | whether real sites accept the browser | **not started** |
+
+Three claims are kept apart deliberately. **Extension functionality** is
+measured and reported above. **Browser-identity regression** is covered by the
+existing identity, realm and route suites, which pass. **Detection parity** is
+neither measured nor claimed, and nothing in the extension manager moves it —
+if anything, assigning an extension turns anti-detect exclusivity off for that
+profile, and the fingerprint cost of that is unmeasured.
+
+---
+
 ## 8. Limitations and untested areas
 
 - **The Chrome Web Store install flow is not end-to-end tested.** The route is

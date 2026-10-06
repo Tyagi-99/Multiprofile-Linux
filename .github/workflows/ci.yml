@@ -248,6 +248,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Console dependencies
+      # Split, because the two questions have different answers and only one
+      # of them is a release decision.
+      #
+      # What could SHIP is the blocking one. The .deb ships `src/static` --
+      # the built static export -- and no node_modules at all, so a
+      # production-tree advisory still only affects a build host; but that is
+      # the closest thing to shipped exposure this project has, and it is
+      # currently clean, so it can be a real gate rather than noise.
+      - name: Console dependencies that could reach a build artefact
         working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+      # Dev-only advisories are reported and do not gate. The standing example
+      # is braces <-> micromatch <-> fast-glob <-> @next/eslint-plugin-next
+      # <-> eslint-config-next: a lint-time stack-exhaustion DoS whose only
+      # offered fix is downgrading eslint-config-next from 16.3.6 to 14.2.35,
+      # a semver-major move away from the Next 16 this console is built with.
+      # Taking that fix would mismatch the framework to silence a tool that
+      # never runs outside CI. See docs/11_EXTENSIONS.md section 9.
+      - name: Console dev dependencies (reported, not a gate)
+        working-directory: frontend
+        continue-on-error: true
         run: npm audit --audit-level=high
