@@ -260,10 +260,29 @@ whether any particular site accepts the browser.
 
 ## 7. Extensions, platform, distribution
 
+> **Correction, 6 October 2026.** This table said "Per-profile extensions ✅"
+> while the launcher appended `--disable-extensions` to **every** profile and
+> there was no per-profile extension control of any kind. The row was wrong,
+> and it was wrong in the direction that flatters the product — the same class
+> the audit has been tracking since F49. It is true now, and
+> [`11_EXTENSIONS`](11_EXTENSIONS.md) states what was measured and what is
+> still untested.
+>
+> `.crx` is marked ❌ rather than 🟡 deliberately. Extracting a signed
+> container and loading it unpacked discards the signature and changes the
+> extension ID, so the product refuses rather than relabel that as an install.
+> Competitors that mark it ✅ are not necessarily doing something this product
+> could not; the gap has not been investigated.
+
+
 | Feature | Multiprofile | AdsPower | GoLogin | Multilogin | Pri | Effort |
 |---|---|---|---|---|---|---|
-| Per-profile extensions | ✅ | ✅ | ✅ | ✅ | P1 | — |
-| Install from Web Store / .crx | 🟡 default-off by policy | ✅ | ✅ | ✅ | P2 | S |
+| Per-profile extensions | ✅ **real as of 6 Oct 2026** | ✅ | ✅ | ✅ | P1 | — |
+| Bulk assign one extension to many profiles | ✅ | ✅ | ✅ | ✅ | P1 | — |
+| Import ZIP / unpacked folder | ✅ validated and hardened | ✅ | ✅ | ✅ | P1 | — |
+| Verified per-profile install state | ✅ observed ID, not a DB row | ? | ? | ? | P1 | — |
+| Install from Web Store | 🟡 browser's own flow, per profile | ✅ | ✅ | ✅ | P2 | S |
+| Install from .crx | ❌ refused, with the reason | ✅ | ✅ | ✅ | P2 | — |
 | Team extension library | ❌ | ✅ | 🟡 | ✅ | P2 | M |
 | Linux (.deb) | ✅ | 🟡 | 🟡 | 🟡 | P0 | — |
 | Linux (.rpm / AppImage) | ❌ | ❌ | ❌ | ❌ | P2 | S |
