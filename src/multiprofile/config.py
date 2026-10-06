@@ -60,6 +60,15 @@ class Settings:
     # DEFAULT FALSE — AdsPower-class anti-detect exclusivity.
     allow_webstore_extensions: bool = False
     force_no_sandbox: bool = False
+    # Option A's integration point. Naming a build here is the whole of
+    # "use our maintained core"; see docs/09_ENGINE_PROGRAM.md and
+    # engine_policy.py. Empty means "whatever is on PATH", which is the
+    # behaviour that existed before and is still the default.
+    engine_binary: str = ""
+    # Refuse to launch on anything but the pinned build. Off by default: a
+    # product that cannot launch because a pin is unset is worse than one
+    # that tells the operator which engine it used.
+    engine_require_pinned: bool = False
     window_tile_gap: int = 0
     window_tile_margin: int = 0
     window_tile_tolerance_px: int = 4
@@ -186,6 +195,8 @@ def get_settings() -> Settings:
         ),
         allow_webstore_extensions=_env_bool("MULTIPROFILE_ALLOW_WEBSTORE_EXTENSIONS", False),
         force_no_sandbox=_env_bool("MULTIPROFILE_FORCE_NO_SANDBOX", False),
+        engine_binary=os.environ.get("MULTIPROFILE_ENGINE_BINARY", "").strip(),
+        engine_require_pinned=_env_bool("MULTIPROFILE_ENGINE_REQUIRE_PINNED", False),
         window_tile_gap=_env_int("MULTIPROFILE_WINDOW_TILE_GAP", 0, minimum=0, maximum=64),
         window_tile_margin=_env_int("MULTIPROFILE_WINDOW_TILE_MARGIN", 0, minimum=0, maximum=64),
         window_tile_tolerance_px=_env_int("MULTIPROFILE_WINDOW_TILE_TOLERANCE_PX", 4, minimum=0, maximum=32),

@@ -685,6 +685,44 @@ def _screen_metrics_override(fingerprint: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def _note_engine_policy(notes: list[str], profile_id: str) -> None:
+    """Record which build ran this profile, and say so when it is off policy.
+
+    A profile's identity is only reproducible against the engine that
+    produced it: relaunching under a different Chromium presents a different
+    browser with the same stored seed. The note is the record.
+
+    A pin violation is a fault rather than a note: the operator asked for one
+    build and got another, which is a broken expectation, not a choice.
+    """
+    try:
+        from ..engine_policy import (
+            VERDICT_SUPPORTED,
+            identify_engine,
+            verify_engine,
+        )
+
+        verdict = verify_engine(identify_engine())
+        record = verdict.record
+        notes.append(
+            f"Engine: {record.version_full or 'unknown'} "
+            f"({record.origin}, digest {(record.digest or '')[:12] or 'n/a'})"
+        )
+        if verdict.pin_violated:
+            _fault(notes, "engine_pin_violated",
+                   verdict.reasons[0] if verdict.reasons else
+                   "the pinned engine was not the one used",
+                   profile_id=profile_id)
+            return
+        if verdict.status != VERDICT_SUPPORTED:
+            notes.append(
+                f"engine policy: {verdict.status.upper()} — "
+                + (verdict.reasons[0] if verdict.reasons else "no detail")
+            )
+    except Exception as e:  # noqa: BLE001 - never fatal to a launch
+        log.debug("engine policy note unavailable for %s: %s", profile_id, e)
+
+
 def _note_identity_matrix(notes: list[str], fingerprint: dict[str, Any],
                           profile_id: str) -> None:
     """Tell the operator, at launch, what this profile's claim can be backed by.
@@ -1456,6 +1494,7 @@ def launch_profile(
         # undone while the console reported the profile healthy. Runs first
         # so a page is never unfrozen before its identity is installed.
         _note_identity_matrix(notes, fingerprint, profile_id)
+        _note_engine_policy(notes, profile_id)
 
         try:
             notes.extend(_start_identity_injection(

@@ -406,6 +406,13 @@ def _runtime_state_name(profile_id: str) -> str | None:
     return getattr(state, "value", state)
 
 
+def _engine_policy_block() -> "dict[str, object]":
+    """The engine-policy verdict for ``/api/health``. Never raises."""
+    from ..engine_policy import health_block
+
+    return health_block()
+
+
 def _identity_matrix_block() -> "dict[str, object]":
     """The supported-identity matrix, for ``/api/health``.
 
@@ -572,6 +579,11 @@ def create_app() -> Flask:
                 # nobody can act on, so it is reported beside the faults
                 # rather than only consulted at create time.
                 "identityMatrix": _identity_matrix_block(),
+                # Which browser build this is, whether it is one we support,
+                # and how old it is. The supply-chain half of the identity
+                # question, and option A's integration point -- see
+                # docs/09_ENGINE_PROGRAM.md.
+                "enginePolicy": _engine_policy_block(),
                 # Files this process could not make owner-only (F11/F4).
                 # Same reasoning as the identity block: [] is a statement that
                 # every write and repair landed 0600, not an absence.
