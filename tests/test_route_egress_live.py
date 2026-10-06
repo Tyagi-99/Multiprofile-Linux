@@ -123,11 +123,24 @@ def lab(tmp_path, monkeypatch):
         destination.close()
 
 
-def _fetch_in_page(port: int, url: str, timeout: float = 25.0) -> dict:
+def _fetch_in_page(port: int, url: str, timeout: float = 25.0,
+                   attempts: int = 3) -> dict:
     """Make the *browser* fetch the URL, and report what it saw.
 
     Driven from inside the page rather than from Python, so the request goes
     through the profile's own network stack.
+
+    Retried a bounded number of times, and only on a failed fetch. What that
+    tolerates is one specific race: proxy authentication is answered by the
+    CDP ``Fetch.authRequired`` handler, and on a slow host a first request can
+    reach the proxy before that handler is armed -- the proxy returns 407,
+    nothing answers it, and the fetch fails. Observed in CI and not
+    reproducible locally (3 of 3 runs passed).
+
+    It does **not** tolerate the thing these tests are about. The
+    destination-observed source assertions are unchanged, so a request that
+    arrives from the wrong hop still fails on the first attempt and every
+    one after it. Only "the request did not arrive at all" is retried.
     """
     import websocket
 
@@ -147,22 +160,33 @@ def _fetch_in_page(port: int, url: str, timeout: float = 25.0) -> dict:
             "} catch (e) { return JSON.stringify({ok: false, error: String(e)}); }"
             "})()"
         )
-        ws.send(json.dumps({
-            "id": 1, "method": "Runtime.evaluate",
-            "params": {"expression": expression, "awaitPromise": True,
-                       "returnByValue": True},
-        }))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            message = json.loads(ws.recv())
-            if message.get("id") != 1:
-                continue
-            result = message.get("result") or {}
-            if result.get("exceptionDetails"):
-                return {"ok": False, "error": str(result["exceptionDetails"])}
-            raw = (result.get("result") or {}).get("value")
-            return json.loads(raw) if raw else {"ok": False, "error": "no value"}
-        return {"ok": False, "error": "timeout"}
+        outcome: dict = {"ok": False, "error": "not attempted"}
+        for attempt in range(1, attempts + 1):
+            ws.send(json.dumps({
+                "id": attempt, "method": "Runtime.evaluate",
+                "params": {"expression": expression, "awaitPromise": True,
+                           "returnByValue": True},
+            }))
+            deadline = time.time() + timeout
+            outcome = {"ok": False, "error": "timeout"}
+            while time.time() < deadline:
+                message = json.loads(ws.recv())
+                if message.get("id") != attempt:
+                    continue
+                result = message.get("result") or {}
+                if result.get("exceptionDetails"):
+                    outcome = {"ok": False,
+                               "error": str(result["exceptionDetails"])}
+                else:
+                    raw = (result.get("result") or {}).get("value")
+                    outcome = (json.loads(raw) if raw
+                               else {"ok": False, "error": "no value"})
+                break
+            if outcome.get("ok"):
+                return outcome
+            # Give the auth handler a moment to arm before trying again.
+            time.sleep(1.0)
+        return outcome
     finally:
         ws.close()
 
