@@ -159,11 +159,39 @@ def test_the_version_marker_is_recorded(tmp_path):
 
 def test_opening_an_upgraded_database_twice_is_fine(tmp_path):
     """`_ensure_late_indexes` runs unconditionally, so it has to be
-    idempotent — and a second open must not try to migrate again."""
+    idempotent — and a second open must not try to migrate again.
+
+    The assertion names what it found. This failed once in CI with a bare
+    ``assert 1 == 0``, on a commit whose only difference from a passing one
+    was a Markdown file, so it is nondeterministic and the cause is not
+    identified. A count cannot say where a row came from; the id, the name and
+    the database path can, and a profile appearing in a database this test
+    built from scratch means something in the suite wrote to whichever
+    control database happened to be active. Next occurrence should say which
+    profile, so it can be traced to whatever created it.
+    """
     _make_old_database(tmp_path / "data" / "multiprofile" / "control.db", 6)
     db.count_profiles()
     db.close()
-    assert db.count_profiles() == 0
+    found = db.count_profiles()
+    if found:
+        # Read the rows straight out of SQLite rather than through the store,
+        # because going through the store would itself seed a demo profile on
+        # an empty table and change what this is trying to observe.
+        conn = sqlite3.connect(str(db.db_path()))
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = [
+                dict(r) for r in conn.execute(
+                    "SELECT id, name, created_at FROM profiles LIMIT 10")
+            ]
+        finally:
+            conn.close()
+        raise AssertionError(
+            f"a database this test created from scratch already holds {found} "
+            f"profile(s), so something else in the suite wrote to the active "
+            f"control database. db_path={db.db_path()} rows={rows}"
+        )
 
 
 def test_a_database_already_at_the_current_version_gains_a_missing_index(tmp_path):
