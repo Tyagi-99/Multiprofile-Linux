@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Multiprofile Test Extension B",
+  "version": "1.0.0",
+  "description": "Second harmless fixture, so two extensions can be proven to run together and stay distinct.",
+  "permissions": ["storage"],
+  "action": { "default_popup": "popup.html", "default_title": "MP Test B" },
+  "background": { "service_worker": "sw.js" },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

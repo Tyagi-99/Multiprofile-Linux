@@ -102,6 +102,17 @@ class BulkResult:
         }
 
 
+def _selected_binary() -> str | None:
+    """The browser this install uses, pin included. Never raises."""
+    try:
+        from ..engine_choice import resolve
+
+        return resolve().binary
+    except Exception as e:  # noqa: BLE001 - fall back to the low-level search
+        log.warning("engine choice unavailable (%s); using the PATH search", e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # import
 # ---------------------------------------------------------------------------
@@ -363,7 +374,10 @@ def assign(
     if row is None:
         raise PackageError(f"No extension {ext_uuid}.", code="not_found")
 
-    cap = capability or detect()
+    # The capability must describe the binary that will actually launch, not
+    # whatever PATH happens to answer: engine_choice is the single resolver
+    # and it honours the pin that find_chrome() used to ignore.
+    cap = capability or detect(_selected_binary())
     payload = Path(row["payloadPath"])
     if not payload.is_dir():
         for pid in profile_ids:

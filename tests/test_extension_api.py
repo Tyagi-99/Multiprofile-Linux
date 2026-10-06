@@ -438,3 +438,118 @@ def test_restarting_an_unknown_profile_fails_only_that_profile(client, tmp_path)
     assert body["total"] == 1
     assert body["results"][0]["detail"] == "No such profile."
     assert body["failedProfileIds"] == ["profile_nope"]
+
+
+# ---------------------------------------------------------------------------
+# the engine choice
+# ---------------------------------------------------------------------------
+
+def test_the_engine_route_reports_the_binary_that_will_launch(client):
+    body = client.get("/api/engine", headers=HEADERS).get_json()
+    assert body["ok"] is True
+    engine = body["engine"]
+    for key in ("binary", "origin", "pinned", "brand", "version",
+                "unpackedLoading", "reason", "choiceFile"):
+        assert key in engine, key
+
+
+def test_choosing_an_engine_requires_a_binary(client):
+    res = client.post("/api/engine/choose", json={}, headers=HEADERS)
+    assert res.status_code == 400
+    assert res.get_json()["code"] == "bad_request"
+
+
+def test_choosing_a_nonexistent_engine_is_refused(client):
+    res = client.post("/api/engine/choose",
+                      json={"binary": "/nonexistent/browser"}, headers=HEADERS)
+    assert res.status_code == 400
+    assert res.get_json()["code"] == "bad_binary"
+
+
+def test_an_engine_can_be_pinned_and_cleared(client):
+    """Pinning is what stops an apt install changing the runtime."""
+    import shutil
+
+    chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+    if not chromium:
+        pytest.skip("no chromium on PATH to pin")
+    res = client.post("/api/engine/choose", json={"binary": chromium},
+                      headers=HEADERS)
+    assert res.status_code == 200, res.get_json()
+    body = res.get_json()
+    assert body["engine"]["binary"] == chromium
+    assert body["engine"]["origin"] == "persisted"
+    assert body["engine"]["pinned"] is True
+
+    res = client.post("/api/engine/clear", json={}, headers=HEADERS)
+    assert res.status_code == 200
+    assert res.get_json()["engine"]["pinned"] is False
+
+
+# ---------------------------------------------------------------------------
+# update scope
+# ---------------------------------------------------------------------------
+
+def test_the_update_preview_lists_every_affected_profile(client, tmp_path):
+    """The scope has to be visible before the update, in those words."""
+    ext = _import(client, tmp_path)
+    pids = [_profile(client, f"u{i}") for i in range(3)]
+    client.post(f"/api/extensions/{ext['id']}/assign",
+                json={"profileIds": pids}, headers=HEADERS)
+    body = client.get(f"/api/extensions/{ext['id']}/update-preview",
+                      headers=HEADERS).get_json()
+    assert body["ok"] is True
+    assert body["scope"] == "all-assignments"
+    assert "applies to ALL" in body["scopeStatement"]
+    assert "no per-profile version" in body["scopeStatement"]
+    listed = {p["profileId"] for p in body["affectedProfiles"]}
+    if body["affectedProfileCount"]:
+        assert listed == set(pids)
+    for p in body["affectedProfiles"]:
+        assert p["profileName"]
+        assert "state" in p
+
+
+def test_the_update_preview_is_a_404_for_an_unknown_extension(client):
+    res = client.get("/api/extensions/nope/update-preview", headers=HEADERS)
+    assert res.status_code == 404
+
+
+def test_an_update_scoped_to_profiles_is_refused_not_silently_widened(
+    client, tmp_path
+):
+    """Accepting profileIds and ignoring it is the worst available option: the
+    caller would believe the update was scoped when it reached everyone."""
+    ext = _import(client, tmp_path)
+    pid = _profile(client, "scoped")
+    client.post(f"/api/extensions/{ext['id']}/assign",
+                json={"profileIds": [pid]}, headers=HEADERS)
+    res = client.post(f"/api/extensions/{ext['id']}/update",
+                      json={"zipPath": _zip(tmp_path, "v2.zip", version="2.0.0"),
+                            "profileIds": [pid]},
+                      headers=HEADERS)
+    assert res.status_code == 400
+    body = res.get_json()
+    assert body["code"] == "update_scope_is_fleet_wide"
+    assert "cannot be scoped" in body["error"]
+    assert "update-preview" in body["error"]
+    # and nothing was updated
+    after = client.get(f"/api/extensions/{ext['id']}",
+                       headers=HEADERS).get_json()["extension"]
+    assert after["version"] == "0.9.0"
+
+
+def test_an_unscoped_update_reports_the_fleet_it_touched(client, tmp_path):
+    ext = _import(client, tmp_path)
+    pids = [_profile(client, f"f{i}") for i in range(2)]
+    client.post(f"/api/extensions/{ext['id']}/assign",
+                json={"profileIds": pids}, headers=HEADERS)
+    res = client.post(f"/api/extensions/{ext['id']}/update",
+                      json={"zipPath": _zip(tmp_path, "v3.zip", version="3.0.0")},
+                      headers=HEADERS)
+    assert res.status_code == 200, res.get_json()
+    body = res.get_json()
+    assert body["extension"]["version"] == "3.0.0"
+    assert body["previousVersion"] == "0.9.0"
+    assert body["scope"] == "all-assignments"
+    assert "no per-profile version" in body["note"]

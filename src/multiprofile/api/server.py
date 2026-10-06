@@ -2043,6 +2043,113 @@ def create_app() -> Flask:
         log.exception("extension operation failed")
         return jsonify({"ok": False, "error": str(e), "code": "internal"}), 500
 
+    @app.get("/api/engine")
+    def engine_get():
+        """Which browser this install uses, and what it can do.
+
+        One answer, from one resolver. The launcher, the doctor and the
+        extension capability gate used to disagree -- a pin reached everything
+        except the process that starts browsers.
+        """
+        from ..engine_choice import resolve
+
+        return jsonify({"ok": True, "engine": resolve().to_dict()})
+
+    @app.post("/api/engine/choose")
+    def engine_choose():
+        """Pin the browser explicitly, so installing another cannot replace it.
+
+        BROWSER_BINARIES prefers google-chrome-stable over chromium and
+        branded Chrome 137+ cannot load unpacked extensions, so an unpinned
+        install can have its runtime changed by an unrelated apt command.
+        """
+        from ..engine_choice import set_choice
+
+        payload = request.get_json(force=True, silent=True) or {}
+        binary = (payload.get("binary") or "").strip()
+        if not binary:
+            return jsonify({"ok": False, "code": "bad_request",
+                            "error": "binary is required."}), 400
+        try:
+            choice = set_choice(binary)
+        except (FileNotFoundError, PermissionError) as e:
+            return jsonify({"ok": False, "code": "bad_binary",
+                            "error": str(e)}), 400
+        audit_log("engine_choose", ok=True,
+                  detail={"binary": choice.binary, "brand": choice.brand,
+                          "unpacked": choice.unpacked})
+        return jsonify({
+            "ok": True, "engine": choice.to_dict(),
+            "note": ("Pinned. Extensions already assigned keep working only if "
+                     "this browser can load them -- see unpackedLoading."),
+        })
+
+    @app.post("/api/engine/clear")
+    def engine_clear():
+        from ..engine_choice import clear_choice
+
+        choice = clear_choice()
+        audit_log("engine_clear", ok=True, detail={"binary": choice.binary})
+        return jsonify({
+            "ok": True, "engine": choice.to_dict(),
+            "note": ("No longer pinned. The PATH search decides, so installing "
+                     "another browser can change the runtime."),
+        })
+
+    @app.get("/api/extensions/<ext_uuid>/update-preview")
+    def extensions_update_preview(ext_uuid: str):
+        """Every profile an update would reach, before it runs.
+
+        The scope is fleet-wide for the extension and the console must say so
+        in those words. Profiles share one payload directory, which is exactly
+        what keeps the extension ID -- and the per-profile storage behind it --
+        stable across an update. There is deliberately no
+        selected-profile update control, because one that silently applied to
+        everyone would be worse than not having it.
+        """
+        from ..extensions import store as ext_store
+
+        ext = ext_store.get_extension(ext_uuid)
+        if ext is None:
+            return jsonify({"ok": False, "error": "No such extension",
+                            "code": "not_found"}), 404
+        assignments = ext_store.list_assignments(ext_uuid=ext_uuid)
+        affected = []
+        for a in assignments:
+            profile = get_profile(a["profileId"])
+            affected.append({
+                "profileId": a["profileId"],
+                "profileName": str((profile or {}).get("name") or a["profileId"]),
+                "isRunning": bool((profile or {}).get("isRunning")),
+                "state": a["state"],
+                "stateLabel": a["stateLabel"],
+                "enabled": a["enabled"],
+            })
+        running = [a for a in affected if a["isRunning"]]
+        versions = ext_store.list_versions(ext_uuid)
+        return jsonify({
+            "ok": True,
+            "extensionId": ext_uuid,
+            "name": ext["name"],
+            "currentVersion": ext["version"],
+            "scope": "all-assignments",
+            "affectedProfileCount": len(affected),
+            "affectedProfiles": affected,
+            "runningProfileCount": len(running),
+            "retainedVersions": versions,
+            "rollbackAvailable": any(
+                v["payloadPath"] != ext["payloadPath"] for v in versions),
+            "scopeStatement": (
+                f"This update replaces the shared payload for "
+                f"{ext['name']}. It applies to ALL {len(affected)} profile(s) "
+                f"assigned this extension -- there is no per-profile version. "
+                + (f"{len(running)} of them are running and keep the current "
+                   f"version until restarted. " if running else "")
+                + "Independent per-profile versions are not implemented; see "
+                  "docs/11_EXTENSIONS.md."
+            ),
+        })
+
     @app.get("/api/extensions/capability")
     def extensions_capability():
         """What the installed browser will actually do. Read fresh, never
@@ -2329,9 +2436,36 @@ def create_app() -> Flask:
 
     @app.post("/api/extensions/<ext_uuid>/update")
     def extensions_update(ext_uuid: str):
+        from ..extensions import store as ext_store
         from ..extensions.manager import update_extension
 
         payload = request.get_json(force=True, silent=True) or {}
+
+        # A caller asking to update "these profiles" is asking for something
+        # this does not do. Profiles share one payload directory -- which is
+        # what keeps the extension ID, and the per-profile storage behind it,
+        # stable across an update -- so replacing it reaches every assignment.
+        # Accepting the parameter and ignoring it would be the worst option
+        # available: the caller would believe it was scoped.
+        if payload.get("profileIds") is not None:
+            affected = ext_store.list_assignments(ext_uuid=ext_uuid)
+            return jsonify({
+                "ok": False,
+                "code": "update_scope_is_fleet_wide",
+                "error": (
+                    f"This update cannot be scoped to selected profiles. "
+                    f"Profiles share one payload directory, so updating "
+                    f"replaces it for all {len(affected)} profile(s) assigned "
+                    f"this extension. Call GET /api/extensions/{ext_uuid}"
+                    f"/update-preview to see exactly which, then retry without "
+                    f"profileIds. Independent per-profile versions are not "
+                    f"implemented."
+                ),
+                "affectedProfileCount": len(affected),
+            }), 400
+
+        before = ext_store.get_extension(ext_uuid)
+        affected = ext_store.list_assignments(ext_uuid=ext_uuid)
         try:
             ext = update_extension(
                 ext_uuid,
@@ -2341,11 +2475,29 @@ def create_app() -> Flask:
         except Exception as e:  # noqa: BLE001 - mapped to a reason
             return _ext_error(e)
         audit_log("extension_update", ok=True,
-                  detail={"extensionId": ext_uuid, "version": ext["version"]})
+                  detail={"extensionId": ext_uuid, "version": ext["version"],
+                          "affectedProfiles": len(affected)})
+        running = []
+        for a in affected:
+            profile = get_profile(a["profileId"])
+            if (profile or {}).get("isRunning"):
+                running.append(str((profile or {}).get("name") or a["profileId"]))
         return jsonify({
-            "ok": True, "extension": ext,
-            "note": "Assigned profiles pick the new version up on their next "
-                    "launch. Running profiles keep the old one until restarted.",
+            "ok": True,
+            "extension": ext,
+            "previousVersion": (before or {}).get("version"),
+            "scope": "all-assignments",
+            "affectedProfileCount": len(affected),
+            "affectedProfileIds": [a["profileId"] for a in affected],
+            "runningProfiles": running,
+            "note": (
+                f"Updated to {ext['version']} for all {len(affected)} assigned "
+                f"profile(s); there is no per-profile version. They pick it up "
+                f"on their next launch."
+                + (f" {len(running)} running profile(s) keep "
+                   f"{(before or {}).get('version')} until restarted: "
+                   f"{', '.join(running[:5])}." if running else "")
+            ),
         })
 
     @app.post("/api/extensions/<ext_uuid>/rollback")

@@ -27,7 +27,7 @@ from ..api import events
 from ..audit import audit_log
 from ..config import get_settings
 from ..cookies_store import load_cookies
-from ..engine import detect_engine_version, find_browser_binary
+from ..engine import detect_engine_version
 from ..fingerprint import build_fingerprint, normalize_seed
 from ..network import (
     NetworkMode,
@@ -348,21 +348,58 @@ def extension_src() -> Path:
 
 
 def find_chrome() -> str:
-    # The candidate list lives in ``engine`` so that the binary we launch and
-    # the binary we ask for a version are the same one, in the same order.
-    path = find_browser_binary()
-    if path:
-        return path
+    """The browser this install uses -- the pin included.
+
+    The comment here used to say "the binary we launch and the binary we ask
+    for a version are the same one". It was not: this called
+    ``find_browser_binary()``, which walks PATH and has never looked at the
+    configured engine, so a pin reached the policy, the doctor and the
+    capability detector while the process that actually starts browsers
+    ignored it. Measured with ``MULTIPROFILE_ENGINE_BINARY=/usr/bin/true``:
+
+        find_chrome()                  -> /usr/bin/chromium   (what ran)
+        engine_policy.identify_engine  -> /usr/bin/true       (what was reported)
+
+    That was worse than untidy. ``BROWSER_BINARIES`` puts
+    ``google-chrome-stable`` ahead of ``chromium``, and branded Chrome 137+
+    cannot load unpacked extensions, so installing Chrome moved every profile
+    onto a runtime where the extension manager stops working -- silently,
+    and with a pin unable to prevent it.
+
+    Resolution now lives in one place. See ``engine_choice.resolve``.
+    """
+    from ..engine_choice import ORIGIN_PATH, record_observed, resolve
+
+    choice = resolve()
+    if choice.binary and Path(choice.binary).is_file():
+        # Remember what PATH answered, so a later change of answer is
+        # reportable instead of invisible. A pin needs no record: it IS one.
+        if choice.origin == ORIGIN_PATH:
+            record_observed(choice.binary)
+        return choice.binary
     raise FileNotFoundError(
         "Unable to start browser process.\n"
-        "Reason: Chromium/Chrome executable was not found on PATH.\n"
-        "Suggested action: sudo apt install chromium-browser  OR  install Google Chrome."
+        f"Reason: {choice.reason or 'no Chromium/Chrome executable was found.'}\n"
+        f"Suggested action: {choice.remediation or 'install Chromium, or pin a binary with MULTIPROFILE_ENGINE_BINARY.'}"
     )
 
 
 # ---------------------------------------------------------------------------
 # Extension preparation
 # ---------------------------------------------------------------------------
+
+def _extension_runtime_block(profile_has_extensions: bool) -> str | None:
+    """Why this launch must not proceed, or None. Guarded: never raises."""
+    if not profile_has_extensions:
+        return None
+    try:
+        from ..engine_choice import extension_runtime_block
+
+        return extension_runtime_block(True)
+    except Exception as e:  # noqa: BLE001 - never block a launch over this
+        log.warning("extension runtime check unavailable: %s", e)
+        return None
+
 
 def _assigned_extension_payloads(profile_id: str) -> list[tuple[str, str]]:
     """``(ext_uuid, payload_path)`` for this profile's enabled extensions.
@@ -1493,6 +1530,20 @@ def launch_profile(
     # reading the launch record can see which profiles traded exclusivity for
     # an extension and which did not.
     assigned_extensions = _assigned_extension_payloads(profile_id)
+    # A profile whose extensions cannot load on the selected runtime is
+    # refused rather than launched in a state the operator would read as
+    # working. Scoped to profiles that HAVE extensions, so this feature can
+    # never stop an ordinary profile launching.
+    runtime_block = _extension_runtime_block(bool(assigned_extensions))
+    if runtime_block:
+        audit_log("profile_launch", profile_id=profile_id, ok=False,
+                  detail={"reason": "extension_runtime_unsupported"})
+        return {
+            "ok": False,
+            "error": runtime_block,
+            "errors": ["extension_runtime_unsupported"],
+            "notes": notes,
+        }
     if assigned_extensions:
         paths = ",".join(p for _, p in assigned_extensions)
         cmd.append(f"--load-extension={paths}")

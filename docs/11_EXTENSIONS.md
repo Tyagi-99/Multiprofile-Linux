@@ -128,14 +128,52 @@ reference it. Extension **state** is not. `chrome.storage.local`, settings,
 site permissions and anything the extension writes live inside each browser
 profile's own user-data directory.
 
-Measured: two profiles running the same extension files, same extension ID,
-each wrote a different value and read its own back after a restart.
+Measured across **three** profiles, in `chrome.storage.local` **and**
+IndexedDB, with every browser restarted in between: each profile read back
+only its own value and none of the others'. Same extension files, same
+extension ID, three separate stores.
+
+**Removing an assignment does not clear that profile's extension data.**
+Measured: a profile wrote a value, the assignment was removed, the profile
+launched without the extension, the assignment was restored, and the value was
+still there. The reason is that removal changes a command-line flag and the
+data lives in the profile's own user-data directory, which removal does not
+touch. That is convenient for an accidental removal and it is **not** a way to
+reset an extension -- if you need the extension's state gone, the profile's
+data has to be cleared separately.
 
 **What this does not cover.** If an extension signs into its own account or
 syncs through its own cloud service, that data lives on someone else's server
 and is keyed by that account, not by the browser profile. Using one login
 across several profiles links them, and nothing this product does changes
 that. It is not claimed.
+
+---
+
+## 4b. The running-profile workflow, measured
+
+An unpacked extension is loaded by a command-line flag, so none of these can
+be applied to a browser that is already running. Each row was driven against a
+real browser, with the evidence being the marker the extension's own content
+script writes into the page:
+
+| action on a running profile | before restart | after the controlled restart |
+|---|---|---|
+| assign | `pending_restart`, marker **absent**, `verifiedAt` null | marker present, `installed_verified`, observed ID recorded |
+| disable | still running, assignment **kept** | not loaded |
+| remove | still running, told "until it restarts" | not loaded |
+| update | still reports the **old** version | new version, **same extension ID** |
+
+Two things that matter and are easy to get wrong:
+
+- The product never reports `installed_verified` before the browser has been
+  observed running the extension. The assign-while-running case was checked
+  explicitly for that.
+- **The restart preserves profile data but not open tabs.** A value written to
+  the page's own `localStorage` survived the restart, because the user-data
+  directory is untouched. The windows and tabs that were open do not come
+  back: the profile is stopped and launched at its start URL. Nothing restores
+  a session, and nothing claims to.
 
 ---
 
