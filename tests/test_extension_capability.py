@@ -200,3 +200,56 @@ def test_the_dict_form_carries_the_decision_and_the_reason(monkeypatch, resolved
 ])
 def test_brand_normalisation(raw, expected):
     assert C._normalise_brand(raw) == expected
+
+
+class TestChromeForTestingIsNotMistakenForBrandedChrome:
+    """The remediation named a runtime the detector then refused.
+
+    ``_CHROME_REMEDIATION`` tells an operator on branded Chrome 137+ to use
+    "Chromium or Chrome for Testing". The build actually published on the
+    Chrome for Testing dashboard identifies itself as **Google Chrome for
+    Testing**, and ``_BRAND_RE`` matched the leading ``Google Chrome`` first,
+    so the brand resolved to ``google-chrome``, the >=137 rule fired, and the
+    advice this module gives was impossible to follow.
+    """
+
+    def test_the_real_version_string_resolves_to_chrome_for_testing(self):
+        match = C._BRAND_RE.search("Google Chrome for Testing 141.0.7390.54")
+        assert match is not None
+        assert C._normalise_brand(match.group(1)) == "chrome-for-testing"
+
+    def test_without_the_google_prefix_too(self):
+        match = C._BRAND_RE.search("Chrome for Testing 141.0.7390.54")
+        assert match is not None
+        assert C._normalise_brand(match.group(1)) == "chrome-for-testing"
+
+    def test_branded_chrome_is_still_branded_chrome(self):
+        """The fix must not widen into the brand it exists to exclude."""
+        match = C._BRAND_RE.search("Google Chrome 154.0.1234.5")
+        assert match is not None
+        assert C._normalise_brand(match.group(1)) == "google-chrome"
+
+    def test_chrome_for_testing_may_load_unpacked_at_any_version(self):
+        assert "chrome-for-testing" in C._UNPACKED_OK_BRANDS
+
+    def test_a_chrome_for_testing_binary_is_accepted(self, tmp_path):
+        """End to end through detect(), not just the regex."""
+        fake = tmp_path / "chrome"
+        fake.write_text(
+            "#!/bin/sh\necho 'Google Chrome for Testing 141.0.7390.54'\n"
+        )
+        fake.chmod(0o755)
+        cap = C.detect(str(fake), refresh=True)
+        assert cap.brand == "chrome-for-testing"
+        assert cap.major == 141
+        assert cap.unpacked is True, cap.reason
+
+    def test_a_branded_chrome_binary_of_the_same_version_is_refused(self, tmp_path):
+        """The matched control: same version, different brand, opposite answer."""
+        fake = tmp_path / "chrome"
+        fake.write_text("#!/bin/sh\necho 'Google Chrome 141.0.7390.54'\n")
+        fake.chmod(0o755)
+        cap = C.detect(str(fake), refresh=True)
+        assert cap.brand == "google-chrome"
+        assert cap.unpacked is False
+        assert "137" in cap.reason or "137" in cap.remediation

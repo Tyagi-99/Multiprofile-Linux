@@ -54,9 +54,21 @@ _CHROME_REMEDIATION = (
     "flow, per profile, from the Extensions page."
 )
 
+#: Chrome for Testing must come first, and must absorb its own "Google "
+#: prefix. The binary published on the Chrome for Testing dashboard -- the
+#: exact build this module's remediation text tells an operator to install --
+#: reports itself as:
+#:
+#:     Google Chrome for Testing 141.0.7390.54
+#:
+#: With `google\s+chrome` available as an earlier-or-equal alternative, the
+#: leftmost match at position 0 was "Google Chrome", so the brand came out
+#: `google-chrome`, the >=137 rule applied, and the one supported alternative
+#: runtime was refused as if it were branded Chrome. Measured, not supposed:
+#: see tests/test_extension_capability.py.
 _BRAND_RE = re.compile(
-    r"\b(chrome\s+for\s+testing|google\s+chrome|chromium|brave\s+browser|"
-    r"microsoft\s+edge|opera|vivaldi)\b",
+    r"\b((?:google\s+)?chrome\s+for\s+testing|google\s+chrome|chromium|"
+    r"brave\s+browser|microsoft\s+edge|opera|vivaldi)\b",
     re.IGNORECASE,
 )
 
@@ -65,7 +77,7 @@ _VERSION_TIMEOUT_S = 5.0
 
 def _normalise_brand(raw: str) -> str:
     low = " ".join(raw.lower().split())
-    if low == "chrome for testing":
+    if low in ("chrome for testing", "google chrome for testing"):
         return "chrome-for-testing"
     if low == "google chrome":
         return "google-chrome"
