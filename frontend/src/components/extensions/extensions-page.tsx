@@ -268,12 +268,17 @@ function ResultsDialog({
   onClose,
   result,
   onRetryFailed,
+  onRestart,
 }: {
   open: boolean;
   onClose: () => void;
   result: BulkResponse | null;
   onRetryFailed?: () => void;
+  onRestart?: (profileIds: string[]) => void;
 }) {
+  const pending = (result?.results ?? []).filter(
+    (r) => r.state === "pending_restart",
+  );
   if (!result) return null;
   return (
     <Dialog
@@ -292,6 +297,27 @@ function ResultsDialog({
       wide
       footer={
         <div className="flex w-full justify-end gap-2">
+          {pending.length > 0 && onRestart && (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                // A restart closes whatever the operator had open, so it is
+                // confirmed here and never done as a side effect of
+                // assigning.
+                if (
+                  window.confirm(
+                    `Restart ${pending.length} running profile(s) now?\n\n` +
+                      pending.map((r) => r.profileName || r.profileId).join(", ") +
+                      `\n\nThis closes their current browser windows.`,
+                  )
+                ) {
+                  onRestart(pending.map((r) => r.profileId));
+                }
+              }}
+            >
+              Restart {pending.length} pending
+            </Button>
+          )}
           {result.failed > 0 && onRetryFailed && (
             <Button variant="secondary" onClick={onRetryFailed}>
               Retry {result.failed} failed
@@ -517,6 +543,26 @@ export function ExtensionsPage() {
       invalidate();
     },
     onError: (e) => toast.error(apiMessage(e, "Assignment failed.")),
+  });
+
+  const restartMutation = useMutation({
+    mutationFn: async (vars: { extId: string; profileIds: string[] }) => {
+      try {
+        return await post<BulkResponse>(
+          `/api/extensions/${vars.extId}/restart-profiles`,
+          { profileIds: vars.profileIds },
+        );
+      } catch (e) {
+        const partial = bulkFrom(e);
+        if (partial) return partial;
+        throw e;
+      }
+    },
+    onSuccess: (res) => {
+      setBulk(res);
+      invalidate();
+    },
+    onError: (e) => toast.error(apiMessage(e, "Restart failed.")),
   });
 
   const retryMutation = useMutation({
@@ -771,6 +817,12 @@ export function ExtensionsPage() {
         result={bulk}
         onRetryFailed={
           bulkFor ? () => retryMutation.mutate(bulkFor) : undefined
+        }
+        onRestart={
+          bulkFor
+            ? (profileIds) =>
+                restartMutation.mutate({ extId: bulkFor, profileIds })
+            : undefined
         }
       />
       {detail && (

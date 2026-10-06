@@ -195,7 +195,8 @@ claims to be one.
 | `manifest.json` names a file the package lacks | refused — the browser would load it and fail later, less clearly |
 | MV1 | refused as unsupported |
 | Payload missing from disk at launch | that extension is skipped and marked failed, rather than handing a bad path to `--load-extension` and taking the others down with it |
-| Profile is running | `pending_restart`, with a restart offered — **no session is closed for you** |
+| Profile is running | `pending_restart`, with a restart offered — **no session is closed for you**, and the restart route refuses to pick the profiles itself |
+| A restart stops but fails to relaunch | reported as failed for that profile, saying it is now stopped |
 | Browser cannot load unpacked | the assignment fails with the reason and the remediation |
 | Some profiles fail in a bulk operation | HTTP **207**, per-profile ledger, retry limited to the failures |
 | Requested profile no longer exists | reported as missing, and the response is **not** `ok` |
@@ -212,10 +213,21 @@ claims to be one.
 - **Only Chromium is verified.** Google Chrome below 137, Brave, Edge, Opera
   and Vivaldi are untested. Chrome 137+ is tested only in the sense that the
   capability gate refuses it.
-- **No live pending-restart → restart → verified cycle.** The
-  `pending_restart` state and its messaging are unit-tested; the controlled
-  restart action is offered through the existing launch/stop APIs rather than
-  as a new one-click flow.
+- **The pending-restart → restart → verified cycle is not tested end to end
+  against a live browser.** The state, its messaging and the restart route's
+  refusals are tested; `POST /api/extensions/<id>/restart-profiles` acts only
+  on profile IDs it is handed, is confirmed in the console before it runs, and
+  reports each profile separately — but a full live cycle has not been
+  exercised.
+
+- **An update is fleet-wide for that extension, not per profile.** Profiles
+  share one payload directory, which is what keeps the extension ID and
+  therefore the per-profile storage stable. Updating replaces that payload, so
+  every assigned profile gets the new version on its next launch. Running two
+  versions of the same extension in different profiles would need two
+  extension entries with two payload paths, and they would be two different
+  extension IDs with separate storage — which is a different thing from an
+  update, and is not offered.
 - **Extension-to-extension interaction is not considered.** Several
   extensions assigned to one profile are passed together on one
   `--load-extension`; they are not tested for conflicts with each other.

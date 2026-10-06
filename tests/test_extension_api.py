@@ -410,3 +410,31 @@ def test_the_extensions_page_route_needs_a_running_profile(client):
                       headers=HEADERS)
     assert res.status_code == 409
     assert "not running" in res.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# the controlled restart
+# ---------------------------------------------------------------------------
+
+def test_restart_requires_explicit_profile_ids(client, tmp_path):
+    """A restart closes whatever the operator had open, so this route never
+    decides for itself which profiles are "pending enough" to restart."""
+    ext = _import(client, tmp_path)
+    res = client.post(f"/api/extensions/{ext['id']}/restart-profiles",
+                      json={}, headers=HEADERS)
+    assert res.status_code == 400
+    body = res.get_json()
+    assert body["code"] == "bad_request"
+    assert "does not restart every pending profile" in body["error"]
+
+
+def test_restarting_an_unknown_profile_fails_only_that_profile(client, tmp_path):
+    ext = _import(client, tmp_path)
+    res = client.post(f"/api/extensions/{ext['id']}/restart-profiles",
+                      json={"profileIds": ["profile_nope"]}, headers=HEADERS)
+    assert res.status_code == 400
+    body = res.get_json()
+    assert body["ok"] is False
+    assert body["total"] == 1
+    assert body["results"][0]["detail"] == "No such profile."
+    assert body["failedProfileIds"] == ["profile_nope"]

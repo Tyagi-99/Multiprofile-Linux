@@ -2412,6 +2412,92 @@ def create_app() -> Flask:
                   ok=bool(result.get("ok")), detail={"url": url})
         return jsonify(result), (200 if result.get("ok") else 409)
 
+    @app.post("/api/extensions/<ext_uuid>/restart-profiles")
+    def extensions_restart_profiles(ext_uuid: str):
+        """Restart named profiles so a pending assignment takes effect.
+
+        Explicitly named profiles only -- never "everything pending". An
+        unpacked extension is loaded by a command-line flag, so a running
+        browser cannot be given one without a restart, and a restart closes
+        whatever the operator had open. That decision stays theirs: this route
+        acts on the list it is handed, one profile at a time, and reports each
+        outcome separately so a failure halfway through is visible rather than
+        averaged away.
+        """
+        from ..extensions import store as ext_store
+
+        payload = request.get_json(force=True, silent=True) or {}
+        requested = [str(p) for p in (payload.get("profileIds") or []) if p]
+        if not requested:
+            return jsonify({
+                "ok": False, "code": "bad_request",
+                "error": "profileIds is required. This route does not restart "
+                         "every pending profile on its own.",
+            }), 400
+
+        results = []
+        for profile_id in requested:
+            profile = get_profile(profile_id)
+            name = str((profile or {}).get("name") or profile_id)
+            if profile is None:
+                results.append({"profileId": profile_id, "profileName": name,
+                                "ok": False, "state": "failed",
+                                "detail": "No such profile."})
+                continue
+            try:
+                stopped = stop_profile(profile_id)
+                if not stopped.get("ok"):
+                    results.append({
+                        "profileId": profile_id, "profileName": name,
+                        "ok": False, "state": "failed",
+                        "detail": f"Could not stop it: "
+                                  f"{stopped.get('error') or 'unknown error'}",
+                    })
+                    continue
+                launched = launch_profile(profile_id)
+                if not launched.get("ok"):
+                    results.append({
+                        "profileId": profile_id, "profileName": name,
+                        "ok": False, "state": "failed",
+                        "detail": f"Stopped, but the relaunch failed: "
+                                  f"{launched.get('error') or 'unknown error'}. "
+                                  f"The profile is now stopped.",
+                    })
+                    continue
+                row = ext_store.get_assignment(ext_uuid, profile_id)
+                state = (row or {}).get("state") or "assigned"
+                verified = state == ext_store.STATE_INSTALLED_VERIFIED
+                results.append({
+                    "profileId": profile_id, "profileName": name,
+                    "ok": verified, "state": state,
+                    "detail": (
+                        "Restarted and the browser reported the extension."
+                        if verified else
+                        "Restarted, but the browser did not report this "
+                        "extension. See the assignment's error."
+                    ),
+                })
+            except Exception as e:  # noqa: BLE001 - reported per profile
+                log.exception("restart failed for %s", profile_id)
+                results.append({"profileId": profile_id, "profileName": name,
+                                "ok": False, "state": "failed",
+                                "detail": str(e)})
+
+        succeeded = sum(1 for r in results if r["ok"])
+        body = {
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": len(results) - succeeded,
+            "failedProfileIds": [r["profileId"] for r in results if not r["ok"]],
+            "results": results,
+            "ok": succeeded == len(results),
+        }
+        audit_log("extension_restart_profiles", ok=body["ok"],
+                  detail={"extensionId": ext_uuid, "total": body["total"],
+                          "failed": body["failed"]})
+        status = 200 if body["ok"] else (207 if succeeded else 400)
+        return jsonify(body), status
+
     @app.post("/api/profiles/<profile_id>/extensions-page")
     def profile_extensions_page(profile_id: str):
         """Open chrome://extensions in this profile -- the browser's own
