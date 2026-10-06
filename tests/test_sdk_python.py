@@ -268,9 +268,19 @@ def test_the_refusal_set_covers_every_decision_the_launcher_can_make():
         "dependency_missing", "spawn_failed", "chrome_exit_immediate",
         "permission", "profile_not_found",
     }
-    # Codes the *stop* path emits. The grep above reads the whole module, so
-    # they turn up here without being launch outcomes at all.
-    not_launch_outcomes = {"stop_timeout"}
+    # Codes other operations in the same module emit. The grep above reads the
+    # whole file, so they turn up here without being launch outcomes at all.
+    #
+    # `stop_timeout` is the stop path. The four below are
+    # `open_url_in_profile`, which the extension manager uses to reach the
+    # Chrome Web Store flow and chrome://extensions in a chosen profile. Those
+    # routes classify their own status explicitly -- 409 when the profile is
+    # not running or the debugger cannot be reached -- so they never fall
+    # through to the launch classifier that this test guards.
+    not_launch_outcomes = {
+        "stop_timeout",
+        "profile_not_running", "cdp_unreachable", "cdp_error", "cdp_timeout",
+    }
     unclassified = emitted - _LAUNCH_REFUSALS - faults - not_launch_outcomes
     assert not unclassified, (
         "the launcher can emit error codes that are neither classified as a "
