@@ -46,6 +46,14 @@ log = logging.getLogger("multiprofile.storage.db")
 
 SCHEMA_VERSION = 8
 
+
+class SchemaTooNewError(RuntimeError):
+    """The database was migrated by a newer build than this one.
+
+    Separate from a generic error so the API can answer 409 with the operator's
+    actual remedy rather than a 500 with a traceback.
+    """
+
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
 _lock = threading.RLock()
@@ -400,6 +408,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_SQL)
         row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
         current = int(row["v"]) if row and row["v"] is not None else 0
+        if current > SCHEMA_VERSION:
+            # A newer build has already migrated this database. Migrations are
+            # forward-only -- there is no downgrade path -- so an older build
+            # opening it would run on a schema it does not know: it would read
+            # and write the tables it recognises and silently ignore the rest,
+            # which for v8 means an operator's extension assignments quietly
+            # not applying while the console reports them as assigned.
+            #
+            # Refusing is the only honest option, and it has to happen here,
+            # because `current < SCHEMA_VERSION` is False in this case and the
+            # old code simply fell through to normal operation.
+            raise SchemaTooNewError(
+                f"this database is at schema v{current} but this build of "
+                f"multiprofile only understands v{SCHEMA_VERSION}. It was "
+                "migrated by a newer version, and schema migrations are "
+                "forward-only. Install the newer version again, or restore "
+                "the pre-upgrade backup taken before that migration "
+                "(docs/BACKUP_AND_RESTORE.md)."
+            )
         if current < SCHEMA_VERSION:
             _migrate(conn, current, SCHEMA_VERSION)
             conn.execute(
@@ -1364,6 +1391,7 @@ def close() -> None:
 __all__ = [
     "SCHEMA_VERSION",
     "InvalidStateTransition",
+    "SchemaTooNewError",
     "ProfileState",
     "claim_next_job",
     "close",
