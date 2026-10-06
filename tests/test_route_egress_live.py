@@ -221,6 +221,16 @@ def _route_evidence(lab, name: str, result: dict | None = None) -> str:
     and the auth exchange failed -- and the assertion message could not tell
     them apart. A reduced failure count cannot either, which is why this
     records the counters instead of inferring from how often it happens.
+
+    The counters alone were still not enough, and reading them wrongly cost
+    real time. ``proxy[connections=1, auth_failures=12, rejected=4]`` was
+    filed as an authentication failure for weeks. It is not one: the
+    credential check in ``HttpConnectProxy._handle`` runs **before** the
+    upstream connect, so every request counted in ``connections`` or
+    ``rejected`` already authenticated -- five of them. The actual fault was
+    four upstream connects, and ``rejected`` recorded no reason for any of
+    them. So the reasons are printed now, and ``tests/test_route_lab_controls.py``
+    establishes in the same environment whether the lab itself is sound.
     """
     proxy = lab["proxies"].get(name)
     destination = lab["destination"]
@@ -228,12 +238,23 @@ def _route_evidence(lab, name: str, result: dict | None = None) -> str:
     if result is not None:
         bits.append(f"fetch={result}")
     if proxy is not None:
+        authed = getattr(proxy, "connections", 0) + getattr(proxy, "rejected", 0)
         bits.append(
             f"proxy[connections={getattr(proxy, 'connections', '?')}, "
             f"auth_failures={getattr(proxy, 'auth_failures', '?')}, "
             f"rejected={getattr(proxy, 'rejected', '?')}, "
-            f"authenticated={bool(getattr(proxy, 'username', None))}]"
+            f"authenticated={bool(getattr(proxy, 'username', None))}, "
+            f"requests_that_passed_auth={authed}]"
         )
+        reasons = getattr(proxy, "rejected_reasons", None)
+        if reasons:
+            bits.append(f"rejected_because={reasons}")
+        errors = getattr(proxy, "handler_errors", None)
+        if errors:
+            bits.append(f"proxy_handler_errors={errors}")
+        challenges = getattr(proxy, "challenges_per_connection", None)
+        if challenges:
+            bits.append(f"challenges_per_connection={challenges}")
     bits.append(f"destination_sources={destination.sources_for(f'route={name}')}")
     return " ".join(bits)
 

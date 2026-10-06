@@ -154,6 +154,21 @@ class _BaseProxy:
         self.connections = 0
         self.auth_failures = 0
         self.rejected = 0
+        #: Why each rejection happened. ``rejected`` alone was a bare integer,
+        #: which is how the authenticated-proxy failure stayed unattributed for
+        #: as long as it did: CI reported ``rejected=4`` and there was nothing
+        #: to say whether the bind failed, the destination refused, or the
+        #: connect timed out -- three different faults with one number.
+        self.rejected_reasons: list[str] = []
+        #: Exceptions ``_guard`` caught. It used to swallow them in silence, so
+        #: a handler that died mid-request looked identical to a client that
+        #: simply went away.
+        self.handler_errors: list[str] = []
+        #: Auth challenges issued, per connection, so a browser retrying on one
+        #: connection is distinguishable from twelve fresh connections each
+        #: being challenged once. Those are different stories and
+        #: ``auth_failures`` told both the same way.
+        self.challenges_per_connection: list[int] = []
         #: Hostnames the client asked the proxy to resolve, and literal
         #: addresses it resolved itself. The split is the DNS property:
         #: docs/NETWORK_ISOLATION.md §4.1 claims a proxied profile emits no
@@ -187,7 +202,8 @@ class _BaseProxy:
     def _guard(self, client: socket.socket) -> None:
         try:
             self._handle(client)
-        except Exception:  # noqa: BLE001 - a test proxy must not die on one bad client
+        except Exception as e:  # noqa: BLE001 - a test proxy must not die on one bad client
+            self.handler_errors.append(f"{type(e).__name__}: {e}")
             try:
                 client.close()
             except OSError:
@@ -201,12 +217,36 @@ class _BaseProxy:
             self._live.extend(sockets)
 
     def _connect_upstream(self, host: str, port: int) -> socket.socket:
+        """Connect to the destination from this hop's own source address.
+
+        Both steps can fail and they mean completely different things, so they
+        are reported separately. ``bind`` failing means this machine has no
+        such loopback alias -- an environment fault, nothing to do with the
+        product. ``connect`` failing means the destination refused or timed
+        out. Callers put ``self.rejected_reasons`` in their assertion message.
+        """
         upstream = socket.socket()
         # The measurement. Binding the outbound socket is what lets the
         # destination attribute the connection to this hop.
-        upstream.bind((self.source_address, 0))
+        try:
+            upstream.bind((self.source_address, 0))
+        except OSError as e:
+            upstream.close()
+            raise OSError(
+                e.errno,
+                f"bind to source {self.source_address} failed: "
+                f"{e.strerror} (errno {e.errno})",
+            ) from e
         upstream.settimeout(10)
-        upstream.connect((host, port))
+        try:
+            upstream.connect((host, port))
+        except OSError as e:
+            upstream.close()
+            raise OSError(
+                e.errno,
+                f"connect {self.source_address} -> {host}:{port} failed: "
+                f"{e.strerror or type(e).__name__} (errno {e.errno})",
+            ) from e
         upstream.settimeout(None)
         return upstream
 
@@ -256,47 +296,89 @@ class HttpConnectProxy(_BaseProxy):
         else:
             self.requested_literals.append(host)
 
-    def _handle(self, client: socket.socket) -> None:
-        request = b""
+    #: A client that keeps failing authentication is answered this many times
+    #: and then dropped. The handler used to recurse once per challenge, which
+    #: meant an unbounded stack over one keep-alive connection and, because the
+    #: recursive call re-read from scratch, any already-buffered pipelined bytes
+    #: were discarded. A loop is the same behaviour without either hazard.
+    MAX_AUTH_CHALLENGES = 8
+
+    def _read_request(self, client: socket.socket, buffered: bytes = b"") -> tuple[bytes, bytes] | None:
+        """Read one request head. Returns (head, rest) or None if the peer left.
+
+        ``buffered`` carries over bytes that the previous read consumed past
+        the end of its own request, so a client that pipelines its retry
+        behind the 407 is served rather than hung.
+        """
+        request = buffered
         while b"\r\n\r\n" not in request:
             chunk = client.recv(4096)
             if not chunk:
-                client.close()
-                return
+                return None
             request += chunk
             if len(request) > 65536:
+                return None
+        head, _, rest = request.partition(b"\r\n\r\n")
+        return head, rest
+
+    def _handle(self, client: socket.socket) -> None:
+        carry = b""
+        challenges = 0
+        while True:
+            read = self._read_request(client, carry)
+            if read is None:
+                if challenges:
+                    self.challenges_per_connection.append(challenges)
                 client.close()
                 return
-        head, _, rest = request.partition(b"\r\n\r\n")
-        lines = head.decode("latin-1").split("\r\n")
-        method, _, target = lines[0].partition(" ")
-        target = target.split(" ")[0]
-        headers = {}
-        for line in lines[1:]:
-            name, _, value = line.partition(":")
-            headers[name.strip().lower()] = value.strip()
+            head, rest = read
+            carry = b""
+            lines = head.decode("latin-1").split("\r\n")
+            method, _, target = lines[0].partition(" ")
+            target = target.split(" ")[0]
+            headers = {}
+            for line in lines[1:]:
+                name, _, value = line.partition(":")
+                headers[name.strip().lower()] = value.strip()
 
-        if self.username:
+            if not self.username:
+                break
             expected = base64.b64encode(
                 f"{self.username}:{self.password}".encode()
             ).decode()
             offered = headers.get("proxy-authorization", "")
-            if offered != f"Basic {expected}":
-                self.auth_failures += 1
-                client.sendall(
-                    b"HTTP/1.1 407 Proxy Authentication Required\r\n"
-                    b'Proxy-Authenticate: Basic realm="route-lab"\r\n'
-                    b"Content-Length: 0\r\n\r\n")
-                # A browser retries on the same connection, so keep serving.
-                return self._handle(client)
+            if offered == f"Basic {expected}":
+                break
+            self.auth_failures += 1
+            challenges += 1
+            client.sendall(
+                b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                b'Proxy-Authenticate: Basic realm="route-lab"\r\n'
+                b"Content-Length: 0\r\n\r\n")
+            if challenges >= self.MAX_AUTH_CHALLENGES:
+                # Recorded, not silent: a client stuck in a challenge loop is
+                # a finding, and dropping it quietly is how it stays invisible.
+                self.handler_errors.append(
+                    f"dropped a client after {challenges} failed auth "
+                    "attempts on one connection"
+                )
+                self.challenges_per_connection.append(challenges)
+                client.close()
+                return
+            # A browser retries on the same connection, so keep serving.
+            carry = rest
+
+        if challenges:
+            self.challenges_per_connection.append(challenges)
 
         if method.upper() == "CONNECT":
             host, _, port_text = target.rpartition(":")
             self._note_authority(host)
             try:
                 upstream = self._connect_upstream(host, int(port_text or 443))
-            except OSError:
+            except OSError as e:
                 self.rejected += 1
+                self.rejected_reasons.append(str(e.strerror or e))
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 client.close()
                 return
@@ -318,8 +400,9 @@ class HttpConnectProxy(_BaseProxy):
         self._note_authority(host)
         try:
             upstream = self._connect_upstream(host, int(port_text or 80))
-        except OSError:
+        except OSError as e:
             self.rejected += 1
+            self.rejected_reasons.append(str(e.strerror or e))
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
             client.close()
             return
@@ -394,8 +477,9 @@ class Socks5Proxy(_BaseProxy):
         port = struct.unpack("!H", client.recv(2))[0]
         try:
             upstream = self._connect_upstream(host, port)
-        except OSError:
+        except OSError as e:
             self.rejected += 1
+            self.rejected_reasons.append(str(e.strerror or e))
             client.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
             client.close()
             return
