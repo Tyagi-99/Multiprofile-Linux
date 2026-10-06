@@ -608,18 +608,35 @@ FONTCONFIG_FILE=<profile>/fonts.conf fc-list  | grep 'Liberation Serif'  # -> pr
 `tests/test_worker_realms_live.py::test_the_realm_renders_canvas_the_same_way`
 asserts that every worker realm hashes a canvas render identically to its
 page — the property that stops a site comparing its own render against a
-worker's and seeing a difference. It **fails about one run in four**:
+worker's and seeing a difference. It **fails roughly half the time**:
 
 ```
-run 1   5 failed
-run 2   5 passed
-run 3   5 passed
-run 4   5 passed
+run 1   5 failed        run 5   passed
+run 2   5 passed        run 6   5 failed
+run 3   5 passed        run 7   5 failed
+run 4   5 passed        run 8   passed
 ```
 
-Four consecutive runs of the same file, same binary, no code change between
-them. Also reproduced in CI, where it failed for `shared` and `service` with
-the page at `932073173` and both workers at `3412411582`.
+Eight runs of the same files, same binary, no code change between them. An
+earlier note here said "about one run in four" from the first four; the
+fuller series says closer to half, and the figure is corrected rather than
+left flattering.
+
+Reproduced in CI more than once. In the second run it was **not** confined to
+workers:
+
+```
+first_load   page 2314293678   iframe  3530764874   <- iframe disagrees
+new_tab      page 3530764874   service 2616201375
+restart      page 2314293678   iframe  3530764874
+```
+
+Note that the iframe's hash equals the *new tab's page* hash, and that
+`first_load` and `restart` agree with each other. So there are two stable
+renders, and which one a realm gets depends on when it was created. The
+identity gate also failed `canvasHash` **across states**, which is the
+sharper version of the same thing: a profile that renders differently on a
+new tab than on its first tab is one that re-identifies itself mid-session.
 
 **Why this is not merely a test problem.** When it fails, the workers agree
 with *each other* and disagree with the page. A page can message any of its
@@ -647,10 +664,37 @@ comment warning about the second:
 The existing dedupe (`self._attached`) covers (2) for a target id it has
 already seen, so (1) and a dedupe miss are both still open.
 
+**A fix attempted and reverted, recorded so it is not tried twice.** CI also
+logs, on the same runs:
+
+```
+CDP injection command failed — Page.reload: Not attached to an active page
+```
+
+The injector reloads a page that already existed when it attached, because
+`addScriptToEvaluateOnNewDocument` only affects the *next* document. That
+reload fails in CI — the start page's target is stale by the time it goes
+out — and the obvious reading was that the start page therefore never got the
+script, which would explain two stable renders exactly.
+
+Replacing the reload with a direct `Runtime.evaluate` of the script **made it
+worse**: 2 of 3 runs failing instead of roughly half. The reason is in the
+call it sits next to — `addScriptToEvaluateOnNewDocument` is already sent
+with `runImmediately: True`, which applies the script to the existing context
+too. So the evaluate was a *second* application, and noise over noise is
+different noise. The failing reload is therefore **redundant rather than
+load-bearing** for script application, and it is not the cause.
+
+(The unconditional `status.detail` entry claiming the page "was reloaded"
+even when the reload failed is a separate, smaller honesty problem in the
+same block, and is not fixed here.)
+
 **Next instrument:** log `workers_identified` and the attach/evaluate
 ordering per run, and correlate a failing run against them. A run that
-identified a worker *twice*, or zero times, distinguishes the two hypotheses
-immediately.
+identified a realm *twice*, or zero times, distinguishes the two hypotheses
+immediately. Given the two-stable-renders pattern and that `runImmediately`
+already covers the current context, double application somewhere remains the
+leading candidate.
 
 **Status of the gate.** The assertion is left exactly as it was — it has
 teeth and it is catching something real. It is not skipped, not relaxed and
