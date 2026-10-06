@@ -1,11 +1,24 @@
 # 06 — Roadmap
 
-**Status: the first decision on this page has not been made.** Everything
-after §2 branches on it, so the roadmap is written as a fork rather than as a
-single line. Presenting one path as settled would be the same failure this
-audit spent its length fixing — an artefact that looks complete and is not.
+> **Decided 6 October 2026: option A — a maintained Chromium-based core.**
+> The architecture, the first built slice, the patch surface derived from
+> measurement, the five gates that must be measured before any parity claim,
+> and the cost (roughly half an engineer, permanently, tracking upstream
+> stable within two weeks) are in
+> [`09_ENGINE_PROGRAM`](09_ENGINE_PROGRAM.md). **Option C's TLS-rewriting
+> local proxy is not being built**, and §4b now carries the measurement
+> rather than the assertion that killed it.
+>
+> §1 below is kept as the record of the fork and the reasoning, because the
+> cost of A does not go away by having chosen it.
 
-Where the product stands: **56 findings, 54 fixed, 2 open** — and both of the
+**Status when this page was written: the first decision had not been made.**
+Everything after §2 branched on it, so the roadmap is written as a fork rather
+than as a single line. Presenting one path as settled would have been the same
+failure this audit spent its length fixing — an artefact that looks complete
+and is not.
+
+Where the product stands: **58 findings, 56 fixed, 2 open** — and both of the
 two are open only at the part that needs something outside this repository:
 F3 at its architectural ceiling, F12 at a signing key and a host. P0, P1, P2 and P3
 are complete. The fingerprint vectors reachable from
@@ -234,7 +247,7 @@ changes the distribution model entirely.
 ## 7. Sequencing, independent of the fork
 
 ```
-DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F56
+DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F58
          └─ F3's JavaScript surface
 
 NOW      ├─ Publish the channel                  ← needs a key + a host
@@ -265,7 +278,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 54 of 56 findings
+The product is in good shape below the fingerprint layer: 56 of 58 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

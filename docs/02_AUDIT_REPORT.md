@@ -138,6 +138,8 @@ engineering draft rather than legal advice.
 | **F54** | ✅ **High** | Fingerprint | **CSS `device-width` reported the real display** while `screen.*` reported the claim — every profile without a device preset | done |
 | **F55** | ✅ **High** | Fingerprint | **The page reported a timezone this engine cannot report** — `Asia/Kolkata` is not in `Intl.supportedValuesOf('timeZone')`, and every worker said `Asia/Calcutta` | done |
 | **F56** | ✅ **High** | Network | **Authenticated SOCKS5 launched green into a browser that could not load a page** — Chromium does not implement RFC 1929 | done |
+| **F57** | ✅ **Medium** | Network | **`--disable-ipv6` is a no-op on Chromium 151** and `NETWORK_ISOLATION.md` called it the mechanism — the protection holds, by a different route | done |
+| **F58** | ✅ **Medium** | API | **Every refused launch answered `500`**, so monitoring saw server errors during normal operation and clients retried what could never succeed | done |
 
 ---
 
@@ -2761,6 +2763,59 @@ a fact, which is the recurring shape of this audit.
 
 Both affect any headless server or VM with a virtual display, which is a large
 share of the machines this product runs on unattended. 9 tests.
+
+---
+
+### F57–F58 — the parity pass of 6 October 2026
+
+**F57 — `--disable-ipv6` does nothing, and the document called it the
+mechanism.** The launcher emitted it for every proxied profile and
+[`NETWORK_ISOLATION`](NETWORK_ISOLATION.md) §4.2 described it as what
+"disables IPv6 networking within the profile's network stack". Measured
+against a destination bound to the host's own **global** IPv6 address — not
+`::1`, so Chrome's loopback bypass cannot be the explanation — with a
+deliberately nonexistent flag as a control:
+
+| configuration | IPv6 destination reached |
+|---|---|
+| stock, no flag | yes |
+| stock, `--disable-ipv6` | **yes** |
+| stock, a flag that does not exist | yes |
+
+The flag has exactly the effect of a flag that is not there. Removed, because
+a no-op that advertises a protection is worse than no flag.
+
+**The protection holds**, by the same route as the DNS one: Chromium hands an
+IPv6 destination to the proxy rather than connecting to it. Measured with a
+proxied profile and an IPv4-only proxy, so the outcomes are distinguishable —
+the proxy received a `CONNECT` for the bracketed IPv6 literal and the
+destination saw **zero** direct hits.
+
+This is the **fourth** instance of one pattern: F49's `switch-all-direct`,
+F50's `prefer_sandbox`, the `--host-resolver-rules` correction, and this.
+Each time the *behaviour* claim was true, the *mechanism* cited was fiction,
+and the fiction sat in a document an operator would rely on. It is worth
+naming as a class, because the next one will look like the last four.
+
+**F58 — a refusal is not a server error.** `POST /api/profiles/<id>/launch`
+answered `500` for every unsuccessful launch, including the deliberate,
+documented refusals: a route that could not be resolved, a dead proxy on a
+fail-closed profile, a route this engine cannot use (F56), the concurrency
+cap. Two concrete costs: monitoring sees server errors during normal
+operation, and a client's retry logic retries something that can never
+succeed. The route *one line above* already used `409` for
+`consistency_blocked`, so the pattern was established and this path had not
+followed it.
+
+Now `409` for a decision, `404` for a missing profile, `500` only for a
+genuine fault. Both SDKs map a `409` on launch to a distinct `LaunchBlocked`
+error. A test derives the refusal list from the launcher's own source, so a
+new error code cannot be added without being classified as a refusal or a
+fault — it fails until someone decides.
+
+Found while writing the SDK tests against the real routes rather than a mock,
+which is the argument for doing that: a mocked client proves the client agrees
+with the author's idea of the API.
 
 ---
 
