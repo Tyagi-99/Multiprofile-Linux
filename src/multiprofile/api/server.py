@@ -135,6 +135,44 @@ def static_dir() -> Path:
     raise FileNotFoundError("static UI not found")
 
 
+#: Launch outcomes that are decisions rather than faults.
+#:
+#: Every one of these is the product working as designed and refusing: a
+#: route that could not be resolved, a dead proxy on a fail-closed profile, a
+#: route this engine cannot use (F56), the concurrency cap, a profile that is
+#: not there, and a GitHub identity used where a network route was wanted.
+#: They were all answered with **500**, which is wrong in a way that matters:
+#: monitoring sees server errors during normal operation, and a client's
+#: retry logic retries something that can never succeed. The route one line
+#: above this already used 409 for `consistency_blocked`, so the pattern was
+#: established and this path simply did not follow it.
+_LAUNCH_REFUSALS = frozenset({
+    "route_unresolved",
+    "route_unsupported",
+    "proxy_health_failed",
+    "concurrency_limit",
+    "github_not_a_network_route",
+    "consistency_blocked",
+})
+
+
+def _launch_status_code(result: dict) -> int:
+    """200 for a launch, 409 for a refusal, 500 for a fault, 404 for absent.
+
+    A refusal is not a server error. The distinction is what lets a caller --
+    and a dashboard -- tell "this profile cannot launch until you fix
+    something" from "the server broke".
+    """
+    if result.get("ok"):
+        return 200
+    codes = set(result.get("errors") or ())
+    if "profile_not_found" in codes:
+        return 404
+    if codes & _LAUNCH_REFUSALS:
+        return 409
+    return 500
+
+
 def _secrets_status() -> dict:
     """Secrets-at-rest state for /api/health. Never raises."""
     try:
@@ -1063,8 +1101,7 @@ def create_app() -> Flask:
             "running" if result.get("ok") else "error",
         )
         audit_log("launch", profile_id=profile_id, ok=bool(result.get("ok")), detail=result.get("error"))
-        code = 200 if result.get("ok") else 500
-        return jsonify(result), code
+        return jsonify(result), _launch_status_code(result)
 
     @app.post("/api/profiles/<profile_id>/stop")
     def profiles_stop(profile_id: str):
