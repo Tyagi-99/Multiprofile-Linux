@@ -34,7 +34,14 @@ def test_a_healthy_installation_reports_no_blocking_problems():
 
     report = run_doctor()
     assert report.ok, [f.to_dict() for f in report.blocking]
-    assert report.facts.get("engine", {}).get("version"), report.facts
+    # The engine FACT must be present; its version must not be *required*.
+    # On a runner whose browser will not answer `--version`, the doctor
+    # correctly reports `unverified` and does not block -- which is the
+    # doctor working. Asserting a version string here made the test an
+    # assertion about the environment, and it failed on Python 3.11's runner
+    # while passing on 3.12's and 3.13's for no reason to do with the code.
+    engine = report.facts.get("engine") or {}
+    assert "version" in engine and engine.get("status"), report.facts
 
 
 def test_the_report_carries_the_facts_an_operator_would_ask_for():

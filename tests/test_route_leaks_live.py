@@ -413,7 +413,11 @@ def test_a_download_follows_the_proxy_route(xdg, monkeypatch):
             "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
         }, files.url)
         try:
-            assert files.sources_for("/page") == ["127.0.0.2"], (
+            # A set: the page is fetched more than once (the navigation and
+            # a favicon, and the lab proxy forwards keep-alive requests
+            # verbatim so the path spelling varies). What matters is that
+            # every one of them came from the proxy.
+            assert set(files.sources_for("/page")) == {"127.0.0.2"}, (
                 "the page itself did not go through the proxy, so the "
                 f"download result would mean nothing: {files.requests}"
             )

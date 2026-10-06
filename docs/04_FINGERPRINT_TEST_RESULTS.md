@@ -600,6 +600,65 @@ FONTCONFIG_FILE=<profile>/fonts.conf fc-list  | grep 'Liberation Serif'  # -> pr
 
 ---
 
+### 11.6 Open: worker canvas noise agrees with its page only *most* of the time
+
+**Open, intermittent, and more serious than a flaky test.** Found 6 October
+2026 while chasing a CI failure.
+
+`tests/test_worker_realms_live.py::test_the_realm_renders_canvas_the_same_way`
+asserts that every worker realm hashes a canvas render identically to its
+page — the property that stops a site comparing its own render against a
+worker's and seeing a difference. It **fails about one run in four**:
+
+```
+run 1   5 failed
+run 2   5 passed
+run 3   5 passed
+run 4   5 passed
+```
+
+Four consecutive runs of the same file, same binary, no code change between
+them. Also reproduced in CI, where it failed for `shared` and `service` with
+the page at `932073173` and both workers at `3412411582`.
+
+**Why this is not merely a test problem.** When it fails, the workers agree
+with *each other* and disagree with the page. A page can message any of its
+workers, so a profile in that state answers two different canvas
+fingerprints for one browser — which is the contradiction the noise exists to
+prevent, appearing intermittently. A site that samples both does not care
+that it only happens sometimes.
+
+**Ruled out: the shared/service-worker UA override added for F53.** With that
+send disabled the canvas tests still pass and still flake, and the failure
+predates the change — the override sets `Network.setUserAgentOverride` and
+touches nothing in the render path.
+
+**Hypothesis, untested, recorded as a hypothesis.** The worker identity
+script is evaluated over CDP while the worker is frozen by
+`waitForDebuggerOnStart`, and it is that script which applies the canvas
+noise. Two races could produce this, and `cdp_inject.py` already carries a
+comment warning about the second:
+
+1. a worker that begins executing before the evaluate lands gets **no**
+   noise;
+2. a worker attached twice gets the script **twice**, and noise applied to an
+   already-noised buffer is different noise.
+
+The existing dedupe (`self._attached`) covers (2) for a target id it has
+already seen, so (1) and a dedupe miss are both still open.
+
+**Next instrument:** log `workers_identified` and the attach/evaluate
+ordering per run, and correlate a failing run against them. A run that
+identified a worker *twice*, or zero times, distinguishes the two hypotheses
+immediately.
+
+**Status of the gate.** The assertion is left exactly as it was — it has
+teeth and it is catching something real. It is not skipped, not relaxed and
+not marked flaky, because the thing it catches is a genuine intermittent
+contradiction rather than test noise.
+
+---
+
 ### 11.4 What this section does not establish
 
 - **One host, one profile, one route.** No proxy, no device preset, no second

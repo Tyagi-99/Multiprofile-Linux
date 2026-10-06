@@ -142,6 +142,8 @@ class ClientHello:
             "supportedGroups": self.supported_groups,
             "ecPointFormats": self.ec_point_formats,
             "signatureAlgorithms": self.signature_algorithms,
+            "signatureAlgorithmsNoGrease": [
+                v for v in self.signature_algorithms if not is_grease(v)],
             "alpn": list(self.alpn),
             "serverName": self.server_name,
             "compressionMethods": self.compression_methods,
@@ -311,8 +313,13 @@ def compare_hellos(product: ClientHello, reference: ClientHello) -> dict[str, An
             live(product.cipher_suites), live(reference.cipher_suites))
     compare("supportedGroups (ordered, GREASE stripped)",
             live(product.supported_groups), live(reference.supported_groups))
-    compare("signatureAlgorithms (ordered)", product.signature_algorithms,
-            reference.signature_algorithms)
+    # GREASE is in signature_algorithms as well. Missing it here made the
+    # comparison report a difference on a CI runner where the two browsers
+    # happened to roll different reserved values -- the third place this
+    # class of bug turned up in one file.
+    compare("signatureAlgorithms (ordered, GREASE stripped)",
+            live(product.signature_algorithms),
+            live(reference.signature_algorithms))
     # Unordered: shuffled per connection by design. Comparing the order here
     # would report a difference between two runs of the same browser.
     compare("extensions (set, GREASE stripped)",
