@@ -449,6 +449,24 @@ def create_app() -> Flask:
     register_request_guard(app)
     register_auth(app)
 
+    @app.get("/api/doctor")
+    def api_doctor():
+        """The same diagnosis as `multiprofile --doctor`, for the console.
+
+        One place rather than four: the information was spread across the
+        health endpoint's identity faults, its permission faults, the
+        identity matrix, the engine verdict and each profile's own route
+        resolution, and an operator debugging a profile that would not load a
+        page had to know which to read and in what order.
+        """
+        from ..doctor import run_doctor
+
+        report = run_doctor()
+        # 200 either way: the report IS the answer, and a non-200 would make
+        # a client treat a successful diagnosis of a broken install as a
+        # failed request.
+        return jsonify(report.to_dict())
+
     @app.get("/api/health")
     def health():
         try:
