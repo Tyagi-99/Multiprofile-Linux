@@ -396,6 +396,76 @@ function WebStoreDialog({
   );
 }
 
+/**
+ * Developer Mode is a BROWSER setting. This product does not reimplement it
+ * and does not add a toggle that changes nothing. The card names the two real
+ * mechanisms and wires both: the browser's own page, and the per-assignment
+ * enabled switch that genuinely decides whether --load-extension carries a
+ * payload on the next launch.
+ */
+function DeveloperModeCard({
+  profiles,
+}: {
+  profiles: SelectableProfile[];
+}) {
+  const [profileId, setProfileId] = useState("");
+  const running = profiles.filter((p) => p.isRunning);
+
+  const open = async () => {
+    try {
+      await post(`/api/profiles/${profileId}/extensions-page`, {});
+      toast.success("Opened chrome://extensions in that profile.");
+    } catch (e) {
+      toast.error(apiMessage(e, "Could not open the page."));
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <p className="text-sm font-medium text-ink-1">Developer Mode</p>
+        <p className="mt-1 text-xs text-ink-3">
+          Developer Mode and <em>Load unpacked</em> belong to the browser, and
+          this console does not reimplement them. Open a profile&apos;s own
+          extensions page to use them there.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Select
+            value={profileId}
+            onChange={(e) => setProfileId(e.target.value)}
+            aria-label="Profile for chrome://extensions"
+            className="w-56"
+          >
+            <option value="">Choose a running profile…</option>
+            {running.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name ?? p.id}
+              </option>
+            ))}
+          </Select>
+          <Button variant="secondary" onClick={open} disabled={!profileId}>
+            Open chrome://extensions
+          </Button>
+          {running.length === 0 && (
+            <span className="text-xs text-ink-3">
+              No profile is running — launch one to open its extensions page.
+            </span>
+          )}
+        </div>
+        <p className="mt-3 text-xs text-ink-3">
+          Application-managed loading is the other half: whether a profile is
+          launched with <code>--load-extension</code> is decided by its
+          assignments, and the <em>enabled</em> switch on each assignment
+          changes that for the next launch. Assigning an extension also turns
+          anti-detect exclusivity off for that profile, because{" "}
+          <code>--disable-extensions</code> overrides{" "}
+          <code>--load-extension</code>. The launch notes say so per profile.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function ExtensionsPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
@@ -495,6 +565,7 @@ export function ExtensionsPage() {
   return (
     <div className="grid gap-4">
       {cap && <CapabilityBanner cap={cap} />}
+      <DeveloperModeCard profiles={profiles ?? []} />
 
       <div className="flex flex-wrap items-center gap-2">
         <Input
