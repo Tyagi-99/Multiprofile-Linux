@@ -58,26 +58,22 @@ if not _CAP.unpacked:
     pytest.skip(f"this browser cannot load unpacked extensions: {_CAP.reason}",
                 allow_module_level=True)
 
-# Reuse the site + probe helpers from the first live suite rather than
-# duplicating them; they are the measurement, and two copies would drift.
-from tests.test_extension_live import (  # noqa: E402
+# The measurement helpers live in `_extension_lab`, imported the way
+# `_route_lab` is. A `from tests.test_extension_live import ...` resolved
+# locally and FAILED in CI, where PYTHONPATH is `src` and `tests` is not a
+# package -- which silently removed this entire twelve-test suite from a CI
+# run without anything going red.
+from _extension_lab import (  # noqa: E402
     _evaluate,
     _extension_storage,
-    _read_marker,
     _Site,
 )
-
-_MARKER_B = """
-JSON.stringify({
-  marker: !!document.getElementById('mp-test-ext-b-marker'),
-  id: (document.getElementById('mp-test-ext-b-marker')||{dataset:{}}).dataset.extid || null,
-  version: (document.getElementById('mp-test-ext-b-marker')||{dataset:{}}).dataset.version || null
-})
-"""
-
-
-def _read_marker_b(port: int) -> dict:
-    return _evaluate(port, _MARKER_B)
+from _extension_lab import (
+    read_marker as _read_marker,
+)
+from _extension_lab import (
+    read_marker_b as _read_marker_b,
+)
 
 
 def _zip_of(source: Path, out: Path, version: str | None = None) -> Path:

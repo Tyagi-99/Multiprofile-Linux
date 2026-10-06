@@ -32,6 +32,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..engine import find_browser_binary, parse_version
@@ -127,12 +128,32 @@ def _probe(binary: str) -> tuple[str | None, str | None, str]:
     return brand, parse_version(raw), raw
 
 
-def detect(binary: str | None = None) -> BrowserCapability:
+#: Cached probes, keyed on the binary's identity rather than on wall-clock
+#: time. See ``detect``.
+_cache: dict[tuple[str, int, int], BrowserCapability] = {}
+
+
+def reset_cache() -> None:
+    """Forget every probe. For tests, and for an explicit operator refresh."""
+    _cache.clear()
+
+
+def detect(binary: str | None = None, *, refresh: bool = False) -> BrowserCapability:
     """Ask the binary this machine actually launches what it supports.
 
-    No caching. A capability answer that is wrong is worse than one that costs
-    5 ms, and the operator can change ``MULTIPROFILE_ENGINE_BINARY`` or install
-    a different browser between two launches.
+    Cached on ``(path, mtime, size)``. The first version of this said "no
+    caching -- a capability answer that is wrong is worse than one that costs
+    5 ms", which was the right instinct about staleness and the wrong
+    conclusion, because it put a subprocess on the launch path:
+
+        find_browser_binary  (before)   0.16 ms
+        find_chrome          (after)   25.09 ms
+
+    25 ms per launch, for an answer that only changes when the binary does.
+    Keying the cache on the binary's own identity answers the staleness
+    objection properly -- replace or upgrade the browser and the key changes,
+    so it is re-probed -- while a pin pointing somewhere else is a different
+    path and therefore a different key. ``refresh=True`` forces a re-probe.
     """
     resolved = binary or find_browser_binary()
     if not resolved:
@@ -143,53 +164,67 @@ def detect(binary: str | None = None) -> BrowserCapability:
             "Install Chromium, or set MULTIPROFILE_ENGINE_BINARY to a browser binary.",
         )
 
+    key: tuple[str, int, int] | None = None
+    try:
+        stat = Path(resolved).stat()
+        key = (resolved, int(stat.st_mtime), int(stat.st_size))
+    except OSError:
+        key = None          # cannot identify it, so do not cache the answer
+    if key is not None and not refresh and key in _cache:
+        return _cache[key]
+
     brand, version, raw = _probe(resolved)
     major = int(version.split(".")[0]) if version else None
 
+    def _remember(cap: BrowserCapability) -> BrowserCapability:
+        if key is not None:
+            _cache[key] = cap
+        return cap
+
     if brand is None:
-        return BrowserCapability(
+        return _remember(BrowserCapability(
             resolved, None, version, major, False, False,
             f"{resolved} did not identify itself as a Chromium-family browser "
             f"({raw[:120]!r}), so its extension support is unknown. Refusing to "
             f"guess.",
             "Set MULTIPROFILE_ENGINE_BINARY to a Chromium or Chrome for Testing build.",
             raw=raw,
-        )
+        ))
 
     if brand in _UNPACKED_OK_BRANDS:
-        return BrowserCapability(
+        return _remember(BrowserCapability(
             resolved, brand, version, major, True, False,
             f"{brand} {version or '(unknown version)'} accepts --load-extension. "
             f"Verified on this host by loading an unpacked MV3 fixture and "
             f"reading the marker its content script wrote into a page.",
             raw=raw,
-        )
+        ))
 
     if brand == "google-chrome":
         if major is not None and major >= CHROME_LOAD_EXTENSION_REMOVED_IN:
-            return BrowserCapability(
+            return _remember(BrowserCapability(
                 resolved, brand, version, major, False, False,
                 f"Google Chrome {version} removed --load-extension "
                 f"(branded builds, {CHROME_LOAD_EXTENSION_REMOVED_IN}+). "
                 f"Unpacked extensions cannot be loaded from the command line.",
                 _CHROME_REMEDIATION,
                 raw=raw,
-            )
-        return BrowserCapability(
+            ))
+        return _remember(BrowserCapability(
             resolved, brand, version, major, True, False,
             f"Google Chrome {version} is below {CHROME_LOAD_EXTENSION_REMOVED_IN}, "
             f"where --load-extension still worked. Not verified on this host.",
             raw=raw,
-        )
+        ))
 
     # Brave, Edge, Opera, Vivaldi: Chromium-based and they generally keep the
     # flag, but this product has not measured any of them, and an unverified
     # yes is the thing this package exists not to do.
-    return BrowserCapability(
+    return _remember(BrowserCapability(
         resolved, brand, version, major, False, False,
         f"{brand} {version or ''} is Chromium-based but unpacked loading has "
         f"not been verified against it by this product, so it is not claimed.",
         "Set MULTIPROFILE_ENGINE_BINARY to a Chromium or Chrome for Testing build "
         "to use automated per-profile loading.",
         raw=raw,
-    )
+    ))

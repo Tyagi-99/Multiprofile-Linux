@@ -18,11 +18,8 @@ cannot load an unpacked extension at all.
 from __future__ import annotations
 
 import json
-import threading
 import time
-import urllib.request
 import zipfile
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -46,6 +43,14 @@ pytest.importorskip("websocket")
 if not _chrome_available():
     pytest.skip("Chrome is not installed", allow_module_level=True)
 
+from _extension_lab import (  # noqa: E402
+    _extension_storage,
+    _Site,
+)
+from _extension_lab import (
+    read_marker as _read_marker,
+)
+
 from multiprofile.extensions.capability import detect as _detect  # noqa: E402
 
 _CAP = _detect()
@@ -54,91 +59,6 @@ if not _CAP.unpacked:
         f"this browser cannot load unpacked extensions: {_CAP.reason}",
         allow_module_level=True,
     )
-
-
-class _Site:
-    """A local page the content script is allowed to touch."""
-
-    def __init__(self) -> None:
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def do_GET(self):  # noqa: N802 - handler API
-                body = b"<!doctype html><title>ext</title><body>page"
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *a):
-                pass
-
-        self._srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self._srv.server_address[1]}/e"
-
-    def close(self) -> None:
-        self._srv.shutdown()
-        self._srv.server_close()
-
-
-def _page_target(port: int, timeout: float = 25.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/json", headers={"Host": f"localhost:{port}"})
-            targets = json.loads(urllib.request.urlopen(req, timeout=3).read())
-            page = next((t for t in targets if t.get("type") == "page"
-                         and "127.0.0.1" in (t.get("url") or "")), None)
-            if page:
-                return page
-        except Exception:  # noqa: BLE001 - the browser may not be up yet
-            pass
-        time.sleep(0.4)
-    return None
-
-
-def _evaluate(port: int, expression: str, *, await_promise: bool = False,
-              timeout: float = 30.0):
-    import websocket
-
-    page = _page_target(port, timeout=timeout)
-    if page is None:
-        return {"error": "no page target"}
-    ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=timeout,
-                                     suppress_origin=True)
-    try:
-        ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {
-            "expression": expression, "awaitPromise": await_promise,
-            "returnByValue": True}}))
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            msg = json.loads(ws.recv())
-            if msg.get("id") == 1:
-                value = ((msg.get("result") or {}).get("result") or {}).get("value")
-                return json.loads(value) if value else {"error": "no value"}
-    finally:
-        ws.close()
-    return {"error": "timeout"}
-
-
-#: What the page can see about the extension without any extension API.
-_MARKER = """
-JSON.stringify({
-  marker: !!document.getElementById('mp-test-ext-marker'),
-  id: (document.getElementById('mp-test-ext-marker')||{dataset:{}}).dataset.extid || null,
-  version: (document.getElementById('mp-test-ext-marker')||{dataset:{}}).dataset.version || null
-})
-"""
-
-
-def _read_marker(port: int) -> dict:
-    return _evaluate(port, _MARKER)
 
 
 def _zip_fixture(tmp_path: Path, name: str = "mp-test-ext.zip",
@@ -297,91 +217,6 @@ def test_the_unselected_profile_keeps_exclusivity(env, tmp_path):
 
 
 
-
-
-def _extension_storage(port: int, ext_id: str, *, write: dict | None = None,
-                       timeout: float = 40.0):
-    """Read or write ``chrome.storage.local`` from inside the extension itself.
-
-    Driven through the extension's own popup page over CDP, because that is a
-    real extension context: a web page cannot touch ``chrome.storage``, and
-    faking it from the page would test nothing.
-
-    The readiness poll is not decoration. A freshly opened extension page
-    answers ``Runtime.evaluate`` before Blink has bound the extension APIs
-    into it, so the first evaluation raised "cannot read properties of
-    undefined (reading 'local')" and the write silently did nothing while the
-    read appeared to work -- which looked exactly like storage not persisting.
-    """
-    import websocket
-
-    popup = f"chrome-extension://{ext_id}/popup.html"
-    deadline = time.time() + timeout
-    target = None
-    while time.time() < deadline and target is None:
-        try:
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{port}/json/new?{popup}",
-                headers={"Host": f"localhost:{port}"}, method="PUT")
-            target = json.loads(urllib.request.urlopen(req, timeout=5).read())
-        except Exception:  # noqa: BLE001 - retry while the browser settles
-            time.sleep(0.4)
-    if target is None:
-        return {"error": "could not open the extension popup"}
-
-    try:
-        ws = websocket.create_connection(
-            target["webSocketDebuggerUrl"], timeout=timeout, suppress_origin=True)
-    except Exception as e:  # noqa: BLE001 - reported, not raised
-        return {"error": f"could not attach to the popup: {e}"}
-
-    next_id = [0]
-
-    def ev(expression: str, await_promise: bool = False):
-        next_id[0] += 1
-        mid = next_id[0]
-        ws.send(json.dumps({"id": mid, "method": "Runtime.evaluate", "params": {
-            "expression": expression, "awaitPromise": await_promise,
-            "returnByValue": True}}))
-        stop = time.time() + timeout
-        while time.time() < stop:
-            msg = json.loads(ws.recv())
-            if msg.get("id") == mid:
-                return msg
-        return {"error": "timeout"}
-
-    try:
-        # Wait for the extension APIs to exist in this realm.
-        ready = False
-        stop = time.time() + timeout
-        while time.time() < stop:
-            msg = ev("typeof chrome !== 'undefined' && !!(chrome.storage "
-                     "&& chrome.storage.local)")
-            value = ((msg.get("result") or {}).get("result") or {}).get("value")
-            if value is True:
-                ready = True
-                break
-            time.sleep(0.3)
-        if not ready:
-            return {"error": "chrome.storage never became available in the popup"}
-
-        if write is not None:
-            msg = ev(
-                "new Promise(r => chrome.storage.local.set(" + json.dumps(write)
-                + ", () => chrome.storage.local.get(null,"
-                " a => r(JSON.stringify(a)))))", await_promise=True)
-        else:
-            msg = ev("new Promise(r => chrome.storage.local.get(null,"
-                     " a => r(JSON.stringify(a))))", await_promise=True)
-        res = (msg.get("result") or {}).get("result") or {}
-        if res.get("value"):
-            return json.loads(res["value"])
-        return {"error": json.dumps(msg)[:300]}
-    finally:
-        try:
-            ws.close()
-        except Exception:  # noqa: BLE001,S110 - teardown
-            pass
 
 
 def test_extension_storage_is_isolated_per_profile(env, tmp_path):
