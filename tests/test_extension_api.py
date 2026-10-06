@@ -553,3 +553,18 @@ def test_an_unscoped_update_reports_the_fleet_it_touched(client, tmp_path):
     assert body["previousVersion"] == "0.9.0"
     assert body["scope"] == "all-assignments"
     assert "no per-profile version" in body["note"]
+
+
+def test_an_unsupported_runtime_refusal_is_a_409_not_a_500(client, tmp_path,
+                                                           monkeypatch):
+    """A decision the product made deliberately must not look like a crash.
+
+    F58's gate caught this code being unclassified, which would have answered
+    500. The operator can act on it -- pin a capable runtime, or unassign the
+    extensions -- so it is a refusal.
+    """
+    from multiprofile.api.server import _LAUNCH_REFUSALS, _launch_status_code
+
+    assert "extension_runtime_unsupported" in _LAUNCH_REFUSALS
+    assert _launch_status_code(
+        {"ok": False, "errors": ["extension_runtime_unsupported"]}) == 409

@@ -155,6 +155,11 @@ _LAUNCH_REFUSALS = frozenset({
     "concurrency_limit",
     "github_not_a_network_route",
     "consistency_blocked",
+    # The selected browser cannot load the extensions this profile has
+    # assigned. A refusal rather than a fault: the operator can pin a capable
+    # runtime or unassign the extensions, and the message names both. Answering
+    # 500 would present a decision the product made deliberately as a crash.
+    "extension_runtime_unsupported",
 })
 
 
