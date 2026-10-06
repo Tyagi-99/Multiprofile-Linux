@@ -364,6 +364,83 @@ def find_chrome() -> str:
 # Extension preparation
 # ---------------------------------------------------------------------------
 
+def _assigned_extension_payloads(profile_id: str) -> list[tuple[str, str]]:
+    """``(ext_uuid, payload_path)`` for this profile's enabled extensions.
+
+    Imported lazily and guarded: the extension manager is an optional part of
+    the control plane, and a profile must still launch if it is unavailable or
+    if its tables have not been created yet. A launch that fails because the
+    extension feature is broken would be a worse bug than an extension that
+    does not load.
+    """
+    try:
+        from ..extensions.manager import payload_paths_for_profile
+
+        return payload_paths_for_profile(profile_id)
+    except Exception as e:  # noqa: BLE001 - never block a launch over this
+        log.warning("extension assignments unavailable for %s: %s", profile_id, e)
+        return []
+
+
+def _observe_extension_ids(debug_port: int, timeout_s: float = 6.0) -> list[str]:
+    """Extension IDs the browser itself reports, read off its target list.
+
+    An MV3 extension with a service worker shows up as a target whose URL is
+    ``chrome-extension://<id>/...``. Asking the browser is the point: a path
+    on a command line and a row in a database both say what we intended, and
+    neither says what happened.
+
+    Polled rather than read once, because the extension's service worker
+    starts asynchronously after the browser does.
+    """
+    import json as _json
+    import urllib.request as _url
+
+    deadline = time.time() + timeout_s
+    seen: set[str] = set()
+    while time.time() < deadline:
+        try:
+            req = _url.Request(
+                f"http://127.0.0.1:{debug_port}/json",
+                headers={"Host": f"localhost:{debug_port}"},
+            )
+            targets = _json.loads(_url.urlopen(req, timeout=2).read())
+        except Exception:  # noqa: BLE001 - the browser may not be listening yet
+            time.sleep(0.3)
+            continue
+        for t in targets:
+            url = str(t.get("url") or "")
+            if url.startswith("chrome-extension://"):
+                ext_id = url[len("chrome-extension://"):].split("/")[0]
+                if ext_id:
+                    seen.add(ext_id)
+        if seen:
+            return sorted(seen)
+        time.sleep(0.3)
+    return sorted(seen)
+
+
+def _verify_assigned_extensions(
+    profile_id: str, debug_port: int, assigned: list[tuple[str, str]]
+) -> dict[str, Any]:
+    """Mark the assignments applied, then reconcile against the browser."""
+    try:
+        from ..extensions.manager import mark_applied, verify_profile
+
+        mark_applied(profile_id, [u for u, _ in assigned])
+        observed = _observe_extension_ids(debug_port)
+        results = verify_profile(profile_id, observed)
+        return {
+            "assigned": len(assigned),
+            "observedIds": observed,
+            "results": [r.to_dict() for r in results],
+            "verified": sum(1 for r in results if r.ok),
+        }
+    except Exception as e:  # noqa: BLE001 - reporting must not fail a launch
+        log.warning("extension verification failed for %s: %s", profile_id, e)
+        return {"assigned": len(assigned), "error": str(e)}
+
+
 def _reconcile_with_preset(
     fingerprint: dict[str, Any], preset_cfg: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1325,7 +1402,35 @@ def launch_profile(
     # Chromium 141: the canvas hook's source contained "copy = null" twice, so
     # the noise was applied twice and the rendered fingerprint was neither the
     # one the config asked for nor reproducible across engines.
-    if settings.allow_webstore_extensions:
+    #
+    # A profile with extensions ASSIGNED is the third case, and it cannot have
+    # both. Measured on Chromium 151 with an unpacked MV3 fixture, using the
+    # marker its content script writes into a page as the evidence:
+    #
+    #     --load-extension=<dir>                           ran
+    #     --load-extension + --disable-extensions          did NOT run
+    #     --load-extension + --disable-extensions-except   ran
+    #
+    # So `--disable-extensions` wins, and a profile that is supposed to load an
+    # extension has to be launched without it. That is a real change to the
+    # profile's posture rather than a detail: an extension is enumerable, it
+    # can inject into pages, and exclusivity existed to stop exactly that. The
+    # note says so on every launch it applies to, per profile, so an operator
+    # reading the launch record can see which profiles traded exclusivity for
+    # an extension and which did not.
+    assigned_extensions = _assigned_extension_payloads(profile_id)
+    if assigned_extensions:
+        paths = ",".join(p for _, p in assigned_extensions)
+        cmd.append(f"--load-extension={paths}")
+        # Pinning the allow-list to exactly our payloads means a Web Store
+        # extension left in the profile directory by a previous run does not
+        # silently come back with it.
+        cmd.append(f"--disable-extensions-except={paths}")
+        notes.append(
+            f"Extensions ON for this profile: {len(assigned_extensions)} assigned "
+            f"(--load-extension). Anti-detect exclusivity is OFF while they load."
+        )
+    elif settings.allow_webstore_extensions:
         notes.append("Web Store extensions allowed (exclusivity OFF — opt-in only)")
     else:
         cmd.append("--disable-extensions")
@@ -1672,11 +1777,20 @@ def launch_profile(
         },
     )
 
+    # Extensions: record that the launch CARRIED them, then ask the browser
+    # what it actually loaded. Those are different facts and the second one is
+    # the only one allowed to say "installed" -- see extensions/manager.py.
+    extension_report: dict[str, Any] = {}
+    if assigned_extensions:
+        extension_report = _verify_assigned_extensions(
+            profile_id, debug_port, assigned_extensions)
+
     out: dict[str, Any] = {
         "ok": True,
         "pid": proc.pid,
         "url": start,
         "userDataDir": str(user_dir),
+        "extensions": extension_report,
         # The identity-script SOURCE, not a loaded extension — nothing is
         # staged per profile any more.
         "extension": str(ext),
