@@ -316,6 +316,55 @@
     return x - Math.floor(x);
   }
 
+  // Does this realm already carry the profile's identity?
+  //
+  // Canvas noise is the one spoof applied ONLY by this script and never by
+  // the parent's iframe walk in section 8, which makes its presence an exact
+  // answer to "has a copy of this script already run here". That is what the
+  // question needs, and there is nothing else left to ask: section 0's F3 fix
+  // removed every own property that used to give a hook away, deliberately,
+  // so a hook built to be indistinguishable from a native one cannot find
+  // itself by looking.
+  //
+  // So ask the behaviour. Draw a known opaque value where pixelHash says a
+  // nudge lands, read it back, and see whether something already moved it.
+  // Nothing here is observable to a page that was not already free to run
+  // the same three lines.
+  //
+  // Two defects were closed by asking this (see docs/04 section 11.6 and
+  // 11.7). The canvas block used to guard itself with
+  // `hasOwnProperty.call(toDataURL, 'toString')`, which the F3 fix silently
+  // made constant false, and the page then applied the noise twice on some
+  // launches. And section 8 re-applied every spoof to an iframe that already
+  // had its own copy, which double-nudged the three ADDITIVE surfaces --
+  // audio, client rects and WebGL readPixels -- so a page disagreed with its
+  // own frame every time.
+  function identityAlreadyApplied(scope) {
+    try {
+      const doc = scope && scope.document;
+      if (!doc || !doc.createElement) return false;
+      let px = -1, py = -1;
+      for (let y = 0; y < 16 && px < 0; y++) {
+        for (let x = 0; x < 16; x++) {
+          if ((pixelHash(x, y) & 15) === 0) { px = x; py = y; break; }
+        }
+      }
+      if (px < 0) return false;   // no noise pixel in 256: nothing to test
+      const probe = doc.createElement('canvas');
+      probe.width = 16;
+      probe.height = 16;
+      const pctx = probe.getContext('2d', { willReadFrequently: true });
+      if (!pctx) return false;
+      pctx.fillStyle = 'rgb(128,128,128)';
+      pctx.fillRect(0, 0, 16, 16);
+      const d = pctx.getImageData(0, 0, 16, 16).data;
+      const i = (py * 16 + px) * 4;
+      return d[i] !== 128 || d[i + 1] !== 128 || d[i + 2] !== 128;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function pixelHash(x, y) {
     let h = Math.imul(PROFILE_SEED ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(x + 1, 0xc2b2ae35) ^ Math.imul(y + 1, 0x27d4eb2f);
     h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
@@ -544,11 +593,34 @@
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
     const origToBlob = HTMLCanvasElement.prototype.toBlob;
 
-    // A hooked function carries its own toString (see makeNative); a native one does not.
-    // If this script lands twice in one page (extension + CDP), the second copy must not stack.
-    const alreadyShielded = Object.prototype.hasOwnProperty.call(origToDataURL, 'toString');
-
-    if (!alreadyShielded) {
+    // Has the noise already been installed in this realm?
+    //
+    // This used to read `hasOwnProperty.call(origToDataURL, 'toString')`, on
+    // the reasoning that a hooked function carries an own `toString` and a
+    // native one does not. That was true when it was written. Section 0's F3
+    // fix then moved the claimed source into a WeakMap *precisely so that
+    // nothing is written onto the hooked function* -- which left this check
+    // reading a property that no longer exists, constant false, and the guard
+    // silently dead.
+    //
+    // Measured on this host afterwards, with the noise mask read back off a
+    // uniform grey and compared against the seed's predicted mask: on some
+    // launches the page nudged exactly the right pixels on the right channels
+    // in the right directions by **+-2 instead of +-1** -- one clean second
+    // application -- while all five worker realms applied it once. The page
+    // therefore disagreed with its own workers about one run in six, and the
+    // only reason it was intermittent is that the second application depends
+    // on injection timing.
+    //
+    // There is no property left to inspect, and that is the point: a hook
+    // built to be indistinguishable from a native one cannot find itself by
+    // looking. So ask the behaviour. Draw a known opaque value on a scratch
+    // canvas at a position where pixelHash says a nudge lands, read it back,
+    // and see whether something already moved it. A page could run exactly
+    // this probe itself, so it reveals nothing new, and if some other hook
+    // got there first the conservative answer -- do not stack -- is still the
+    // right one.
+    if (!identityAlreadyApplied(window)) {
       const MAX_NOISE_PIXELS = 4000000;  // bigger canvases are images, not fingerprint probes
 
       // data holds the w x h rect whose top-left is (ox, oy) on the canvas. Pixels are picked by

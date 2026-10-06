@@ -104,6 +104,11 @@ _OWN_PROCESS_WORKER_TYPES = frozenset({"service_worker", "shared_worker"})
 #: Error label for a UA override sent to a worker target. See ``_send``.
 _WORKER_UA_LABEL = "Network.setUserAgentOverride[worker]"
 
+#: Label prefix for the reload that puts a pre-existing page under the
+#: identity. Carries the session id because the outcome is needed in ``_handle``,
+#: where only the label survives -- see ``_on_attached``.
+_RELOAD_LABEL = "Page.reload[identity]"
+
 
 def build_worker_identity_script(fingerprint: dict[str, Any]) -> str:
     """The identity a worker realm gets, as a self-contained script.
@@ -701,11 +706,30 @@ class IdentityInjector:
         if "id" in msg and "error" in msg:
             err = msg.get("error") or {}
             label = self._pending.pop(msg["id"], f"id={msg['id']}")
-            detail = f"{label}: {err.get('message')}"
+            # The reload label carries its session id so the outcome can be
+            # routed below; the operator does not need to read it.
+            shown = _RELOAD_LABEL if label.startswith(_RELOAD_LABEL) else label
+            detail = f"{shown}: {err.get('message')}"
             if detail not in self.status.detail:
                 self.status.detail.append(detail)
             if label.startswith("Page.addScriptToEvaluateOnNewDocument"):
                 self.status.script_installed = False
+                self.status.ok = False
+            if label.startswith(_RELOAD_LABEL):
+                # The reload is the only thing applying the identity to this
+                # document, so if it failed the document is unmasked. Apply
+                # the script to it directly -- second best, because site
+                # script has already run, but far better than leaving the
+                # operator's first tab reporting the host.
+                sid = label.split(":", 1)[1]
+                session_id = sid if sid and sid != "None" else None
+                if self.script:
+                    self._send("Runtime.evaluate",
+                               {"expression": self.script, "awaitPromise": False,
+                                "returnByValue": True},
+                               session_id=session_id)
+                    self.status.detail.append(
+                        "reload failed; applied identity to the live document instead")
                 self.status.ok = False
             if label == UA_OVERRIDE_METHOD:
                 # An unmasked wire identity is not a detail to swallow.
@@ -721,7 +745,11 @@ class IdentityInjector:
             log.warning("CDP injection command failed for %s — %s", self.profile_id, detail)
             return
         if "id" in msg:
-            self._pending.pop(msg["id"], None)
+            label = self._pending.pop(msg["id"], None)
+            if label and label.startswith(_RELOAD_LABEL):
+                note = "reloaded a pre-existing page to apply identity"
+                if note not in self.status.detail:
+                    self.status.detail.append(note)
             return
 
         method = msg.get("method")
@@ -1016,13 +1044,34 @@ class IdentityInjector:
                 "filter": [{"type": "worker", "exclude": False}, {"exclude": True}],
             }, session_id=session_id)
 
+        # A page that was already open when we attached gets reloaded below, so
+        # the identity reaches it at document start. `runImmediately` applies
+        # it to the document that is open *now*. Sending both put two copies
+        # of the script in one document.
+        #
+        # Every spoof in the script is idempotent except the ones that add
+        # something, and canvas noise is the sharpest of those. Measured on
+        # this host by reading the noise mask back off a uniform grey and
+        # comparing it against the mask predicted from the profile's seed: on
+        # a page that ran the script twice, the right pixels were nudged on
+        # the right channels in the right directions by +-2 instead of +-1,
+        # while all five worker realms -- one script each -- nudged by +-1. So
+        # the page contradicted its own workers, about one launch in six, and
+        # it was intermittent only because it depends on whether the reload's
+        # document commits before the immediate evaluation is dispatched.
+        #
+        # The two are now exclusive. The reload is preferred where it applies
+        # because it runs the page from document start under the identity,
+        # rather than patching a document that has already run site script.
+        will_reload = bool(self.script) and not params.get("waitingForDebugger")
+
         if self.script:
             # Page must be enabled on this session before the page machinery
             # will honour a new-document script.
             self._send("Page.enable", session_id=session_id)
             self._send("Runtime.enable", session_id=session_id)
             self._send("Page.addScriptToEvaluateOnNewDocument",
-                       {"source": self.script, "runImmediately": True},
+                       {"source": self.script, "runImmediately": not will_reload},
                        session_id=session_id)
             self.status.script_installed = True
 
@@ -1042,14 +1091,19 @@ class IdentityInjector:
             # Auto-attached before its first script ran: unfreeze it and the
             # very first document already carries the identity.
             self._send("Runtime.runIfWaitingForDebugger", session_id=session_id)
-        else:
+        elif will_reload:
             # A page that was already open when we attached (the start URL).
-            # addScriptToEvaluateOnNewDocument only affects the NEXT document,
-            # so reload once to put this one under the same identity rather
-            # than leave the operator's first tab unmasked.
-            if self.script:
-                self._send("Page.reload", {}, session_id=session_id)
-                self.status.detail.append("reloaded a pre-existing page to apply identity")
+            # The registered script only affects the NEXT document, so reload
+            # once to put this one under the same identity rather than leave
+            # the operator's first tab unmasked.
+            #
+            # The claim is recorded when the reload *answers*, not when it is
+            # sent. It used to be appended unconditionally, so a failed reload
+            # still reported "reloaded a pre-existing page to apply identity"
+            # -- the status telling an operator the opposite of what happened,
+            # in the one place they would look to find out.
+            self._send("Page.reload", {}, session_id=session_id,
+                       label=f"{_RELOAD_LABEL}:{session_id}")
         self._ready.set()
 
     def _on_auth_required(self, params: dict[str, Any], session_id: str | None) -> None:
