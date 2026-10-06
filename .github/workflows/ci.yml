@@ -118,7 +118,11 @@ jobs:
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             dbus-run-session -- \
-              uv run pytest tests/ -q -m network -p no:randomly
+              uv run pytest tests/ -q -rs -m network -p no:randomly
+        # -rs prints the reason for every skip. Under plain -q a module-level
+        # skip is a single `s` with no explanation, which is how a twelve-test
+        # live suite went missing from a run without anything going red. A
+        # suite that silently stops running is worse than one that fails.
 
   frontend:
     name: Console
