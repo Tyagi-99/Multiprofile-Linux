@@ -137,3 +137,42 @@ export function stateTone(state: string): "ok" | "warn" | "err" | "info" | "idle
       return "idle";
   }
 }
+
+export interface EngineChoice {
+  binary: string | null;
+  origin: "env" | "persisted" | "path" | "missing";
+  pinned: boolean;
+  brand: string | null;
+  version: string | null;
+  major: number | null;
+  unpackedLoading: boolean;
+  reason: string;
+  remediation: string;
+  driftedFrom: string | null;
+  driftBreaksExtensions: boolean;
+  notes: string[];
+  choiceFile: string;
+}
+
+export interface UpdatePreview {
+  ok: boolean;
+  extensionId: string;
+  name: string;
+  currentVersion: string;
+  /** Always "all-assignments". There is no per-profile version. */
+  scope: string;
+  affectedProfileCount: number;
+  affectedProfiles: {
+    profileId: string;
+    profileName: string;
+    isRunning: boolean;
+    state: AssignmentState;
+    stateLabel: string;
+    enabled: boolean;
+  }[];
+  runningProfileCount: number;
+  rollbackAvailable: boolean;
+  retainedVersions: { version: string; payloadPath: string; createdAt: string }[];
+  /** The sentence the operator must see before an update runs. */
+  scopeStatement: string;
+}

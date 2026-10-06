@@ -18,10 +18,12 @@ import { ProfileSelectDialog } from "./profile-select-dialog";
 import {
   type BulkResponse,
   type Capability,
+  type EngineChoice,
   type ExtensionsResponse,
   type ManagedExtension,
   type PreviewResponse,
   type SelectableProfile,
+  type UpdatePreview,
   stateTone,
 } from "./types";
 
@@ -492,6 +494,207 @@ function DeveloperModeCard({
   );
 }
 
+/**
+ * The browser this install uses, and whether it is protected.
+ *
+ * Shown because the answer can change without anybody choosing: the candidate
+ * order prefers google-chrome-stable over chromium, and branded Chrome 137+
+ * cannot load unpacked extensions at all. An unpinned install can therefore
+ * have its runtime replaced by an unrelated apt command, so the pin is
+ * offered here rather than buried in an environment variable.
+ */
+function EngineCard() {
+  const qc = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["extensions", "engine"],
+    queryFn: () => get<{ engine: EngineChoice }>("/api/engine").then((d) => d.engine),
+    staleTime: 15_000,
+  });
+  if (!data) return null;
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["extensions"] });
+  };
+  const act = async (fn: () => Promise<unknown>, msg: string) => {
+    try {
+      await fn();
+      toast.success(msg);
+      refresh();
+    } catch (e) {
+      toast.error(apiMessage(e, "That did not work."));
+    }
+  };
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge tone={data.unpackedLoading ? "ok" : "err"}>
+            {data.unpackedLoading ? "can load extensions" : "cannot load extensions"}
+          </Badge>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-ink-1">
+              {data.brand ?? "unknown"} {data.version ?? ""}
+              <span className="ml-2 text-xs text-ink-3">
+                {data.pinned ? `pinned (${data.origin})` : "not pinned"}
+              </span>
+            </p>
+            <p className="break-all text-xs text-ink-3">{data.binary ?? "none found"}</p>
+          </div>
+          {data.binary && (
+            <Button
+              size="sm"
+              variant={data.pinned ? "ghost" : "secondary"}
+              onClick={() =>
+                data.pinned
+                  ? act(() => post("/api/engine/clear", {}), "No longer pinned.")
+                  : act(
+                      () => post("/api/engine/choose", { binary: data.binary }),
+                      "Pinned. Installing another browser will not change it.",
+                    )
+              }
+            >
+              {data.pinned ? "Unpin" : "Pin this browser"}
+            </Button>
+          )}
+        </div>
+        <p className="mt-2 text-xs text-ink-3">{data.reason}</p>
+        {data.remediation && (
+          <p className="mt-1 text-xs text-ink-2">{data.remediation}</p>
+        )}
+        {data.driftedFrom && (
+          <p
+            className={`mt-2 text-xs ${
+              data.driftBreaksExtensions ? "text-err" : "text-warn"
+            }`}
+          >
+            The runtime changed: this install was using {data.driftedFrom}.
+            {data.driftBreaksExtensions
+              ? " That one can load extensions and this one cannot, so assignments would stop working. Pin the one you want — nothing has been switched for you."
+              : " Pin the one you want to stop this happening again."}
+          </p>
+        )}
+        {!data.pinned && (
+          <p className="mt-2 text-xs text-ink-3">
+            Not pinned, so the PATH search decides and installing another
+            browser can change the runtime. Choice file: {data.choiceFile}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * The scope of an update, before it runs.
+ *
+ * Profiles share one payload directory — which is what keeps the extension ID,
+ * and the per-profile storage behind it, stable across an update — so an
+ * update reaches every assignment. There is deliberately no
+ * selected-profile control here: one that silently applied to everyone would
+ * be worse than not having it.
+ */
+function UpdateScopeDialog({
+  ext,
+  onClose,
+  onUpdated,
+}: {
+  ext: ManagedExtension;
+  onClose: () => void;
+  onUpdated: () => void;
+}) {
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const { data, isLoading } = useQuery({
+    queryKey: ["extensions", "update-preview", ext.id],
+    queryFn: () =>
+      get<UpdatePreview>(`/api/extensions/${ext.id}/update-preview`),
+    staleTime: 0,
+  });
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      const res = await post<{ note?: string }>(
+        `/api/extensions/${ext.id}/update`,
+        { zipPath: path },
+      );
+      toast.success(res.note ?? "Updated.");
+      onUpdated();
+      onClose();
+    } catch (e) {
+      toast.error(apiMessage(e, "Update failed."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Update ${ext.name}`}
+      description="Check which profiles this reaches before it runs."
+      wide
+      footer={
+        <div className="flex w-full justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button onClick={run} disabled={!path || busy || isLoading}>
+            {busy
+              ? "Updating…"
+              : `Update all ${data?.affectedProfileCount ?? 0} assigned profile(s)`}
+          </Button>
+        </div>
+      }
+    >
+      <div className="grid gap-3">
+        <div className="rounded-md border border-warn/40 bg-warn-dim p-3">
+          <p className="text-sm font-medium text-ink-1">This is fleet-wide</p>
+          <p className="mt-1 text-xs text-ink-2">
+            {isLoading ? "Checking…" : data?.scopeStatement}
+          </p>
+        </div>
+
+        {data && data.affectedProfiles.length > 0 && (
+          <div className="max-h-48 overflow-auto rounded-md border border-line">
+            <ul className="divide-y divide-line">
+              {data.affectedProfiles.map((p) => (
+                <li key={p.profileId} className="flex items-center gap-2 px-3 py-2">
+                  <Badge tone={stateTone(p.state)}>{p.stateLabel}</Badge>
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink-1">
+                    {p.profileName}
+                  </span>
+                  {p.isRunning && <Badge tone="warn">running</Badge>}
+                  {!p.enabled && <Badge tone="idle">disabled</Badge>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {data && data.affectedProfiles.length === 0 && (
+          <p className="text-xs text-ink-3">
+            Not assigned to any profile yet, so this only replaces the stored
+            package.
+          </p>
+        )}
+
+        <Input
+          placeholder="/path/to/new-version.zip"
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          aria-label="New package path"
+        />
+        <p className="text-xs text-ink-3">
+          The managed path does not change, so the extension keeps its ID and
+          its per-profile storage. The previous version is retained and
+          {data?.rollbackAvailable ? " can" : " will be able to"} be rolled
+          back.
+        </p>
+      </div>
+    </Dialog>
+  );
+}
+
 export function ExtensionsPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
@@ -611,6 +814,7 @@ export function ExtensionsPage() {
   return (
     <div className="grid gap-4">
       {cap && <CapabilityBanner cap={cap} />}
+      <EngineCard />
       <DeveloperModeCard profiles={profiles ?? []} />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -848,7 +1052,7 @@ function ExtensionDetail({
   onClose: () => void;
   onChanged: () => void;
 }) {
-  const [updatePath, setUpdatePath] = useState("");
+  const [updating, setUpdating] = useState(false);
   const byId = useMemo(
     () => new Map(profiles.map((p) => [p.id, p])),
     [profiles],
@@ -990,29 +1194,13 @@ function ExtensionDetail({
         </div>
 
         <div className="grid gap-2 rounded-md border border-line p-3">
-          <p className="text-xs font-medium text-ink-2">Update</p>
+          <p className="text-xs font-medium text-ink-2">Version</p>
           <div className="flex gap-2">
-            <Input
-              className="flex-1"
-              placeholder="/path/to/new-version.zip"
-              value={updatePath}
-              onChange={(e) => setUpdatePath(e.target.value)}
-              aria-label="New package path"
-            />
-            <Button
-              variant="secondary"
-              disabled={!updatePath}
-              onClick={() =>
-                act(
-                  () =>
-                    post(`/api/extensions/${ext.id}/update`, {
-                      zipPath: updatePath,
-                    }),
-                  "Updated. Assigned profiles pick it up on next launch.",
-                )
-              }
-            >
-              Update
+            {/* The update goes through a dialog that lists every affected
+                profile first. There is no field here that looks scoped, 
+                because the operation is not. */}
+            <Button variant="secondary" onClick={() => setUpdating(true)}>
+              Update…
             </Button>
             <Button
               variant="ghost"
@@ -1027,11 +1215,20 @@ function ExtensionDetail({
             </Button>
           </div>
           <p className="text-xs text-ink-3">
-            The managed path does not change, so the extension keeps its ID and
-            its per-profile storage. Running profiles keep the old version until
-            they restart.
+            An update replaces the shared package, so it reaches every profile
+            this extension is assigned to — the dialog lists them before it
+            runs. The managed path does not change, so the extension keeps its
+            ID and its per-profile storage. Per-profile versions are not
+            implemented.
           </p>
         </div>
+        {updating && (
+          <UpdateScopeDialog
+            ext={ext}
+            onClose={() => setUpdating(false)}
+            onUpdated={onChanged}
+          />
+        )}
 
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-line p-3">
           <Checkbox
