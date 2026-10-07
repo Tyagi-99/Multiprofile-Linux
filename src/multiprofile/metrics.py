@@ -12,7 +12,6 @@ Honest behavior contract:
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -162,20 +161,25 @@ def sample_pid(pid: int) -> dict[str, Any]:
 
 
 def _profile_pid(profile_id: str) -> tuple[str, int | None]:
-    """Return (state, pid) for a profile from the on-disk runtime state.
+    """Return (state, pid) for a profile from the control database.
+
+    Reads ``profiles_runtime``. This used to read
+    ``$XDG_CACHE_HOME/multiprofile/runtime.json``, which the launcher also
+    writes -- see ``storage.profiles.set_runtime`` -- so both stores are live.
+    The difference is that the database is pruned and goes through the state
+    machine, and the JSON file is neither: it keeps an entry for every profile
+    that has ever run, including deleted ones, and nothing removes them.
 
     Imported lazily so this module stays import-safe in test contexts.
     """
-    from .storage.xdg import cache_dir
+    from .storage import db
 
     state = "unknown"
     pid: int | None = None
     try:
-        raw = (cache_dir() / "runtime.json").read_text(encoding="utf-8")
-        data = json.loads(raw) if raw.strip() else {}
-        entry = data.get(profile_id) or {}
-        state = str(entry.get("status") or "unknown")
-        raw_pid = entry.get("pid")
+        row = db.get_profile_runtime(profile_id) or {}
+        state = str(row.get("state") or "unknown")
+        raw_pid = row.get("pid")
         pid = int(raw_pid) if raw_pid else None
     except Exception as e:  # noqa: BLE001 - degrade, don't crash
         log.debug("runtime state unreadable: %s", e)
@@ -212,15 +216,33 @@ def measure_profile(profile_id: str) -> dict[str, Any]:
 
 
 def running_profile_ids() -> list[str]:
-    """Profile ids whose on-disk runtime state is 'running'."""
-    from .storage.xdg import cache_dir
+    """Profile ids the control database says are running.
+
+    This read ``$XDG_CACHE_HOME/multiprofile/runtime.json`` until it was found
+    disagreeing with the rest of the product on the console's landing screen,
+    both of these at once:
+
+        Overview   Running 0            (from profiles_runtime, correct)
+        Resources  "42 profiles are marked running, but no live process
+                    could be sampled."  (from runtime.json)
+
+    Both stores are written by the launcher. The JSON one is never pruned:
+    on the machine where this was found it held 148 entries, 43 marked
+    running, many for profiles deleted long ago, while ``profiles_runtime``
+    correctly held one. So the card on the first screen an operator sees was
+    counting profiles that no longer exist.
+
+    The database is the right source because it is pruned with the profile and
+    every transition goes through the state machine. That the two can still
+    drift apart at all is a separate problem, recorded rather than fixed here.
+    """
+    from .storage import db
 
     try:
-        raw = (cache_dir() / "runtime.json").read_text(encoding="utf-8")
-        data = json.loads(raw) if raw.strip() else {}
+        rows = db.list_profile_runtimes("running")
     except Exception:  # noqa: BLE001 - falls back to a stated default rather than failing the caller
         return []
-    return [pid for pid, e in data.items() if isinstance(e, dict) and e.get("status") == "running"]
+    return [str(r["profile_id"]) for r in rows if r.get("profile_id")]
 
 
 def summary_totals() -> dict[str, Any]:
