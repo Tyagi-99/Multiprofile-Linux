@@ -83,7 +83,12 @@ def pytest_configure(config):
     base = pathlib.Path(tempfile.mkdtemp(prefix="mp-test-xdg-"))
     config._mp_xdg_base = base
     for env, sub in _XDG_BASES:
-        if os.environ.get(env):
+        current = os.environ.get(env)
+        # An existing value is honoured -- unless it points at the operator's
+        # real store, which some people do set explicitly. Leaving that in
+        # place would make `_no_real_store` fail every single test instead of
+        # protecting anything, so it is replaced rather than respected.
+        if current and (pathlib.Path(current) / "multiprofile") not in _FORBIDDEN:
             continue
         target = base / sub
         target.mkdir(parents=True, exist_ok=True)
