@@ -282,7 +282,12 @@ class TestChromeNetworkFlags:
         from multiprofile.network import IPv6Policy, NetworkConfig, NetworkMode, chrome_network_flags
         nc = NetworkConfig(mode=NetworkMode.DIRECT, ipv6_policy=IPv6Policy.DISABLED)
         flags = chrome_network_flags(nc)
-        assert "--disable-ipv6" in flags
+        # `--disable-ipv6` is NOT emitted: Chromium 151 ignores it. Measured
+        # against a destination on the host's global IPv6 address, with a
+        # nonexistent flag as a control -- all three reached it. The
+        # protection holds because Chromium hands IPv6 destinations to the
+        # proxy; see network.py and tests/test_route_leaks_live.py.
+        assert "--disable-ipv6" not in flags
 
     def test_ipv6_enabled_no_flag(self):
         from multiprofile.network import IPv6Policy, NetworkConfig, NetworkMode, chrome_network_flags

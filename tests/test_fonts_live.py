@@ -121,8 +121,15 @@ def windows_profile(tmp_path_factory):
     mp.setenv("MULTIPROFILE_PROXY_CHECK_ENABLED", "0")
 
     page = _Page()
+    # `userAgentId` is explicit now. This fixture used to pass only
+    # `os: "windows"`, which reaches the font bucket but not the fingerprint
+    # pool -- the Windows *platform* came from `_detect_pool("")`'s default.
+    # That default is now the host's own platform, so a test about a Windows
+    # claim has to make the claim rather than inherit it. See
+    # `fingerprint/identity_matrix.py`.
     pid = create_profile({
-        "name": "fontwin", "proxyType": "none", "startUrl": page.url, "os": "windows",
+        "name": "fontwin", "proxyType": "none", "startUrl": page.url,
+        "os": "windows", "userAgentId": "win_chrome",
     })["id"]
     try:
         assert L.launch_profile(pid, url=page.url, direct=True).get("ok") is True

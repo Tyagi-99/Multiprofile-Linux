@@ -204,9 +204,43 @@ export function FingerprintInspector({ profileId }: { profileId: string }) {
   const fp = rep.fingerprint ?? {};
   const warnings = rep.warnings ?? [];
   const components = Array.isArray(rep.components) ? rep.components : null;
+  const identity = rep.identity;
+  const experimental = identity?.status === "experimental";
 
   return (
     <div className="grid gap-4">
+      {/*
+        The matrix verdict, above the values it qualifies. An operator reading
+        a coherent-looking fingerprint should not have to go to /api/health to
+        learn that one surface of it is known to disagree on this host.
+      */}
+      {experimental && (
+        <Alert
+          tone="warning"
+          title={`"${identity?.claim ?? "this"}" is an experimental identity on this host`}
+        >
+          <p>
+            Coherent on every surface this product controls.{" "}
+            {identity?.contradicts?.length
+              ? `Known to be contradicted by: ${identity.contradicts.join(", ")}.`
+              : ""}
+          </p>
+          {identity?.reasons?.length ? (
+            <ul className="mt-1 list-disc pl-5">
+              {identity.reasons.map((r, i) => (
+                <li key={i}>{r}</li>
+              ))}
+            </ul>
+          ) : null}
+        </Alert>
+      )}
+      {identity?.status === "supported" && identity?.native && (
+        <p className="text-[13px] text-ink-3">
+          Identity claim <strong>{identity.claim}</strong> matches this host, so
+          nothing has to be emulated for it to be coherent. This is a
+          consistency statement, not a detection guarantee.
+        </p>
+      )}
       {warnings.length > 0 && (
         <Alert tone="warning" title={`${warnings.length} warning${warnings.length > 1 ? "s" : ""}`}>
           <ul className="list-disc pl-5">

@@ -196,6 +196,40 @@
   // Target Timezone (injected per-profile or default America/New_York)
   let rawTz = "__PROFILE_TIMEZONE__";
   let TARGET_TIMEZONE = (rawTz && !rawTz.startsWith("__")) ? rawTz : "America/New_York";
+  let MP_TZ_NEEDS_CANONICAL = true;
+
+  // canonicaliseTimezone(): spell it the way THIS engine spells it, not the way the profile stores it.
+  //
+  // `resolvedOptions().timeZone` used to return the configured string
+  // verbatim, and that produced a value no real browser on this build can
+  // return. Measured on Chromium 151:
+  //
+  //   Intl.DateTimeFormat('en-US',{timeZone:'Asia/Kolkata'})
+  //     .resolvedOptions().timeZone          -> 'Asia/Calcutta'
+  //   Intl.supportedValuesOf('timeZone')
+  //     .includes('Asia/Kolkata')            -> false
+  //
+  // So a profile stored as Asia/Kolkata had its page answering a zone that
+  // is not in the engine's own supported set -- F44's shape (an impossible
+  // value), detectable in one line with nothing to compare against. And
+  // every worker realm, which gets the zone from
+  // Emulation.setTimezoneOverride with no hook on top, answered
+  // 'Asia/Calcutta' -- so the page contradicted its own workers as well.
+  // Stock Chromium on the same host answers 'Asia/Calcutta' everywhere.
+  //
+  // Asking the engine to canonicalise means the hook can only ever agree
+  // with it. If the zone is not one the engine knows, the constructor
+  // throws and the configured string is kept, which is no worse than before.
+  function canonicaliseTimezone() {
+    if (!MP_TZ_NEEDS_CANONICAL) return;
+    MP_TZ_NEEDS_CANONICAL = false;
+    try {
+      const canonical = new Intl.DateTimeFormat('en-US', {timeZone: TARGET_TIMEZONE})
+        .resolvedOptions().timeZone;
+      if (canonical) TARGET_TIMEZONE = canonical;
+    } catch (e) {}
+  }
+
   let rawIp = "__PROFILE_ALLOCATED_IP__";
   const TARGET_IP = (rawIp && !rawIp.startsWith("__")) ? rawIp : "";
   let rawSeed = "__PROFILE_SEED__";
@@ -243,6 +277,7 @@
       if (MP_CFG.platform) TARGET_PLATFORM = MP_CFG.platform;
       if (MP_CFG.touch != null) TARGET_TOUCH = MP_CFG.touch;
       if (MP_CFG.timezone) TARGET_TIMEZONE = MP_CFG.timezone;
+      MP_TZ_NEEDS_CANONICAL = true;
       if (MP_CFG.seed != null) PROFILE_SEED = parseInt(MP_CFG.seed, 10) || PROFILE_SEED;
       if (Array.isArray(MP_CFG.languages) && MP_CFG.languages.length) {
         TARGET_LANGUAGES = MP_CFG.languages.slice();
@@ -279,6 +314,55 @@
   function getNoiseValue(index) {
     const x = Math.sin(index * 9999.1234) * 10000;
     return x - Math.floor(x);
+  }
+
+  // Does this realm already carry the profile's identity?
+  //
+  // Canvas noise is the one spoof applied ONLY by this script and never by
+  // the parent's iframe walk in section 8, which makes its presence an exact
+  // answer to "has a copy of this script already run here". That is what the
+  // question needs, and there is nothing else left to ask: section 0's F3 fix
+  // removed every own property that used to give a hook away, deliberately,
+  // so a hook built to be indistinguishable from a native one cannot find
+  // itself by looking.
+  //
+  // So ask the behaviour. Draw a known opaque value where pixelHash says a
+  // nudge lands, read it back, and see whether something already moved it.
+  // Nothing here is observable to a page that was not already free to run
+  // the same three lines.
+  //
+  // Two defects were closed by asking this (see docs/04 section 11.6 and
+  // 11.7). The canvas block used to guard itself with
+  // `hasOwnProperty.call(toDataURL, 'toString')`, which the F3 fix silently
+  // made constant false, and the page then applied the noise twice on some
+  // launches. And section 8 re-applied every spoof to an iframe that already
+  // had its own copy, which double-nudged the three ADDITIVE surfaces --
+  // audio, client rects and WebGL readPixels -- so a page disagreed with its
+  // own frame every time.
+  function identityAlreadyApplied(scope) {
+    try {
+      const doc = scope && scope.document;
+      if (!doc || !doc.createElement) return false;
+      let px = -1, py = -1;
+      for (let y = 0; y < 16 && px < 0; y++) {
+        for (let x = 0; x < 16; x++) {
+          if ((pixelHash(x, y) & 15) === 0) { px = x; py = y; break; }
+        }
+      }
+      if (px < 0) return false;   // no noise pixel in 256: nothing to test
+      const probe = doc.createElement('canvas');
+      probe.width = 16;
+      probe.height = 16;
+      const pctx = probe.getContext('2d', { willReadFrequently: true });
+      if (!pctx) return false;
+      pctx.fillStyle = 'rgb(128,128,128)';
+      pctx.fillRect(0, 0, 16, 16);
+      const d = pctx.getImageData(0, 0, 16, 16).data;
+      const i = (py * 16 + px) * 4;
+      return d[i] !== 128 || d[i + 1] !== 128 || d[i + 2] !== 128;
+    } catch (e) {
+      return false;
+    }
   }
 
   function pixelHash(x, y) {
@@ -509,11 +593,34 @@
     const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
     const origToBlob = HTMLCanvasElement.prototype.toBlob;
 
-    // A hooked function carries its own toString (see makeNative); a native one does not.
-    // If this script lands twice in one page (extension + CDP), the second copy must not stack.
-    const alreadyShielded = Object.prototype.hasOwnProperty.call(origToDataURL, 'toString');
-
-    if (!alreadyShielded) {
+    // Has the noise already been installed in this realm?
+    //
+    // This used to read `hasOwnProperty.call(origToDataURL, 'toString')`, on
+    // the reasoning that a hooked function carries an own `toString` and a
+    // native one does not. That was true when it was written. Section 0's F3
+    // fix then moved the claimed source into a WeakMap *precisely so that
+    // nothing is written onto the hooked function* -- which left this check
+    // reading a property that no longer exists, constant false, and the guard
+    // silently dead.
+    //
+    // Measured on this host afterwards, with the noise mask read back off a
+    // uniform grey and compared against the seed's predicted mask: on some
+    // launches the page nudged exactly the right pixels on the right channels
+    // in the right directions by **+-2 instead of +-1** -- one clean second
+    // application -- while all five worker realms applied it once. The page
+    // therefore disagreed with its own workers about one run in six, and the
+    // only reason it was intermittent is that the second application depends
+    // on injection timing.
+    //
+    // There is no property left to inspect, and that is the point: a hook
+    // built to be indistinguishable from a native one cannot find itself by
+    // looking. So ask the behaviour. Draw a known opaque value on a scratch
+    // canvas at a position where pixelHash says a nudge lands, read it back,
+    // and see whether something already moved it. A page could run exactly
+    // this probe itself, so it reveals nothing new, and if some other hook
+    // got there first the conservative answer -- do not stack -- is still the
+    // right one.
+    if (!identityAlreadyApplied(window)) {
       const MAX_NOISE_PIXELS = 4000000;  // bigger canvases are images, not fingerprint probes
 
       // data holds the w x h rect whose top-left is (ox, oy) on the canvas. Pixels are picked by
@@ -777,6 +884,14 @@
   // ==========================================
   try {
     const origIFrameContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow')?.get;
+    // Keyed on the frame's current `document`, not on `contentWindow`. A
+    // WindowProxy keeps its identity across a navigation while the realm
+    // behind it is replaced, so a WeakSet of windows would skip a frame that
+    // had navigated to a document with no identity at all. The document
+    // object does change, which is exactly the granularity wanted here: the
+    // probe below costs a 16x16 canvas read, and `contentWindow` is a getter
+    // a page may touch in a loop.
+    const framesDecided = new WeakSet();
     if (origIFrameContentWindow) {
       Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
         get: makeNative(function() {
@@ -789,17 +904,53 @@
               // parent. Patch it while this frame still has no hooks of its
               // own to describe.
               applyNativeMasking(win);
+
+              // Everything below is a FALLBACK, for a frame the injector's
+              // new-document script did not reach.
+              //
+              // When this walk was written it was the only thing reaching an
+              // iframe at all, and the comment here recorded why the audio
+              // and rect calls were added: "an audio or rect fingerprint
+              // taken inside a frame returned the host's". That was true
+              // then. It is not any more --
+              // Page.addScriptToEvaluateOnNewDocument reaches every
+              // same-origin frame realm, measured on this host for srcdoc,
+              // about:blank and URL frames alike, which is why canvas noise
+              // (applied only by that script, never here) was already correct
+              // inside all three.
+              //
+              // So this walk became a SECOND application, and three of these
+              // spoofs are additive rather than idempotent -- audio nudges
+              // each sample, rects nudge each coordinate, WebGL readPixels
+              // nudges each pixel, and each copy keeps its own "already
+              // nudged" record. Measured before this guard, page against
+              // every one of its own iframes:
+              //
+              //   audio  124.043476408231  vs  124.043477541301
+              //   rect    11.687566983437  vs   11.687633966873
+              //
+              // deterministic, all three frame kinds. A page comparing its
+              // own audio fingerprint against the one its own iframe reports
+              // saw two different machines.
+              //
+              // The masking above stays unconditional: it is about a page
+              // borrowing a pristine Function.prototype.toString out of a
+              // fresh realm, which is a property of the parent's hooks, not
+              // the frame's.
+              const doc = win.document;
+              if (doc && framesDecided.has(doc)) return win;
+              if (identityAlreadyApplied(win)) {
+                if (doc) framesDecided.add(doc);
+                return win;
+              }
+              if (doc) framesDecided.add(doc);
+
               applyHardwareSpoofs(win.navigator, win.Navigator ? win.Navigator.prototype : null);
               applyScreenSpoofs(win);
               applyTimezoneSpoofs(win);
               if (win.WebGLRenderingContext) hookWebGLProto(win.WebGLRenderingContext.prototype);
               if (win.WebGL2RenderingContext) hookWebGLProto(win.WebGL2RenderingContext.prototype);
               applyWebRTCSpoofs(win);
-              // Surfaces added after this hook was written were not reaching
-              // iframes: an audio or rect fingerprint taken inside a frame
-              // returned the host's, while the same read in the top document
-              // returned the profile's. One page disagreeing with itself is
-              // the tell these spoofs exist to prevent.
               applyAudioSpoofs(win);
               applyRectSpoofs(win);
               applyWebGPUSpoofs(win);
@@ -821,6 +972,11 @@
     try {
       const scope = targetScope || window;
       if (!scope.Intl || !scope.Date) return;
+
+      // Before anything is patched: once `resolvedOptions` is hooked it
+      // returns TARGET_TIMEZONE verbatim, so asking the engine to
+      // canonicalise after that point would just echo the value back.
+      canonicaliseTimezone();
 
       function getTzOffsetMinutes(date, tz) {
         try {

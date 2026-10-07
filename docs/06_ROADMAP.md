@@ -1,11 +1,24 @@
 # 06 — Roadmap
 
-**Status: the first decision on this page has not been made.** Everything
-after §2 branches on it, so the roadmap is written as a fork rather than as a
-single line. Presenting one path as settled would be the same failure this
-audit spent its length fixing — an artefact that looks complete and is not.
+> **Decided 6 October 2026: option A — a maintained Chromium-based core.**
+> The architecture, the first built slice, the patch surface derived from
+> measurement, the five gates that must be measured before any parity claim,
+> and the cost (roughly half an engineer, permanently, tracking upstream
+> stable within two weeks) are in
+> [`09_ENGINE_PROGRAM`](09_ENGINE_PROGRAM.md). **Option C's TLS-rewriting
+> local proxy is not being built**, and §4b now carries the measurement
+> rather than the assertion that killed it.
+>
+> §1 below is kept as the record of the fork and the reasoning, because the
+> cost of A does not go away by having chosen it.
 
-Where the product stands: **52 findings, 50 fixed, 2 open** — and both of the
+**Status when this page was written: the first decision had not been made.**
+Everything after §2 branched on it, so the roadmap is written as a fork rather
+than as a single line. Presenting one path as settled would have been the same
+failure this audit spent its length fixing — an artefact that looks complete
+and is not.
+
+Where the product stands: **58 findings, 56 fixed, 2 open** — and both of the
 two are open only at the part that needs something outside this repository:
 F3 at its architectural ceiling, F12 at a signing key and a host. P0, P1, P2 and P3
 are complete. The fingerprint vectors reachable from
@@ -49,10 +62,23 @@ and an honest consistency score is a real product for a real audience. It
 simply cannot advertise on detection rate, which is what this market
 advertises on.
 
-**C is the most interesting and the least obvious.** Roughly two thirds of the
-detectable surface is reachable without forking: `toString` can be masked more
-completely, and TLS/HTTP/2 can be aligned in a local proxy the traffic already
-passes through — the product already routes every profile through one.
+**C is the most interesting and the least obvious.** Part of the detectable
+surface is reachable without forking: `toString` masking is done, and
+TLS/HTTP/2 alignment would need a local proxy.
+
+> **Corrected 5 October 2026 — this paragraph used to be wrong in a way that
+> changed the estimate.** It said "a local proxy the traffic already passes
+> through — the product already routes every profile through one". **There is
+> no such proxy.** `chrome_network_flags()` appends
+> `--proxy-server=<the operator's upstream>` when a proxy is configured and
+> nothing at all when one is not, so Chromium talks to the upstream proxy or
+> to the internet directly. The only `bind(("127.0.0.1", 0))` calls in the
+> tree are ephemeral-port pickers in `cdp_window.py`, `devices/validator.py`
+> and `launcher.py`. Verified by grep across `src/multiprofile` for a
+> listener, a relay or an upstream-chaining class: there is none.
+>
+> So C is **a new subsystem, not an extension of one**, and the cost below is
+> understated. See §4b.
 
 **A is a company-shaping commitment**, not a project. Tracking Chromium stable
 within two weeks forever is a standing obligation that does not pause.
@@ -149,19 +175,41 @@ The pragmatic middle. 2–4 months, and it front-loads the measurable wins.
 |---|---|---|
 | ~~Complete `toString` masking~~ | ✅ done | Most of the F3 surface reachable from JS |
 | ~~Audit every hook for prototype tampering~~ | ✅ done | Found the own-`prototype` tell on 22 hooks, and F44 |
-| **TLS/JA3 alignment in the local proxy** | **L** | The largest non-engine gap |
+| **TLS/JA3 alignment via a new local terminating proxy** | **XL** | The largest non-engine gap. Re-sized from **L** on 5 October 2026: there is no existing local proxy to extend. See §4b |
 | HTTP/2 SETTINGS and frame-order alignment | M | Same category |
 | Re-run the checkers, publish the delta | S | Proves it worked |
 
-The insight is that **the traffic already passes through a local proxy the
-product controls**, so the TLS ClientHello and the HTTP/2 preface can be
-rewritten there without touching Chromium. That is real work, not a trick, but
-it is months rather than years, and it closes the vector a serious anti-bot
-vendor actually checks first.
+### 4b. What a TLS-rewriting proxy actually costs
 
-**Honest ceiling:** `Runtime.enable` and CDP-attachment artefacts remain.
-C gets most of the way, not all of it, and the claim must stay "harder to
-detect" rather than "undetectable".
+The earlier version of this section rested on a local proxy that does not
+exist, so the "L, 2–3 months" figure above described extending a subsystem
+rather than building one. Replacing it with what the work actually is:
+
+**A ClientHello cannot be rewritten in a tunnel.** An HTTP `CONNECT` or SOCKS5
+tunnel is opaque — it forwards the bytes Chromium produced, which is why the
+destination sees Chromium's TLS fingerprint through any ordinary proxy today.
+To present a different ClientHello, the proxy has to **terminate TLS locally
+and re-originate it**, so the fingerprint becomes the proxy's. That carries
+the whole of the following:
+
+| Requirement | Why it is not small |
+|---|---|
+| A local CA, trusted by the profile | Every TLS connection is decrypted and re-encrypted on the host. The profile's root store gains a CA no stock Chromium has — **an artefact a checker can read**, which partly defeats the purpose |
+| Certificate pinning and CT | Sites using pinning or `Expect-CT` break. There is no general fix; it is a compatibility list |
+| HTTP/3 and QUIC | QUIC is UDP and does its own crypto handshake. It is a second implementation, not a flag. Chromium must either be forced off QUIC — itself a signal — or the proxy must speak it |
+| WebSockets, SSE, long-poll | Upgrade and streaming paths through a terminating proxy, each with its own failure modes |
+| Upstream chaining and auth | The proxy must still reach the operator's HTTP/SOCKS5 proxy, with credentials, from inside the new hop |
+| A TLS stack with controllable fingerprints | Not OpenSSL defaults. Something like uTLS, pinned per claimed browser version, and **re-matched every time the claimed Chrome version moves** |
+
+**And it must be matched to be worth anything.** A JA3 or JA4 string on its
+own proves nothing: the comparison has to be against a genuine same-version
+browser on the claimed OS, through the same route, captured at the
+destination. Until that reference trace exists, "our TLS looks like Chrome on
+Windows" is unverified.
+
+**Honest ceiling:** `Runtime.enable` and CDP-attachment artefacts remain
+regardless. C gets part of the way, not all of it, and the claim must stay
+"harder to detect" rather than "undetectable".
 
 ---
 
@@ -199,7 +247,7 @@ changes the distribution model entirely.
 ## 7. Sequencing, independent of the fork
 
 ```
-DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F52
+DONE     ├─ F11, F12 (built), F13, F14, F15, F20, F43–F62
          └─ F3's JavaScript surface
 
 NOW      ├─ Publish the channel                  ← needs a key + a host
@@ -230,7 +278,7 @@ conversation determines whether A is rational at all.
 
 ## 9. The one-paragraph version
 
-The product is in good shape below the fingerprint layer: 50 of 52 findings
+The product is in good shape below the fingerprint layer: 56 of 58 findings
 fixed, the orchestration and storage sound, the API ahead of the UI, and a
 commercial substrate that is honest about what it measures. It has one
 structural problem — it operates above the layer where detection now happens —

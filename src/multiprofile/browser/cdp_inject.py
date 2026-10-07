@@ -92,6 +92,23 @@ def _first_request_hints_enabled() -> bool:
 
 _WORKER_TARGET_TYPES = frozenset({"service_worker", "shared_worker", "worker"})
 
+#: Worker target types that do NOT inherit the owner document's UA override.
+#:
+#: A dedicated worker runs in its owner document's renderer, so
+#: ``Network.setUserAgentOverride`` applied to the page target covers it for
+#: free. A shared worker and a service worker each get their own target and
+#: their own process, and inherit nothing -- which is exactly the split a
+#: CreepJS run on this host measured (see ``_identify_worker``).
+_OWN_PROCESS_WORKER_TYPES = frozenset({"service_worker", "shared_worker"})
+
+#: Error label for a UA override sent to a worker target. See ``_send``.
+_WORKER_UA_LABEL = "Network.setUserAgentOverride[worker]"
+
+#: Label prefix for the reload that puts a pre-existing page under the
+#: identity. Carries the session id because the outcome is needed in ``_handle``,
+#: where only the label survives -- see ``_on_attached``.
+_RELOAD_LABEL = "Page.reload[identity]"
+
 
 def build_worker_identity_script(fingerprint: dict[str, Any]) -> str:
     """The identity a worker realm gets, as a self-contained script.
@@ -255,15 +272,65 @@ _WORKER_SCRIPT_TEMPLATE = r"""
       }
     }
   }
+  // The page keys the noise to canvas POSITION, so a read whose origin is not
+  // (0,0) has to be noised at that origin or the two realms disagree on the
+  // same drawing. Measured on this host before this fix, getImageData(5,7,
+  // 20,20) against the page's own read of the same rect:
+  //
+  //     page     noise keyed to (5,7)
+  //     worker   noise keyed to (0,0)    <- 12 of 12 runs, every worker type
+  //
+  // Every probe in the suite read from (0,0), where the two agree by
+  // coincidence, which is why this sat under a passing realm test.
+  const noiseRect = (img, sx, sy, sw, sh) => {
+    const ox = Math.floor(sw < 0 ? sx + sw : sx);
+    const oy = Math.floor(sh < 0 ? sy + sh : sy);
+    addNoise(img.data, ox, oy, img.width, img.height);
+  };
   try {
     if (self.OffscreenCanvasRenderingContext2D) {
       const orig = self.OffscreenCanvasRenderingContext2D.prototype.getImageData;
+      const origPut = self.OffscreenCanvasRenderingContext2D.prototype.putImageData;
       self.OffscreenCanvasRenderingContext2D.prototype.getImageData = native(
         function getImageData(sx, sy, sw, sh) {
           const img = orig.apply(this, arguments);
-          try { addNoise(img.data, 0, 0, img.width, img.height); } catch (e) {}
+          try { noiseRect(img, sx, sy, sw, sh); } catch (e) {}
           return img;
         }, 'getImageData');
+
+      // The export path, which was not hooked here at all while the page
+      // hooked it. Measured before this fix, a worker's convertToBlob() over
+      // the same drawing, on three profiles with different seeds:
+      //
+      //     page     378539371 / 116989659 / 2291625482   (moves with the seed)
+      //     worker   3394833805 / 3394833805 / 3394833805
+      //
+      // One value for every profile on the machine: the worker was handing
+      // out the host's raw render as a PNG. That is a cross-profile
+      // identifier, and it contradicts the worker's own page in a single
+      // comparison, which is the thing this script exists to prevent.
+      const origToBlob = self.OffscreenCanvas
+        ? self.OffscreenCanvas.prototype.convertToBlob : null;
+      if (origToBlob && origPut) {
+        self.OffscreenCanvas.prototype.convertToBlob = native(
+          function convertToBlob() {
+            let copy = null;
+            try {
+              const w = this.width, h = this.height;
+              if (w && h && w * h <= 4000000) {
+                copy = new self.OffscreenCanvas(w, h);
+                const ctx = copy.getContext('2d', {willReadFrequently: true});
+                ctx.drawImage(this, 0, 0);
+                const img = orig.call(ctx, 0, 0, w, h);   // unhooked read
+                addNoise(img.data, 0, 0, w, h);
+                origPut.call(ctx, img, 0, 0);
+              }
+            } catch (e) { copy = null; }
+            // On any failure fall through to the original so the caller sees
+            // exactly the error or result it would natively.
+            return origToBlob.apply(copy || this, arguments);
+          }, 'convertToBlob');
+      }
     }
   } catch (e) {}
   try {
@@ -369,8 +436,11 @@ class InjectionStatus:
     timezone_applied: bool = False
     locale_applied: bool = False
     geolocation_applied: bool = False
+    screen_metrics_applied: bool = False
     targets_seen: int = 0
     workers_identified: int = 0
+    workers_ua_applied: int = 0
+    workers_ua_failed: int = 0
     error: str | None = None
     detail: list[str] = field(default_factory=list)
 
@@ -384,8 +454,11 @@ class InjectionStatus:
             "timezoneApplied": self.timezone_applied,
             "localeApplied": self.locale_applied,
             "geolocationApplied": self.geolocation_applied,
+            "screenMetricsApplied": self.screen_metrics_applied,
             "targetsSeen": self.targets_seen,
             "workersIdentified": self.workers_identified,
+            "workersUaApplied": self.workers_ua_applied,
+            "workersUaFailed": self.workers_ua_failed,
             "error": self.error,
             "detail": list(self.detail),
         }
@@ -425,6 +498,7 @@ class IdentityInjector:
         worker_script: str | None = None,
         locale: str | None = None,
         geolocation: dict[str, Any] | None = None,
+        screen_metrics: dict[str, Any] | None = None,
         profile_id: str = "",
     ):
         self.port = int(port)
@@ -433,6 +507,7 @@ class IdentityInjector:
         self.worker_script = worker_script or ""
         self.locale = (locale or "").strip() or None
         self.geolocation = geolocation or None
+        self.screen_metrics = screen_metrics or None
         self.proxy_auth = proxy_auth
         self.cookies = cookies or []
         self.ua_override = ua_override or None
@@ -457,15 +532,21 @@ class IdentityInjector:
     # -- wire ------------------------------------------------------------
 
     def _send(self, method: str, params: dict[str, Any] | None = None,
-              session_id: str | None = None) -> int:
-        """Fire a command. Responses are handled by the receive loop."""
+              session_id: str | None = None, label: str | None = None) -> int:
+        """Fire a command. Responses are handled by the receive loop.
+
+        ``label`` is what the error branch reports and matches on. It exists
+        so the same method sent to two kinds of target can fail
+        independently: a UA override rejected on a shared-worker target must
+        not be read as the page's override having died.
+        """
         with self._lock:
             self._id += 1
             msg_id = self._id
             msg: dict[str, Any] = {"id": msg_id, "method": method, "params": params or {}}
             if session_id:
                 msg["sessionId"] = session_id
-            self._pending[msg_id] = method
+            self._pending[msg_id] = label or method
             self._ws.send(json.dumps(msg))
         return msg_id
 
@@ -625,20 +706,50 @@ class IdentityInjector:
         if "id" in msg and "error" in msg:
             err = msg.get("error") or {}
             label = self._pending.pop(msg["id"], f"id={msg['id']}")
-            detail = f"{label}: {err.get('message')}"
+            # The reload label carries its session id so the outcome can be
+            # routed below; the operator does not need to read it.
+            shown = _RELOAD_LABEL if label.startswith(_RELOAD_LABEL) else label
+            detail = f"{shown}: {err.get('message')}"
             if detail not in self.status.detail:
                 self.status.detail.append(detail)
             if label.startswith("Page.addScriptToEvaluateOnNewDocument"):
                 self.status.script_installed = False
                 self.status.ok = False
+            if label.startswith(_RELOAD_LABEL):
+                # The reload is the only thing applying the identity to this
+                # document, so if it failed the document is unmasked. Apply
+                # the script to it directly -- second best, because site
+                # script has already run, but far better than leaving the
+                # operator's first tab reporting the host.
+                sid = label.split(":", 1)[1]
+                session_id = sid if sid and sid != "None" else None
+                if self.script:
+                    self._send("Runtime.evaluate",
+                               {"expression": self.script, "awaitPromise": False,
+                                "returnByValue": True},
+                               session_id=session_id)
+                    self.status.detail.append(
+                        "reload failed; applied identity to the live document instead")
+                self.status.ok = False
             if label == UA_OVERRIDE_METHOD:
                 # An unmasked wire identity is not a detail to swallow.
                 self.status.ua_override_applied = False
                 self.status.ok = False
+            if label == _WORKER_UA_LABEL:
+                # The page's override is unaffected, so ua_override_applied
+                # stays as it was -- but a worker whose userAgentData reports
+                # the host beside a page claiming another OS is an identity
+                # contradiction, not a cosmetic gap, so `ok` does drop.
+                self.status.workers_ua_failed += 1
+                self.status.ok = False
             log.warning("CDP injection command failed for %s — %s", self.profile_id, detail)
             return
         if "id" in msg:
-            self._pending.pop(msg["id"], None)
+            label = self._pending.pop(msg["id"], None)
+            if label and label.startswith(_RELOAD_LABEL):
+                note = "reloaded a pre-existing page to apply identity"
+                if note not in self.status.detail:
+                    self.status.detail.append(note)
             return
 
         method = msg.get("method")
@@ -725,6 +836,7 @@ class IdentityInjector:
         # and the shared and service workers all hashed 414750390 -- the
         # realms disagreeing again, in the surface meant to make them agree.
         target_id = target.get("targetId") or ""
+        target_type = target.get("type") or ""
         # The decision is made under the lock; the send happens outside it.
         # _send takes the same lock, and threading.Lock is not re-entrant, so
         # releasing a duplicate from inside this block deadlocked the receive
@@ -746,6 +858,36 @@ class IdentityInjector:
                             "awaitPromise": False, "returnByValue": True},
                            session_id=session_id)
                 self.status.workers_identified += 1
+            if self.ua_override is not None and target_type in _OWN_PROCESS_WORKER_TYPES:
+                # `navigator.userAgentData`, natively, in the two realms that
+                # do not inherit it. Measured on this host against CreepJS,
+                # product profile, no device preset:
+                #
+                #   page           userAgentData: Google Chrome 151, Windows 11
+                #   service worker userAgentData: Chromium 151, Linux
+                #
+                # and then narrowed with a probe that asks each realm
+                # separately (tests/test_worker_realms_live.py):
+                #
+                #   worker_blob / worker_url / worker_module  Windows   ok
+                #   shared / service                          Linux     leak
+                #
+                # A dedicated worker runs in its owner document's renderer,
+                # so the page's override already covers it. A shared or
+                # service worker is its own target in its own process and
+                # inherits nothing, so the override has to be sent here.
+                #
+                # Sent rather than shimmed on purpose. The worker script
+                # could have defined a fake NavigatorUAData, and that is the
+                # F3 trade the rest of this file keeps losing: a shim has a
+                # shape. `Network.setUserAgentOverride` makes the engine
+                # answer, so there is nothing to find. It also fixes
+                # `getHighEntropyValues()`, which a shim would have had to
+                # reimplement -- including the platformVersion that tells
+                # Windows 10 from Windows 11.
+                self._send(UA_OVERRIDE_METHOD, self.ua_override,
+                           session_id=session_id, label=_WORKER_UA_LABEL)
+                self.status.workers_ua_applied += 1
             if self.timezone_id:
                 # Cheap and harmless: the worker inherits TZ from the process,
                 # but a worker started after a timezone change would not.
@@ -807,6 +949,30 @@ class IdentityInjector:
             # page session cannot.
             self._send(UA_OVERRIDE_METHOD, self.ua_override, session_id=session_id)
             self.status.ua_override_applied = True
+
+        if self.screen_metrics:
+            # CSS `device-width` and `device-height` are resolved by the
+            # compositor from the real display. No JavaScript can reach them,
+            # so `screen.width` defined as a getter in evasion.js left a
+            # contradiction any page can read in one line. Measured on this
+            # host, profile with no device preset:
+            #
+            #   screen.width/height        1920 x 1080   (the claim, JS)
+            #   CSS device-width/height    2560 x 1600   (the display)
+            #
+            # and stock Chromium reported 2560 x 1600 on both.
+            #
+            # `width`/`height`/`deviceScaleFactor` are sent as 0, which CDP
+            # reads as "do not override the viewport". Verified on Chromium
+            # 151: `screenHeight` moved CSS device-height 1600 -> 1440 while
+            # innerWidth/innerHeight/outerWidth/outerHeight stayed
+            # byte-identical. That distinction is the whole reason this can be
+            # applied to every profile and not just the preset ones -- a
+            # viewport override would letterbox and scale the operator's
+            # window, which is why the no-preset path originally skipped it.
+            self._send("Emulation.setDeviceMetricsOverride",
+                       self.screen_metrics, session_id=session_id)
+            self.status.screen_metrics_applied = True
 
         if self.timezone_id:
             # The engine's own clock, not a patched one. evasion.js hooks
@@ -878,13 +1044,34 @@ class IdentityInjector:
                 "filter": [{"type": "worker", "exclude": False}, {"exclude": True}],
             }, session_id=session_id)
 
+        # A page that was already open when we attached gets reloaded below, so
+        # the identity reaches it at document start. `runImmediately` applies
+        # it to the document that is open *now*. Sending both put two copies
+        # of the script in one document.
+        #
+        # Every spoof in the script is idempotent except the ones that add
+        # something, and canvas noise is the sharpest of those. Measured on
+        # this host by reading the noise mask back off a uniform grey and
+        # comparing it against the mask predicted from the profile's seed: on
+        # a page that ran the script twice, the right pixels were nudged on
+        # the right channels in the right directions by +-2 instead of +-1,
+        # while all five worker realms -- one script each -- nudged by +-1. So
+        # the page contradicted its own workers, about one launch in six, and
+        # it was intermittent only because it depends on whether the reload's
+        # document commits before the immediate evaluation is dispatched.
+        #
+        # The two are now exclusive. The reload is preferred where it applies
+        # because it runs the page from document start under the identity,
+        # rather than patching a document that has already run site script.
+        will_reload = bool(self.script) and not params.get("waitingForDebugger")
+
         if self.script:
             # Page must be enabled on this session before the page machinery
             # will honour a new-document script.
             self._send("Page.enable", session_id=session_id)
             self._send("Runtime.enable", session_id=session_id)
             self._send("Page.addScriptToEvaluateOnNewDocument",
-                       {"source": self.script, "runImmediately": True},
+                       {"source": self.script, "runImmediately": not will_reload},
                        session_id=session_id)
             self.status.script_installed = True
 
@@ -904,14 +1091,19 @@ class IdentityInjector:
             # Auto-attached before its first script ran: unfreeze it and the
             # very first document already carries the identity.
             self._send("Runtime.runIfWaitingForDebugger", session_id=session_id)
-        else:
+        elif will_reload:
             # A page that was already open when we attached (the start URL).
-            # addScriptToEvaluateOnNewDocument only affects the NEXT document,
-            # so reload once to put this one under the same identity rather
-            # than leave the operator's first tab unmasked.
-            if self.script:
-                self._send("Page.reload", {}, session_id=session_id)
-                self.status.detail.append("reloaded a pre-existing page to apply identity")
+            # The registered script only affects the NEXT document, so reload
+            # once to put this one under the same identity rather than leave
+            # the operator's first tab unmasked.
+            #
+            # The claim is recorded when the reload *answers*, not when it is
+            # sent. It used to be appended unconditionally, so a failed reload
+            # still reported "reloaded a pre-existing page to apply identity"
+            # -- the status telling an operator the opposite of what happened,
+            # in the one place they would look to find out.
+            self._send("Page.reload", {}, session_id=session_id,
+                       label=f"{_RELOAD_LABEL}:{session_id}")
         self._ready.set()
 
     def _on_auth_required(self, params: dict[str, Any], session_id: str | None) -> None:
@@ -950,6 +1142,7 @@ def start_injection(
     worker_script: str | None = None,
     locale: str | None = None,
     geolocation: dict[str, Any] | None = None,
+    screen_metrics: dict[str, Any] | None = None,
 ) -> InjectionStatus:
     """Start (and register) injection for a profile, replacing any previous one."""
     stop_injection(profile_id)
@@ -963,6 +1156,7 @@ def start_injection(
         worker_script=worker_script,
         locale=locale,
         geolocation=geolocation,
+        screen_metrics=screen_metrics,
         profile_id=profile_id,
     )
     status = injector.start()

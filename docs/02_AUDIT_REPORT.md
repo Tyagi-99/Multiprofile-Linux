@@ -134,6 +134,12 @@ engineering draft rather than legal advice.
 | **F50** | ✅ Low | Security / Config | **`MULTIPROFILE_PREFER_SANDBOX` was read into a field nothing used** — a security-adjacent setting that looked honoured and was not | done |
 | **F51** | ✅ **High** | Privacy / Storage | **A permanent delete could leave every cookie and login on disk and report `purgeStorage: true`** — the response echoed the request, not the outcome | done |
 | **F52** | ✅ Low | Security | **The audit log's `chmod(0600)` failed in silence** — the last one in the tree that did not reach `/api/health` | done |
+| **F53** | ✅ **High** | Fingerprint | **Shared and service workers reported the host OS** in `navigator.userAgentData` beside a page claiming another — found by CreepJS, narrowed by probing each realm separately | done |
+| **F54** | ✅ **High** | Fingerprint | **CSS `device-width` reported the real display** while `screen.*` reported the claim — every profile without a device preset | done |
+| **F55** | ✅ **High** | Fingerprint | **The page reported a timezone this engine cannot report** — `Asia/Kolkata` is not in `Intl.supportedValuesOf('timeZone')`, and every worker said `Asia/Calcutta` | done |
+| **F56** | ✅ **High** | Network | **Authenticated SOCKS5 launched green into a browser that could not load a page** — Chromium does not implement RFC 1929 | done |
+| **F57** | ✅ **Medium** | Network | **`--disable-ipv6` is a no-op on Chromium 151** and `NETWORK_ISOLATION.md` called it the mechanism — the protection holds, by a different route | done |
+| **F58** | ✅ **Medium** | API | **Every refused launch answered `500`**, so monitoring saw server errors during normal operation and clients retried what could never succeed | done |
 
 ---
 
@@ -2760,6 +2766,329 @@ share of the machines this product runs on unattended. 9 tests.
 
 ---
 
+### F57–F58 — the parity pass of 6 October 2026
+
+**F57 — `--disable-ipv6` does nothing, and the document called it the
+mechanism.** The launcher emitted it for every proxied profile and
+[`NETWORK_ISOLATION`](NETWORK_ISOLATION.md) §4.2 described it as what
+"disables IPv6 networking within the profile's network stack". Measured
+against a destination bound to the host's own **global** IPv6 address — not
+`::1`, so Chrome's loopback bypass cannot be the explanation — with a
+deliberately nonexistent flag as a control:
+
+| configuration | IPv6 destination reached |
+|---|---|
+| stock, no flag | yes |
+| stock, `--disable-ipv6` | **yes** |
+| stock, a flag that does not exist | yes |
+
+The flag has exactly the effect of a flag that is not there. Removed, because
+a no-op that advertises a protection is worse than no flag.
+
+**The protection holds**, by the same route as the DNS one: Chromium hands an
+IPv6 destination to the proxy rather than connecting to it. Measured with a
+proxied profile and an IPv4-only proxy, so the outcomes are distinguishable —
+the proxy received a `CONNECT` for the bracketed IPv6 literal and the
+destination saw **zero** direct hits.
+
+This is the **fourth** instance of one pattern: F49's `switch-all-direct`,
+F50's `prefer_sandbox`, the `--host-resolver-rules` correction, and this.
+Each time the *behaviour* claim was true, the *mechanism* cited was fiction,
+and the fiction sat in a document an operator would rely on. It is worth
+naming as a class, because the next one will look like the last four.
+
+**F58 — a refusal is not a server error.** `POST /api/profiles/<id>/launch`
+answered `500` for every unsuccessful launch, including the deliberate,
+documented refusals: a route that could not be resolved, a dead proxy on a
+fail-closed profile, a route this engine cannot use (F56), the concurrency
+cap. Two concrete costs: monitoring sees server errors during normal
+operation, and a client's retry logic retries something that can never
+succeed. The route *one line above* already used `409` for
+`consistency_blocked`, so the pattern was established and this path had not
+followed it.
+
+Now `409` for a decision, `404` for a missing profile, `500` only for a
+genuine fault. Both SDKs map a `409` on launch to a distinct `LaunchBlocked`
+error. A test derives the refusal list from the launcher's own source, so a
+new error code cannot be added without being classified as a refusal or a
+fault — it fails until someone decides.
+
+Found while writing the SDK tests against the real routes rather than a mock,
+which is the argument for doing that: a mocked client proves the client agrees
+with the author's idea of the API.
+
+---
+
+### F59–F62 — the double-application pass of 6 October 2026
+
+All four came out of replacing a *comparison* with a *prediction*. The
+suite's canvas check hashed a render in each realm and compared the hashes.
+That detects a disagreement but cannot say which realm is wrong, and it is
+blind to anything two realms get wrong together — which is how three defects
+lived under a passing test for as long as they did.
+
+The replacement fills a canvas with a **uniform opaque grey** (no text, so
+nothing comes from the font stack), reads it back, and reports the **mask**:
+which pixels moved, on which channel, in which direction. `pixelHash` is
+integer arithmetic over canvas position, so that mask can be **predicted in
+Python from the profile's seed** — cross-checked against the JavaScript in
+Node before being trusted — and every realm compared against the prediction.
+Two applications nudge the same pixels by ±2 instead of ±1, so *applied
+twice*, *wrong seed* and *not applied* become three different answers instead
+of three identical hash mismatches.
+
+**F59 — a worker's canvas noise was keyed to the wrong coordinates, and its
+PNG export carried no noise at all.** Both deterministic, both invisible to
+every probe that existed because every probe read from (0,0).
+
+The page keys noise to canvas *position*; the worker script always keyed it to
+(0,0). `getImageData(5,7,20,20)` on the same drawing: page noised at (5,7),
+worker at (0,0), on **12 of 12 runs in all five worker types**.
+
+Worse, the page hooks `OffscreenCanvas.convertToBlob` and the worker script
+did not hook it at all. Three profiles with different seeds, same drawing:
+
+| profile seed | page `convertToBlob` | worker `convertToBlob` |
+|---|---|---|
+| 111111 | 378539371 | **3394833805** |
+| 999999 | 116989659 | **3394833805** |
+| derived | 2291625482 | **3394833805** |
+
+The page's moves with the seed, as it must. The worker's is **one value for
+every profile on the machine** — the host's raw render. Any page that asks a
+worker to export a canvas gets a stable cross-profile identifier, and a
+contradiction against that worker's own page, in about five lines. Same shape
+as the service-worker platform leak of F53's pass, in the one surface nobody
+had read from an offset.
+
+Both fixed in `build_worker_identity_script`. **FIXED**
+
+**F60 — the page applied the canvas noise twice, because the F3 fix disarmed
+the guard that stopped it.** This is the defect that had been reported as
+flakiness: the realm canvas test failed about one run in six with the page
+disagreeing with all five workers, and three hypotheses had already been
+eliminated against it. The mask put it beyond argument in one line —
+`APPLIED TWICE`, bit-exact against the two-pass prediction — and a counter
+appended to the injected script confirmed it from the other side, `runs=2` in
+one document.
+
+Two causes, both of them a comment that had stopped being true.
+
+`evasion.js` guarded against stacking with
+`hasOwnProperty.call(origToDataURL, 'toString')` — true of a hooked function,
+false of a native one. **F3's native-masking fix then moved the claimed
+source into a WeakMap precisely so that nothing is written onto the hooked
+function.** The guard was left reading a property that no longer exists,
+constant false, dead, with the comment above it still explaining the
+mechanism that used to make it work.
+
+And the injector sent *both* ways of applying the identity to a document that
+already existed: `addScriptToEvaluateOnNewDocument(runImmediately: True)`,
+which applies the script to the document open now, **and** `Page.reload`,
+which replaces it with one that runs the registered copy. Whether both landed
+in one document depended on whether the reload committed before the immediate
+evaluation was dispatched — which is the whole of the intermittency. The
+comment on the reload still read *"addScriptToEvaluateOnNewDocument only
+affects the NEXT document"*, which stopped being true when `runImmediately`
+was added beside it.
+
+The two are now exclusive, with the reload preferred where it applies because
+it runs the page under the identity from document start. A reload that
+**fails** now applies the script to the live document and says so — it used to
+append *"reloaded a pre-existing page to apply identity"* when the command was
+merely *sent*, so a failed reload reported success in the one place an
+operator would look. And `evasion.js` now asks the behaviour rather than
+inspecting a property: draw a known value where `pixelHash` says a nudge
+lands, read it back, see whether something already moved it. There is nothing
+left to inspect, and that is deliberate — **a hook built to be
+indistinguishable from a native one cannot find itself by looking.**
+
+24 consecutive samples at the timing that reproduced it are clean. The flake
+rate was 1 in 6, so that is strong evidence and not proof; what carries the
+conclusion is that the mechanism is identified, unit tests pin both halves,
+and the live test now checks an absolute property instead of agreement between
+realms. **FIXED**
+
+**F61 — a page disagreed with its own iframes on audio, client rects and
+WebGL pixels, every time.** Found by asking the question F60 raised — *which
+other spoofs are additive, and does anything else apply them twice?* — rather
+than by another test failing. Nothing was failing: no probe in the suite
+compared a page against an iframe on any of these three surfaces.
+
+Most spoofs here are substitutions, and applying a substitution twice changes
+nothing. Three are not. Audio noise nudges every sample, rect noise nudges
+every coordinate, WebGL `readPixels` nudges every pixel, and each copy of the
+script keeps its own record of what it has already nudged.
+
+Two paths reach an iframe: the injector's new-document script, in the frame's
+own realm, and the parent walking `contentWindow` (`evasion.js` section 8) to
+apply the spoofs from outside. Section 8 was written when it was the only path
+there was, and its own comment recorded the measurement that justified adding
+the audio and rect calls — *"an audio or rect fingerprint taken inside a frame
+returned the host's"*. That was true then. Once
+`addScriptToEvaluateOnNewDocument` began reaching frame realms, both paths
+ran:
+
+| surface | page | every iframe |
+|---|---|---|
+| audio | 124.043476408231 | **124.043477541301** |
+| rect x | 11.687566983437 | **11.687633966873** |
+
+Deterministic, on srcdoc, `about:blank` and URL frames alike. **The noise was
+causing the contradiction it exists to prevent** — a page comparing its own
+audio fingerprint against the one its own iframe reports saw two machines, and
+unlike F60 this one happened on every single load.
+
+That the injected script now reaches frame realms is not assumed; it is
+measured. Canvas noise is applied *only* by that script and never by section
+8, and canvas noise was already correct inside all three frame kinds. That
+also supplies the guard: section 8 is now a fallback that asks whether the
+frame already carries the identity — by the one spoof only the injected copy
+applies — and does nothing more if it does. The native-function masking stays
+unconditional, because that is about a page borrowing a pristine
+`Function.prototype.toString` out of a fresh realm, which is a property of the
+parent's hooks rather than the frame's.
+
+`tests/test_iframe_additive_live.py` covers all three surfaces, and checks the
+rect noise **absolutely** rather than by agreement: the nudge is deterministic
+in the original coordinate and Blink has already quantised that coordinate to
+1/64 px — two orders coarser than the 5e-4 px nudge — so the pre-noise value
+can be recovered from the read and the one-pass and two-pass predictions
+computed from it. Agreement alone cannot catch two realms being wrong
+together, which is the mistake that let F59 sit under a passing test.
+**FIXED**
+
+**F62 — the residual canvas disagreement was Chromium's, not ours, and a
+control is what showed it.** After F59–F61, CI still failed three canvas
+assertions, in `shared` and `service` only — the two realms that run in their
+own process. Locally they passed. That is the shape of a real intermittent
+defect, and it would have been easy to keep chasing.
+
+The mask instrument ruled it out in one step: **every** mask check passed in
+CI, in all six realms, so the noise was applied exactly once at the right
+coordinates everywhere. Whatever differed was the render *underneath* the
+noise. Every surviving failure drew text; every passing check drew flat grey.
+
+Text metrics localised it to one row — a family that **exists nowhere**:
+
+| family | page / dedicated worker | shared / service |
+|---|---|---|
+| `__NoSuchFontAnywhere__` | 170.672 (serif) | 170.625 (sans) |
+
+Chromium's last-resort font family is a per-process preference, and a shared
+or service worker does not get the page's. Every family that showed a
+divergence had exactly those two values, i.e. none of them resolved and each
+process fell back to its own default.
+
+**Stock Chromium, same host, same probe, no profile and no fontconfig
+override, gives the identical split.** So this is engine behaviour. Asserting
+agreement on it would have been asserting that the product differs from
+Chrome — and the suite was doing exactly that, invisibly, because `12px serif`
+resolves on this host and does not in CI.
+
+Two corrections to my own reasoning, both recorded because each was wrong in a
+way worth seeing:
+
+*I first read it as a font-restriction leak* — the host's real font set
+readable through a service worker while the page hid it, the F53 shape. The
+measurement disproved it: under a Windows claim, every rejected Linux family
+measured exactly like the absent control in the page, a dedicated worker, a
+shared worker and a service worker alike.
+
+*I then wrote a test asserting that a restricted family is hidden in every
+realm, and removed it*, because it cannot be sound. It inferred "hidden" from
+a family measuring the same as the absent control — and a family that **does**
+resolve measures the same as that control whenever its metrics match the
+realm's last-resort font. An own-process worker's last-resort family is sans
+here, so `Liberation Sans` is resolved there and indistinguishable from
+absent, and the test duly reported it hidden. Width alone cannot separate the
+two cases; proving the restriction holds needs a channel that distinguishes
+*resolved* from *fell back*, which `measureText` does not provide. The reason
+is recorded in the test file so it is not rewritten.
+
+The fix is to the probes, not the engine. The realm canvas hash in
+`identity_probe.py` and in `test_worker_realms_live.py` now draws flat shapes,
+which measures the canvas noise those assertions are about. The text render is
+kept as `textHash`, recorded and not compared, so the observation survives.
+Text metrics are compared separately and only for families that resolved.
+**Not a defect; probes corrected.**
+
+**The class, now at five.** F49's `switch-all-direct`, F50's `prefer_sandbox`,
+the `--host-resolver-rules` correction, F57's `--disable-ipv6`, and this. Each
+time the behaviour claim was true and the mechanism cited was fiction. F60 is
+the first where the fiction was **load-bearing**: the guard did not merely
+describe itself wrongly, it stopped working, and nothing in the code or the
+tests said so. The lesson generalises past canvas — **a fix that removes an
+observable property can silently break every check that read it**, and there
+is no compiler for that.
+
+---
+
+### F53–F56 — the parity pass of 5 October 2026
+
+Four findings from the work in
+[`reports/Browser parity roadmap 2026.md`](../reports/Browser%20parity%20roadmap%202026.md)
+Phases 1–3. Each is written up at length where it was fixed; this is the
+register entry.
+
+All four share a shape worth naming: **every one was found by a measurement
+that did not previously exist**, and three of them sat in surfaces the
+internal probes happened not to cover. The two the roadmap named came from a
+public checker; the third came from the comparison harness built to reproduce
+them, on its first run; the fourth came from the first test in this repository
+to ask where traffic actually left from rather than what the launcher decided.
+
+**F53 — shared and service workers reported the host OS.** `userAgent` was
+right in every realm (a process-wide flag) and `userAgentData` was not.
+Probing each realm separately split it: dedicated workers — blob, URL and
+module — were already correct, because a dedicated worker runs in its owner
+document's renderer and inherits the page's `Network.setUserAgentOverride`.
+Shared and service workers are their own targets in their own processes and
+inherited nothing. CreepJS reports from a `ServiceWorkerGlobalScope` where
+one exists, which is why it saw this and a Blob-worker spot check did not.
+Fixed by sending the override to those two target types rather than shimming
+`NavigatorUAData` — a shim has a shape, which is the trade F3 keeps losing.
+
+**F54 — CSS disagreed with `screen.*`.** `evasion.js` can only define
+`screen.width` as a getter; CSS `device-width` is resolved by the compositor
+and no script can reach it. `Emulation.setDeviceMetricsOverride` moves both
+and was sent **only when a device preset was selected**, so every profile
+without one carried the contradiction. The reason that path was skipped was
+real — a viewport override letterboxes the operator's window — and it turned
+out to be avoidable: `width`/`height`/`deviceScaleFactor` of 0 means *screen
+only*, verified on Chromium 151 to move CSS `device-height` 1600 → 1440 with
+`innerWidth`, `innerHeight`, `outerWidth` and `outerHeight` byte-identical.
+
+**F55 — an impossible timezone.** The page returned the stored zone string
+verbatim, and on this engine `Intl.supportedValuesOf('timeZone')` does not
+contain `Asia/Kolkata` at all — so no real browser on this build can return
+it. **F44's shape**, a value outside the set of values that can exist, in one
+line with nothing to compare against. Internal agreement could not have
+caught it; only asking the engine what it supports does. Every worker said
+`Asia/Calcutta`, and so did stock Chromium in every realm, which identified
+the page as the outlier. Both spellings carry the same offset, which is why
+the original capture read as agreement.
+
+**F56 — authenticated SOCKS5.** Chromium has never implemented the SOCKS5
+username/password method. The product accepted the configuration, reported
+`ok: true`, noted "proxy auth=armed", and produced a browser that loaded
+nothing: 0 requests reached the destination and the proxy rejected 40
+handshakes. It failed *closed* — no host-IP leak — but silently from the
+operator's side, and authenticated SOCKS5 is what most commercial proxy
+providers sell. Now refused with the reason. The "armed" note referred to the
+CDP `Fetch.authRequired` handler, which answers an HTTP `407` and has nothing
+to do with SOCKS5.
+
+**And one that stays open:** a Linux-claiming profile shows `Liberation Sans`
+but neither `Liberation Serif` nor `Liberation Mono`, where stock Chromium on
+the same host shows all three, with identical generic baselines. The font plan
+and the rendered `fonts.conf` both contain all three families — `fc-list`
+under the profile's own config lists them — so what remains is Chromium's
+fallback under a restricted config, and it is unexplained. Recorded in
+[`04` §11.5](04_FINGERPRINT_TEST_RESULTS.md) rather than closed.
+
+---
+
 ### F52 — ✅ LOW: the audit log could be created world-readable in silence — **FIXED**
 
 **File:** [`audit.py`](../src/multiprofile/audit.py)
@@ -3577,7 +3906,7 @@ for the dead fingerprint step beside it.
 | Dead code | ✅ | F2 fixed — the extension staging path is deleted, not just documented |
 | TODOs/FIXMEs | ✅ | **zero** |
 | Type safety | 🟡 | frontend TS strict & clean; Python has annotations but **no type checker in CI** |
-| Tests | ✅ | 1,327 functions across 91 files; **2,267 passing**, 5 skipped; **76.6% coverage** against a 70% gate |
+| Tests | ✅ | 1,373 functions across 96 files; **2,353 passing**, 5 skipped; **76.6% coverage** against a 70% gate (coverage last measured before the parity pass) |
 | CI | ✅ | lint + 3-version matrix + coverage gate + isolated live-browser job |
 
 ## 4.2 Security

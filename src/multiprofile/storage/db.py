@@ -44,7 +44,15 @@ from .xdg import control_db_path
 
 log = logging.getLogger("multiprofile.storage.db")
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+
+
+class SchemaTooNewError(RuntimeError):
+    """The database was migrated by a newer build than this one.
+
+    Separate from a generic error so the API can answer 409 with the operator's
+    actual remedy rather than a 500 with a traceback.
+    """
 
 _DB_PATH_ENV = "MULTIPROFILE_CONTROL_DB"
 
@@ -310,6 +318,70 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     revoked_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON api_tokens(revoked_at);
+
+-- v8: the extension manager.
+--
+-- `extensions` is the managed package: one row per imported extension, with
+-- the payload path the browser is pointed at. `install_state` describes the
+-- PACKAGE ("imported" / "downloaded"), never a profile -- a file on disk is
+-- not an installation, and the two are deliberately different columns in
+-- different tables so that no query can confuse them.
+CREATE TABLE IF NOT EXISTS extensions (
+    ext_uuid         TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    version          TEXT NOT NULL,
+    manifest_version INTEGER NOT NULL,
+    description      TEXT NOT NULL DEFAULT '',
+    source           TEXT NOT NULL,
+    source_detail    TEXT NOT NULL DEFAULT '',
+    permissions      TEXT NOT NULL DEFAULT '[]',
+    host_permissions TEXT NOT NULL DEFAULT '[]',
+    has_key          INTEGER NOT NULL DEFAULT 0,
+    payload_path     TEXT NOT NULL,
+    size_bytes       INTEGER NOT NULL DEFAULT 0,
+    install_state    TEXT NOT NULL DEFAULT 'imported',
+    expected_ext_id  TEXT,
+    default_for_new  INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+-- Previous payloads, so an update is recoverable rather than destructive.
+CREATE TABLE IF NOT EXISTS extension_versions (
+    ext_uuid         TEXT NOT NULL,
+    version          TEXT NOT NULL,
+    payload_path     TEXT NOT NULL,
+    manifest_version INTEGER NOT NULL DEFAULT 3,
+    size_bytes       INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (ext_uuid, created_at)
+);
+
+-- One row per (extension, profile). `state` is the per-profile truth and is
+-- the only thing allowed to say "installed":
+--   assigned           chosen for this profile, not yet applied by a launch
+--   pending_restart    the profile is running; the flag applies on next start
+--   installed_verified the browser was observed running it, ID recorded
+--   failed             with last_error, retryable on its own
+CREATE TABLE IF NOT EXISTS extension_assignments (
+    ext_uuid         TEXT NOT NULL,
+    profile_id       TEXT NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    state            TEXT NOT NULL DEFAULT 'assigned',
+    assigned_at      TEXT NOT NULL,
+    applied_at       TEXT,
+    verified_at      TEXT,
+    observed_ext_id  TEXT,
+    observed_version TEXT,
+    last_error       TEXT,
+    PRIMARY KEY (ext_uuid, profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ext_assign_profile
+    ON extension_assignments(profile_id);
+CREATE INDEX IF NOT EXISTS idx_ext_assign_state
+    ON extension_assignments(state);
+CREATE INDEX IF NOT EXISTS idx_ext_default_new
+    ON extensions(default_for_new);
 """
 
 
@@ -336,6 +408,25 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(_SCHEMA_SQL)
         row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
         current = int(row["v"]) if row and row["v"] is not None else 0
+        if current > SCHEMA_VERSION:
+            # A newer build has already migrated this database. Migrations are
+            # forward-only -- there is no downgrade path -- so an older build
+            # opening it would run on a schema it does not know: it would read
+            # and write the tables it recognises and silently ignore the rest,
+            # which for v8 means an operator's extension assignments quietly
+            # not applying while the console reports them as assigned.
+            #
+            # Refusing is the only honest option, and it has to happen here,
+            # because `current < SCHEMA_VERSION` is False in this case and the
+            # old code simply fell through to normal operation.
+            raise SchemaTooNewError(
+                f"this database is at schema v{current} but this build of "
+                f"multiprofile only understands v{SCHEMA_VERSION}. It was "
+                "migrated by a newer version, and schema migrations are "
+                "forward-only. Install the newer version again, or restore "
+                "the pre-upgrade backup taken before that migration "
+                "(docs/BACKUP_AND_RESTORE.md)."
+            )
         if current < SCHEMA_VERSION:
             _migrate(conn, current, SCHEMA_VERSION)
             conn.execute(
@@ -386,6 +477,11 @@ def _migrate(conn: sqlite3.Connection, from_v: int, to_v: int) -> None:
     #     Nothing is backfilled. Jobs enqueued before this version were
     #     single-profile parking and health-check jobs with no batch, and
     #     inventing one to put them in would be inventing history.
+    # v8: `extensions`, `extension_versions`, `extension_assignments`, created
+    #     by _SCHEMA_SQL above. Nothing is backfilled and nothing can be: the
+    #     product had no extension management before this version, so there
+    #     are no assignments to infer. An upgraded install starts with an
+    #     empty extension list, which is the truth.
     if from_v == 3:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(profiles_trash)")}
         if "disk_bytes" not in cols:
@@ -1295,6 +1391,7 @@ def close() -> None:
 __all__ = [
     "SCHEMA_VERSION",
     "InvalidStateTransition",
+    "SchemaTooNewError",
     "ProfileState",
     "claim_next_job",
     "close",

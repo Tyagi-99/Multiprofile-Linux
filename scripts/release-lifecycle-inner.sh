@@ -198,16 +198,61 @@ test "$(dpkg-query --showformat='${Version}' --show multiprofile-native)" = "1.9
   || { echo "rollback did not take"; exit 1; }
 echo "rolled back to 1.9.0: ok"
 
-step "12. the rolled-back install still runs"
+step "12. the rolled-back install still runs, and serves its console"
 ( nohup multiprofile --server-only --port 8777 >"$WORK/app.log" 2>&1 & )
 sleep 10
 python3 - <<'PY'
 import json, urllib.request
-body = json.loads(urllib.request.urlopen("http://127.0.0.1:8777/api/health", timeout=15).read())
-print("health ok:", body["ok"], "version:", body["version"])
-assert body["version"] == "1.9.0", body["version"]
+
+health = json.loads(
+    urllib.request.urlopen("http://127.0.0.1:8777/api/health", timeout=15).read())
+print("health ok:", health["ok"], "version:", health["version"])
+assert health["version"] == "1.9.0", health["version"]
+
+# The console, not just the API. This step used to fetch /api/health alone,
+# which cannot see the console at all: the .deb installs the static export to
+# /usr/share/multiprofile/static while the package code goes to
+# /usr/lib/multiprofile, so the UI is found by an absolute path that only
+# exists after a real install. A packaging change that moved or dropped it
+# would have left every API assertion green and shipped a product whose first
+# screen is an HTTP 500.
+assert health.get("static_ok") is True, (
+    f"health says the console is not installed: static_ok={health.get('static_ok')}")
+
+with urllib.request.urlopen("http://127.0.0.1:8777/", timeout=15) as r:
+    assert r.status == 200, r.status
+    page = r.read().decode("utf-8", "replace")
+print("console: HTTP 200,", len(page), "bytes")
+assert "<!DOCTYPE html" in page or "<!doctype html" in page, page[:200]
+# The export is a Next.js static build, so its own bootstrap must be there --
+# an index.html that serves but references nothing would still be broken.
+assert "/_next/static/" in page, "the console page references no build assets"
+
+# And every asset the page references actually resolves, so the static route
+# works and not merely the index. Fetching only the page is not enough: when
+# the from-source package-data globs were single-level, the page answered 200
+# the whole time while every script it referenced answered 404.
+#
+# The backslash is excluded from the path because these also appear inside JS
+# string literals with escaped quotes, where it would be captured as part of
+# the path and produce a false 404.
+import re
+assets = list(dict.fromkeys(
+    re.findall(r'(/_next/static/[^"\'()\s\\]+)', page)))
+assert assets, "the console page references no build assets"
+broken = []
+for asset in assets:
+    try:
+        with urllib.request.urlopen(
+                "http://127.0.0.1:8777" + asset, timeout=15) as r:
+            if r.status != 200:
+                broken.append(f"{asset} -> {r.status}")
+    except Exception as e:
+        broken.append(f"{asset} -> {type(e).__name__}")
+assert not broken, f"the installed console references assets that 404: {broken}"
+print(f"console assets: {len(assets)}/{len(assets)} serve")
 PY
-echo "the installed package serves its API: ok"
+echo "the installed package serves its API and its console: ok"
 
 step "13. apt, against the same signed channel"
 # docs/UPDATES.md 4.4 gives operators an apt sources line. Until now that

@@ -162,6 +162,36 @@ def control_db_path() -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
+def extensions_dir() -> Path:
+    """Managed extension payloads.
+
+    The path layout is load-bearing, not cosmetic. An unpacked extension's ID
+    is derived by Chromium from its **absolute install path** unless the
+    manifest pins one with a ``key``, so the payload directory has to be
+    stable for the life of the extension -- across restarts and across
+    updates. Versions therefore live in ``versions/`` and the browser is only
+    ever pointed at ``payload/``, whose contents are replaced in place:
+
+        extensions/<ext_uuid>/payload/          <- the path the browser loads
+        extensions/<ext_uuid>/versions/<v>/     <- kept for rollback
+    """
+    p = data_dir() / "extensions"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def extension_payload_dir(ext_uuid: str) -> Path:
+    """The stable path an extension is always loaded from. Not created here."""
+    return extensions_dir() / ext_uuid / "payload"
+
+
+def extension_versions_dir(ext_uuid: str) -> Path:
+    """Where previous payloads are retained so an update is recoverable."""
+    p = extensions_dir() / ext_uuid / "versions"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def chrome_profile_dir(profile_id: str) -> Path:
     p = data_dir() / "chrome-profiles" / profile_id
     p.mkdir(parents=True, exist_ok=True)

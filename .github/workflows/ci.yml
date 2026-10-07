@@ -41,7 +41,10 @@ jobs:
         run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
 
       - name: Lint
-        run: uvx ruff check src/ tests/
+        # scripts/ and sdk/ too: the release tooling, the parity and
+        # endurance harnesses and both SDKs are code an operator runs,
+        # and they were outside the gate until 6 October 2026.
+        run: uvx ruff check src/ tests/ scripts/ sdk/
 
       - name: Test
         env:
@@ -91,6 +94,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install Chrome
+        id: chrome
         uses: browser-actions/setup-chrome@v1
       - name: Install a display and a session bus
         # The product launches Chromium **headful** with --ozone-platform=x11,
@@ -107,15 +111,113 @@ jobs:
           sudo apt-get install -y -qq --no-install-recommends \
             xvfb dbus dbus-x11 fonts-liberation \
             libasound2 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Chrome for Testing
+        id: cft
+        # The extension feature needs a browser that still accepts
+        # --load-extension. The runner image ships branded Google Chrome,
+        # which has not accepted it since 137, so for the whole life of the
+        # feature the capability gate refused and the extension suites
+        # skipped -- silently, until `-rs` was added.
+        #
+        # Chrome for Testing is the supported answer and the one this
+        # product's own remediation text names. It is installed BESIDE the
+        # image's Chrome rather than replacing it, and only the extension
+        # step is pinned to it (see below).
+        run: |
+          set -euo pipefail
+          npx --yes @puppeteer/browsers install chrome@stable \
+            --path "$HOME/cft" | tee /tmp/cft.txt
+          # The installer prints "<build> <path>"; take the path.
+          BIN=$(awk '{print $NF}' /tmp/cft.txt | tail -1)
+          test -x "$BIN"
+          echo "binary=$BIN" >> "$GITHUB_OUTPUT"
+          "$BIN" --version
       - name: Install the project
         run: uv sync --all-extras --dev
-      - name: Isolation and live launch tests
+      - name: Allow the Chromium namespace sandbox
+        # Measured, with the exact stderr, by the preflight below:
+        #
+        #   FATAL ... zygote_host_impl_linux.cc:130] No usable sandbox! If you
+        #   are running on Ubuntu 23.10+ ... that has disabled unprivileged
+        #   user namespaces with AppArmor ...
+        #
+        # The runner image's own branded Chrome is installed where an AppArmor
+        # profile covers it; a Chrome for Testing unpacked into $HOME is not,
+        # so its zygote cannot create a user namespace and it aborts with
+        # SIGTRAP before doing anything.
+        #
+        # The restriction is relaxed on the runner rather than passing
+        # --no-sandbox to the browser. --no-sandbox would make these tests pass
+        # while measuring a browser configured differently from the one
+        # operators run, and the sandbox is part of the posture this product
+        # reports on (`multiprofile --doctor` has a line for it). The runner is
+        # an ephemeral VM; an operator's machine is not touched.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sysctl kernel.apparmor_restrict_unprivileged_userns
+      - name: Chrome for Testing must actually launch headful here
+        # A preflight, because the last attempt to give this job a capable
+        # engine pinned a browser that could not start headful on this image,
+        # and the result was 29 failures and 192 errors -- a cascade that said
+        # nothing about the real problem. This fails at the engine, with the
+        # engine's own stderr, before any test runs.
+        #
+        # The script lives in the repository rather than inline here so it can
+        # be run on a developer's machine, in both directions. The first inline
+        # version used --dump-dom as its success signal, which is a headless
+        # facility: asked for it headful, Chrome opened a window, never exited,
+        # and the check timed out having proved nothing.
         env:
+          MULTIPROFILE_ENGINE_BINARY: ${{ steps.cft.outputs.binary }}
           PYTHONPATH: src
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             dbus-run-session -- \
-              uv run pytest tests/ -q -m network -p no:randomly
+              uv run python scripts/engine-preflight.py
+      - name: Isolation and live launch tests
+        env:
+          PYTHONPATH: src
+          # Deliberately NOT pinned. This step keeps running against whatever
+          # the image resolves (branded Google Chrome), because that is the
+          # configuration these 650-odd tests are known green on, and the one
+          # previous attempt to repin the whole job took it to 29 failed and
+          # 192 errors. The extension suites get their own step below with
+          # their own engine.
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- \
+              uv run pytest tests/ -q -rs -m network -p no:randomly \
+                --ignore=tests/test_extension_live.py \
+                --ignore=tests/test_extension_acceptance_live.py
+        # -rs prints the reason for every skip. Under plain -q a module-level
+        # skip is a single `s` with no explanation, which is how a twelve-test
+        # live suite went missing from a run without anything going red. A
+        # suite that silently stops running is worse than one that fails.
+      - name: Extension acceptance tests (Chrome for Testing)
+        # Runs even if the step above failed. Without this, one unrelated live
+        # failure skips this step entirely -- which is what happened on the
+        # first run that had a working engine: two http_auth failures in the
+        # other step, and the twenty-one extension tests this job exists to
+        # run never executed. A step that hides the coverage it was added to
+        # provide is worse than no step.
+        if: success() || failure()
+        env:
+          PYTHONPATH: src
+          MULTIPROFILE_ENGINE_BINARY: ${{ steps.cft.outputs.binary }}
+          # The point of this step. A skip here is a failure: this is the only
+          # environment responsible for extension coverage, so it is not
+          # allowed to quietly provide none. See
+          # _extension_lab.require_unpacked_support.
+          MP_REQUIRE_EXTENSION_TESTS: "1"
+        run: |
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" \
+            dbus-run-session -- \
+              uv run pytest -q -rs -m network -p no:randomly \
+                tests/test_extension_live.py \
+                tests/test_extension_acceptance_live.py
 
   frontend:
     name: Console
@@ -245,6 +347,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Console dependencies
+      # Split, because the two questions have different answers and only one
+      # of them is a release decision.
+      #
+      # What could SHIP is the blocking one. The .deb ships `src/static` --
+      # the built static export -- and no node_modules at all, so a
+      # production-tree advisory still only affects a build host; but that is
+      # the closest thing to shipped exposure this project has, and it is
+      # currently clean, so it can be a real gate rather than noise.
+      - name: Console dependencies that could reach a build artefact
         working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+      # Dev-only advisories are reported and do not gate. The standing example
+      # is braces <-> micromatch <-> fast-glob <-> @next/eslint-plugin-next
+      # <-> eslint-config-next: a lint-time stack-exhaustion DoS whose only
+      # offered fix is downgrading eslint-config-next from 16.3.6 to 14.2.35,
+      # a semver-major move away from the Next 16 this console is built with.
+      # Taking that fix would mismatch the framework to silence a tool that
+      # never runs outside CI. See docs/11_EXTENSIONS.md section 9.
+      - name: Console dev dependencies (reported, not a gate)
+        working-directory: frontend
+        continue-on-error: true
         run: npm audit --audit-level=high

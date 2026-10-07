@@ -4,8 +4,8 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Ubuntu-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)]()
-[![Tests](https://img.shields.io/badge/tests-2267%20passed-brightgreen.svg)](tests/)
-[![Coverage](https://img.shields.io/badge/coverage-76.6%25-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-2653-brightgreen.svg)](tests/)
+[![Coverage](https://img.shields.io/badge/coverage-79%25-brightgreen.svg)](tests/)
 
 A robust, enterprise-grade, clean-room native Linux platform for managing isolated browser profiles. Designed for software verification, testing laboratories, automation engineers, and multi-tenant environments requiring real per-profile network isolation, storage segregation, and deterministic hardware identities.
 
@@ -28,7 +28,7 @@ A robust, enterprise-grade, clean-room native Linux platform for managing isolat
 - **Pre-Launch Health Gate**: `ProxyHealthManager` probes TCP socket connectivity and verifies HTTP egress before spawning Chromium.
 - **Fail-Closed by Default (`ProxyFallback.BLOCK`)**: Dead, timed-out, or unreachable proxies **abort launch immediately**. Chromium is never spawned against a failed route, eliminating silent fallback to the operator's real IP.
 - **Leak Elimination Policies**:
-  - **DNS**: Forces remote resolution via `--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost"`.
+  - **DNS**: A proxied profile emits no DNS of its own — Chrome hands the hostname to the HTTP or SOCKS5 proxy and the proxy resolves it. No flag is involved; `--host-resolver-rules` was removed because it also blocked the profile from reaching its own proxy (see `docs/NETWORK_ISOLATION.md` §4.1).
   - **IPv6**: Disables dual-stack bypass via `--disable-ipv6`.
   - **WebRTC**: Restricts UDP egress via `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` alongside DOM candidate traps.
 - **Credential Protection**: Passwords are never placed in CLI arguments (`ps aux` safe) and are dynamically authenticated via `chrome.webRequest.onAuthRequired`.

@@ -27,7 +27,7 @@ from ..api import events
 from ..audit import audit_log
 from ..config import get_settings
 from ..cookies_store import load_cookies
-from ..engine import detect_engine_version, find_browser_binary
+from ..engine import detect_engine_version
 from ..fingerprint import build_fingerprint, normalize_seed
 from ..network import (
     NetworkMode,
@@ -35,6 +35,7 @@ from ..network import (
     check_proxy_before_launch,
     chrome_network_flags,
     network_config_for_profile,
+    unsupported_route_reason,
 )
 from ..storage import db as _db
 from ..storage.profiles import get_profile, set_runtime, update_profile
@@ -347,21 +348,209 @@ def extension_src() -> Path:
 
 
 def find_chrome() -> str:
-    # The candidate list lives in ``engine`` so that the binary we launch and
-    # the binary we ask for a version are the same one, in the same order.
-    path = find_browser_binary()
-    if path:
-        return path
+    """The browser this install uses -- the pin included.
+
+    The comment here used to say "the binary we launch and the binary we ask
+    for a version are the same one". It was not: this called
+    ``find_browser_binary()``, which walks PATH and has never looked at the
+    configured engine, so a pin reached the policy, the doctor and the
+    capability detector while the process that actually starts browsers
+    ignored it. Measured with ``MULTIPROFILE_ENGINE_BINARY=/usr/bin/true``:
+
+        find_chrome()                  -> /usr/bin/chromium   (what ran)
+        engine_policy.identify_engine  -> /usr/bin/true       (what was reported)
+
+    That was worse than untidy. ``BROWSER_BINARIES`` puts
+    ``google-chrome-stable`` ahead of ``chromium``, and branded Chrome 137+
+    cannot load unpacked extensions, so installing Chrome moved every profile
+    onto a runtime where the extension manager stops working -- silently,
+    and with a pin unable to prevent it.
+
+    Resolution now lives in one place. See ``engine_choice.resolve``.
+    """
+    from ..engine_choice import ORIGIN_PATH, record_observed, resolve
+
+    choice = resolve()
+    if choice.binary and Path(choice.binary).is_file():
+        # Remember what PATH answered, so a later change of answer is
+        # reportable instead of invisible. A pin needs no record: it IS one.
+        if choice.origin == ORIGIN_PATH:
+            record_observed(choice.binary)
+        return choice.binary
     raise FileNotFoundError(
         "Unable to start browser process.\n"
-        "Reason: Chromium/Chrome executable was not found on PATH.\n"
-        "Suggested action: sudo apt install chromium-browser  OR  install Google Chrome."
+        f"Reason: {choice.reason or 'no Chromium/Chrome executable was found.'}\n"
+        f"Suggested action: {choice.remediation or 'install Chromium, or pin a binary with MULTIPROFILE_ENGINE_BINARY.'}"
     )
 
 
 # ---------------------------------------------------------------------------
 # Extension preparation
 # ---------------------------------------------------------------------------
+
+def _extension_runtime_block(profile_has_extensions: bool) -> str | None:
+    """Why this launch must not proceed, or None. Guarded: never raises."""
+    if not profile_has_extensions:
+        return None
+    try:
+        from ..engine_choice import extension_runtime_block
+
+        return extension_runtime_block(True)
+    except Exception as e:  # noqa: BLE001 - never block a launch over this
+        log.warning("extension runtime check unavailable: %s", e)
+        return None
+
+
+def _assigned_extension_payloads(profile_id: str) -> list[tuple[str, str]]:
+    """``(ext_uuid, payload_path)`` for this profile's enabled extensions.
+
+    Imported lazily and guarded: the extension manager is an optional part of
+    the control plane, and a profile must still launch if it is unavailable or
+    if its tables have not been created yet. A launch that fails because the
+    extension feature is broken would be a worse bug than an extension that
+    does not load.
+    """
+    try:
+        from ..extensions.manager import payload_paths_for_profile
+
+        return payload_paths_for_profile(profile_id)
+    except Exception as e:  # noqa: BLE001 - never block a launch over this
+        log.warning("extension assignments unavailable for %s: %s", profile_id, e)
+        return []
+
+
+def _observe_extension_ids(debug_port: int, timeout_s: float = 6.0) -> list[str]:
+    """Extension IDs the browser itself reports, read off its target list.
+
+    An MV3 extension with a service worker shows up as a target whose URL is
+    ``chrome-extension://<id>/...``. Asking the browser is the point: a path
+    on a command line and a row in a database both say what we intended, and
+    neither says what happened.
+
+    Polled rather than read once, because the extension's service worker
+    starts asynchronously after the browser does.
+    """
+    import json as _json
+    import urllib.request as _url
+
+    deadline = time.time() + timeout_s
+    seen: set[str] = set()
+    while time.time() < deadline:
+        try:
+            req = _url.Request(
+                f"http://127.0.0.1:{debug_port}/json",
+                headers={"Host": f"localhost:{debug_port}"},
+            )
+            targets = _json.loads(_url.urlopen(req, timeout=2).read())
+        except Exception:  # noqa: BLE001 - the browser may not be listening yet
+            time.sleep(0.3)
+            continue
+        for t in targets:
+            url = str(t.get("url") or "")
+            if url.startswith("chrome-extension://"):
+                ext_id = url[len("chrome-extension://"):].split("/")[0]
+                if ext_id:
+                    seen.add(ext_id)
+        if seen:
+            return sorted(seen)
+        time.sleep(0.3)
+    return sorted(seen)
+
+
+def _verify_assigned_extensions(
+    profile_id: str, debug_port: int, assigned: list[tuple[str, str]]
+) -> dict[str, Any]:
+    """Mark the assignments applied, then reconcile against the browser."""
+    try:
+        from ..extensions.manager import mark_applied, verify_profile
+
+        mark_applied(profile_id, [u for u, _ in assigned])
+        observed = _observe_extension_ids(debug_port)
+        results = verify_profile(profile_id, observed)
+        return {
+            "assigned": len(assigned),
+            "observedIds": observed,
+            "results": [r.to_dict() for r in results],
+            "verified": sum(1 for r in results if r.ok),
+        }
+    except Exception as e:  # noqa: BLE001 - reporting must not fail a launch
+        log.warning("extension verification failed for %s: %s", profile_id, e)
+        return {"assigned": len(assigned), "error": str(e)}
+
+
+def open_url_in_profile(profile_id: str, url: str) -> dict[str, Any]:
+    """Open a URL in a profile that is already running, over CDP.
+
+    Used for the two things this product must NOT reimplement: the Chrome Web
+    Store install flow, and ``chrome://extensions`` with the browser's own
+    Developer Mode and *Load unpacked*. Both belong to the browser. Pointing a
+    real browser window at them, in the right profile, is a supported route;
+    writing files into a profile directory and calling it a Web Store install
+    is not.
+
+    Requires the profile to be running, and says so rather than launching it:
+    a Web Store install needs the operator in front of the window, so starting
+    a browser behind their back would be the wrong favour.
+    """
+    import json as _json
+    import urllib.request as _url
+
+    from .runtime_state import get_runtime
+
+    runtime = get_runtime(profile_id)
+    port = getattr(runtime, "cdp_port", None) if runtime else None
+    if not port or not _cdp_port_open(int(port)):
+        return {
+            "ok": False,
+            "errors": ["profile_not_running"],
+            "error": (
+                "This profile is not running, so there is no window to open "
+                "the page in. Launch it first."
+            ),
+        }
+    try:
+        ws_url = _json.loads(
+            _url.urlopen(
+                _url.Request(f"http://127.0.0.1:{port}/json/version",
+                             headers={"Host": f"localhost:{port}"}),
+                timeout=5,
+            ).read()
+        )["webSocketDebuggerUrl"]
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return {"ok": False, "errors": ["cdp_unreachable"],
+                "error": f"Could not reach the browser's debugger: {e}"}
+
+    try:
+        import websocket  # type: ignore
+    except ImportError:
+        return {"ok": False, "errors": ["dependency_missing"],
+                "error": "websocket-client is required to open a page in a "
+                         "running profile."}
+    try:
+        ws = websocket.create_connection(ws_url, timeout=10, suppress_origin=True)
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return {"ok": False, "errors": ["cdp_unreachable"], "error": str(e)}
+    try:
+        ws.send(_json.dumps({"id": 1, "method": "Target.createTarget",
+                             "params": {"url": url}}))
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            msg = _json.loads(ws.recv())
+            if msg.get("id") == 1:
+                if msg.get("error"):
+                    return {"ok": False, "errors": ["cdp_error"],
+                            "error": str(msg["error"].get("message") or msg["error"])}
+                return {"ok": True, "url": url,
+                        "targetId": (msg.get("result") or {}).get("targetId"),
+                        "profileId": profile_id}
+    finally:
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001,S110 - teardown
+            pass
+    return {"ok": False, "errors": ["cdp_timeout"],
+            "error": "The browser did not answer in time."}
+
 
 def _reconcile_with_preset(
     fingerprint: dict[str, Any], preset_cfg: dict[str, Any]
@@ -638,6 +827,135 @@ def _chrome_major_of(ua: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _screen_metrics_override(fingerprint: dict[str, Any]) -> dict[str, Any] | None:
+    """``Emulation.setDeviceMetricsOverride`` params for the claimed screen.
+
+    CSS ``device-width``/``device-height`` come from the compositor and no
+    JavaScript can reach them, so defining ``screen.width`` as a getter --
+    which is all ``evasion.js`` can do -- leaves a contradiction a page reads
+    in one line::
+
+        screen.width/height       1920 x 1080   the claim
+        CSS device-width/height   2560 x 1600   the display
+
+    Stock Chromium on the same host agrees with itself at 2560 x 1600, so the
+    disagreement is the product's.
+
+    ``width``, ``height`` and ``deviceScaleFactor`` are 0, which CDP reads as
+    *do not override the viewport*. Verified on Chromium 151: sending
+    ``screenHeight`` alone moved CSS ``device-height`` from 1600 to 1440
+    while ``innerWidth``, ``innerHeight``, ``outerWidth`` and ``outerHeight``
+    stayed byte-identical. That is what makes this safe to apply to every
+    profile rather than only the preset ones -- a viewport override letterboxes
+    and scales the operator's window, which is why the no-preset path skipped
+    it and carried the contradiction instead.
+
+    Device presets keep their own richer plan (``fingerprint.mobile``), which
+    sets the viewport deliberately because emulating a phone is supposed to
+    change it.
+    """
+    screen = fingerprint.get("screen") or {}
+    try:
+        width = int(screen.get("w") or 0)
+        height = int(screen.get("h") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {
+        # 0 = leave the viewport alone. See above.
+        "width": 0,
+        "height": 0,
+        "deviceScaleFactor": 0,
+        "mobile": bool(fingerprint.get("touch")),
+        "screenWidth": width,
+        "screenHeight": height,
+    }
+
+
+def _note_engine_policy(notes: list[str], profile_id: str) -> None:
+    """Record which build ran this profile, and say so when it is off policy.
+
+    A profile's identity is only reproducible against the engine that
+    produced it: relaunching under a different Chromium presents a different
+    browser with the same stored seed. The note is the record.
+
+    A pin violation is a fault rather than a note: the operator asked for one
+    build and got another, which is a broken expectation, not a choice.
+    """
+    try:
+        from ..engine_policy import (
+            VERDICT_SUPPORTED,
+            identify_engine,
+            verify_engine,
+        )
+
+        verdict = verify_engine(identify_engine())
+        record = verdict.record
+        notes.append(
+            f"Engine: {record.version_full or 'unknown'} "
+            f"({record.origin}, digest {(record.digest or '')[:12] or 'n/a'})"
+        )
+        if verdict.pin_violated:
+            _fault(notes, "engine_pin_violated",
+                   verdict.reasons[0] if verdict.reasons else
+                   "the pinned engine was not the one used",
+                   profile_id=profile_id)
+            return
+        if verdict.status != VERDICT_SUPPORTED:
+            notes.append(
+                f"engine policy: {verdict.status.upper()} — "
+                + (verdict.reasons[0] if verdict.reasons else "no detail")
+            )
+    except Exception as e:  # noqa: BLE001 - never fatal to a launch
+        log.debug("engine policy note unavailable for %s: %s", profile_id, e)
+
+
+def _note_identity_matrix(notes: list[str], fingerprint: dict[str, Any],
+                          profile_id: str) -> None:
+    """Tell the operator, at launch, what this profile's claim can be backed by.
+
+    The matrix is consulted at create time to pick a default, and reported in
+    ``/api/health`` and on the profile detail page. Neither of those is where
+    an operator is looking when they press Launch, and this is the moment the
+    decision becomes live -- so an experimental claim says so here as well.
+
+    Deliberately a plain note and **not** an identity fault. A fault means
+    something on the identity path failed; a cross-OS claim has not failed,
+    it is working exactly as asked on every surface the product controls,
+    with one surface known to contradict it. Recording it as a fault would
+    put a permanent entry in ``/api/health`` for a configuration the operator
+    chose on purpose, and would devalue the faults that do mean something
+    broke.
+    """
+    try:
+        from ..fingerprint.identity_matrix import EXPERIMENTAL, verdict_for
+
+        claimed = " ".join(
+            str(fingerprint.get(k) or "") for k in ("platform", "ch_platform")
+        ).lower()
+        if "win" in claimed:
+            claim = "windows"
+        elif "mac" in claimed:
+            claim = "macos"
+        elif "android" in claimed:
+            claim = "android"
+        elif "iphone" in claimed or "ios" in claimed:
+            claim = "iphone"
+        else:
+            claim = "linux"
+        verdict = verdict_for(claim)
+        if verdict.status != EXPERIMENTAL:
+            return
+        notes.append(
+            f"identity claim '{claim}' is EXPERIMENTAL on this host: "
+            f"{', '.join(verdict.contradicts)} contradict it. "
+            f"{verdict.reasons[0] if verdict.reasons else ''}".strip()
+        )
+    except Exception as e:  # noqa: BLE001 - never fatal to a launch
+        log.debug("identity matrix note unavailable for %s: %s", profile_id, e)
+
+
 def _start_identity_injection(
     profile_id: str,
     port: int,
@@ -711,6 +1029,7 @@ def _start_identity_injection(
         worker_script=build_worker_identity_script(fingerprint),
         locale=aligned.get("language") or fingerprint.get("language") or None,
         geolocation=aligned.get("geolocation"),
+        screen_metrics=_screen_metrics_override(fingerprint),
         timezone_id=str(
             fingerprint.get("timezone") or profile.get("timezone") or ""
         ).strip() or None,
@@ -988,6 +1307,27 @@ def launch_profile(
             "errors": ["route_unresolved"],
         }
 
+    # An unusable *kind* of route, checked unconditionally. This is not a
+    # health question -- "is this proxy up right now" and "can this engine use
+    # this kind of route at all" are different, and
+    # MULTIPROFILE_PROXY_CHECK_ENABLED=0 answers only the first. Putting this
+    # inside the health gate meant disabling the probe also disabled it, and
+    # an authenticated SOCKS5 profile launched green into a browser that
+    # could not load a page.
+    unsupported_reason = unsupported_route_reason(net)
+    if unsupported_reason:
+        if slot_held:
+            browser_manager.release_slot(profile_id)
+        audit_log("launch_blocked_route_unsupported", profile_id=profile_id,
+                  ok=False, detail={"error": unsupported_reason})
+        _record_state(profile_id, ProfileState.ERROR,
+                      note="route_unsupported: this engine cannot use this route")
+        return {
+            "ok": False,
+            "error": unsupported_reason,
+            "errors": ["route_unsupported"],
+        }
+
     if settings.proxy_check_enabled and net.needs_proxy_check():
         allowed, block_reason, proxy_health = check_proxy_before_launch(
             net, timeout=float(settings.proxy_check_timeout)
@@ -1173,7 +1513,49 @@ def launch_profile(
     # Chromium 141: the canvas hook's source contained "copy = null" twice, so
     # the noise was applied twice and the rendered fingerprint was neither the
     # one the config asked for nor reproducible across engines.
-    if settings.allow_webstore_extensions:
+    #
+    # A profile with extensions ASSIGNED is the third case, and it cannot have
+    # both. Measured on Chromium 151 with an unpacked MV3 fixture, using the
+    # marker its content script writes into a page as the evidence:
+    #
+    #     --load-extension=<dir>                           ran
+    #     --load-extension + --disable-extensions          did NOT run
+    #     --load-extension + --disable-extensions-except   ran
+    #
+    # So `--disable-extensions` wins, and a profile that is supposed to load an
+    # extension has to be launched without it. That is a real change to the
+    # profile's posture rather than a detail: an extension is enumerable, it
+    # can inject into pages, and exclusivity existed to stop exactly that. The
+    # note says so on every launch it applies to, per profile, so an operator
+    # reading the launch record can see which profiles traded exclusivity for
+    # an extension and which did not.
+    assigned_extensions = _assigned_extension_payloads(profile_id)
+    # A profile whose extensions cannot load on the selected runtime is
+    # refused rather than launched in a state the operator would read as
+    # working. Scoped to profiles that HAVE extensions, so this feature can
+    # never stop an ordinary profile launching.
+    runtime_block = _extension_runtime_block(bool(assigned_extensions))
+    if runtime_block:
+        audit_log("profile_launch", profile_id=profile_id, ok=False,
+                  detail={"reason": "extension_runtime_unsupported"})
+        return {
+            "ok": False,
+            "error": runtime_block,
+            "errors": ["extension_runtime_unsupported"],
+            "notes": notes,
+        }
+    if assigned_extensions:
+        paths = ",".join(p for _, p in assigned_extensions)
+        cmd.append(f"--load-extension={paths}")
+        # Pinning the allow-list to exactly our payloads means a Web Store
+        # extension left in the profile directory by a previous run does not
+        # silently come back with it.
+        cmd.append(f"--disable-extensions-except={paths}")
+        notes.append(
+            f"Extensions ON for this profile: {len(assigned_extensions)} assigned "
+            f"(--load-extension). Anti-detect exclusivity is OFF while they load."
+        )
+    elif settings.allow_webstore_extensions:
         notes.append("Web Store extensions allowed (exclusivity OFF — opt-in only)")
     else:
         cmd.append("--disable-extensions")
@@ -1341,6 +1723,9 @@ def launch_profile(
         # Google Chrome, ignoring"), leaving every one of those three jobs
         # undone while the console reported the profile healthy. Runs first
         # so a page is never unfrozen before its identity is installed.
+        _note_identity_matrix(notes, fingerprint, profile_id)
+        _note_engine_policy(notes, profile_id)
+
         try:
             notes.extend(_start_identity_injection(
                 profile_id, debug_port, profile, fingerprint, net,
@@ -1517,11 +1902,20 @@ def launch_profile(
         },
     )
 
+    # Extensions: record that the launch CARRIED them, then ask the browser
+    # what it actually loaded. Those are different facts and the second one is
+    # the only one allowed to say "installed" -- see extensions/manager.py.
+    extension_report: dict[str, Any] = {}
+    if assigned_extensions:
+        extension_report = _verify_assigned_extensions(
+            profile_id, debug_port, assigned_extensions)
+
     out: dict[str, Any] = {
         "ok": True,
         "pid": proc.pid,
         "url": start,
         "userDataDir": str(user_dir),
+        "extensions": extension_report,
         # The identity-script SOURCE, not a loaded extension — nothing is
         # staged per profile any more.
         "extension": str(ext),

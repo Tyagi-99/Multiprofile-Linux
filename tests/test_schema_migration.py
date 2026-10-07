@@ -159,11 +159,93 @@ def test_the_version_marker_is_recorded(tmp_path):
 
 def test_opening_an_upgraded_database_twice_is_fine(tmp_path):
     """`_ensure_late_indexes` runs unconditionally, so it has to be
-    idempotent — and a second open must not try to migrate again."""
-    _make_old_database(tmp_path / "data" / "multiprofile" / "control.db", 6)
-    db.count_profiles()
+    idempotent — and a second open must not try to migrate again.
+
+    The assertions below test that property directly. They used to test it by
+    proxy, through ``count_profiles() == 0``, and that proxy failed once in CI
+    with a bare ``assert 1 == 0`` on a commit whose only difference from a
+    passing one was a Markdown file.
+
+    A profile appearing in a database this test builds from scratch is a real
+    problem, so it is still checked — as a named diagnostic below rather than
+    as this test's subject. The mechanism is understood even though the
+    trigger is not: ``profiles._ensure_ready`` seeds the demo profile once per
+    database *path*, so **any** call to a ``profiles`` accessor while this
+    test's database is the active one will seed it. Candidates ruled out by
+    inspection: the parking sweeper (``parking_enabled`` defaults False and
+    every test that builds an app sets ``MULTIPROFILE_NO_BACKGROUND=1``), the
+    job workers, the update checker and the supervisor (all behind the same
+    guard). Not reproduced in four local full-coverage runs. **Not resolved.**
+    """
+    path = tmp_path / "data" / "multiprofile" / "control.db"
+    _make_old_database(path, 6)
+
+    db.count_profiles()                     # opens, migrates, answers
+    first = _schema_versions(path)
     db.close()
+    db.count_profiles()                     # opens again
+    second = _schema_versions(path)
+
+    # The actual property: the second open did not migrate again.
+    assert second == first, (
+        f"a second open migrated again: schema_version rows went "
+        f"{sorted(first)} -> {sorted(second)}")
+    assert db.SCHEMA_VERSION in second
+    # And the unconditional index creation stayed idempotent.
+    conn = sqlite3.connect(str(path))
+    try:
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+    finally:
+        conn.close()
+    assert "idx_jobs_batch" in names
+
+    _assert_no_foreign_profiles(path, "after opening an upgraded database twice")
+
+
+def _schema_versions(path) -> set[int]:
+    conn = sqlite3.connect(str(path))
+    try:
+        return {int(r[0]) for r in conn.execute("SELECT version FROM schema_version")}
+    finally:
+        conn.close()
+
+
+def _assert_no_foreign_profiles(path, when: str) -> None:
+    """Nothing should have written a profile into a database built here.
+
+    Read straight out of SQLite, deliberately not through the store: going
+    through the store would itself seed a demo profile on an empty table and
+    destroy the evidence. Retained because the CI occurrence is unexplained --
+    the next one should name the row rather than print a count.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, name, created_at FROM profiles LIMIT 10")]
+    finally:
+        conn.close()
+    if rows:
+        raise AssertionError(
+            f"{when}: a database this test created from scratch holds "
+            f"{len(rows)} profile(s), so something in the suite wrote to the "
+            f"active control database. db_path={db.db_path()} rows={rows}"
+        )
+
+
+def test_the_database_layer_does_not_seed_profiles(tmp_path):
+    """The boundary the diagnostic above depends on.
+
+    ``db.count_profiles()`` must not reach into the profile store, because the
+    store seeds a demo profile into an empty table. If that boundary is ever
+    crossed, the migration tests would seed the very rows they check for and
+    the diagnostic would become self-fulfilling.
+    """
+    path = tmp_path / "data" / "multiprofile" / "control.db"
+    _make_old_database(path, 6)
     assert db.count_profiles() == 0
+    _assert_no_foreign_profiles(path, "after a bare db.count_profiles()")
 
 
 def test_a_database_already_at_the_current_version_gains_a_missing_index(tmp_path):

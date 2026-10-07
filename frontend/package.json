@@ -32,5 +32,9 @@
     "typecheck": "tsc --noEmit",
     "check-static": "node scripts/check-static-fresh.mjs"
   },
-  "version": "1.9.0"
+  "version": "1.9.0",
+  "overrides": {
+    "source-map-js": "^1.2.2",
+    "sharp": "^0.35.5"
+  }
 }

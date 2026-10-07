@@ -373,6 +373,71 @@ def set_runtime(profile_id: str, status: str, pid: int | None = None) -> None:
         _write_json(runtime_state_path(), runtime)
 
 
+#: Catalogue id per platform claim, for the create-time default below.
+_NATIVE_UA_ID: dict[str, str] = {
+    "linux": "linux_chrome",
+    "windows": "win_chrome",
+    "macos": "mac_chrome",
+}
+
+
+def _default_identity_claim(profile: dict[str, Any]) -> None:
+    """Give a new profile the host's own platform, and *record* the choice.
+
+    A profile with neither ``userAgent`` nor ``userAgentId`` used to fall
+    through ``_detect_pool("")``, whose default is the Windows pool -- so the
+    shipped default claimed Windows on a Linux host. Measured against a stock
+    Chromium control on this machine, that claim is contradicted by fonts in
+    both directions at once: every Windows-exclusive face is absent, and
+    ``Liberation Mono`` is present, which no Windows machine has. See
+    ``fingerprint/identity_matrix.py``.
+
+    So a new profile defaults to the host's platform, which the matrix rates
+    ``supported`` because nothing has to be emulated for it to be coherent.
+
+    **The choice is written onto the profile, not left to a fallback.** That
+    is the whole point of doing it here rather than changing
+    ``_detect_pool``'s default:
+
+    * an existing profile already in the database has no ``userAgentId``, and
+      changing the derivation default would silently re-identify it -- a
+      profile with live logged-in sessions would come back as a different
+      machine, which is the opposite of what a profile manager is for;
+    * the value is visible in the API and the console, so the operator can
+      see what their profile claims and change it;
+    * and ``_detect_pool``'s Windows fallback stays exactly where it is, so
+      profiles created before this keep the identity they have.
+
+    An operator who asks for a cross-OS claim still gets it. The matrix marks
+    it experimental; it does not refuse it.
+    """
+    if (profile.get("userAgent") or "").strip():
+        return
+    if (profile.get("userAgentId") or "").strip():
+        return
+    # A device preset carries its own platform; stamping one here would fight
+    # it. Every spelling, because the canonical field is `deviceId` and
+    # `validation.py` already warns that this exact confusion has cost a test
+    # before -- guarding only `devicePresetId` let a `deviceId: pixel-9`
+    # profile be stamped linux_chrome, which overrode the Android preset's
+    # User-Agent and was caught by test_integration_v16.
+    if any(profile.get(key) for key in
+           ("deviceId", "device_id", "devicePresetId")):
+        return
+    if profile.get("isMobile"):
+        return
+    try:
+        from ..fingerprint.identity_matrix import host_platform_claim
+
+        claim = host_platform_claim()
+    except Exception as e:  # noqa: BLE001 - fall through to the old behaviour
+        log.warning("could not determine the host platform claim: %s", e)
+        return
+    ua_id = _NATIVE_UA_ID.get(claim)
+    if ua_id:
+        profile["userAgentId"] = ua_id
+
+
 def _new_profile(payload: dict[str, Any]) -> dict[str, Any]:
     """Build a complete profile from a create payload, without storing it.
 
@@ -394,6 +459,7 @@ def _new_profile(payload: dict[str, Any]) -> dict[str, Any]:
     profile.setdefault("proxyPass", "")
     profile.setdefault("clientId", payload.get("clientId"))
     profile.setdefault("tags", payload.get("tags") or [])
+    _default_identity_claim(profile)
     if "seed" not in profile or profile.get("seed") is None:
         profile["seed"] = _new_seed()
     profile["status"] = "idle"
@@ -422,12 +488,28 @@ def fleet_capacity() -> dict[str, int]:
     return {"stored": stored, "capacity": cap, "free": max(0, cap - stored)}
 
 
+def _apply_default_extensions(profile_id: str) -> None:
+    """Assign any default-for-new extensions to a profile just created.
+
+    Guarded and imported lazily: profile creation is the product's most basic
+    operation and must not start failing because the extension manager is
+    unavailable or its tables have not been created yet.
+    """
+    try:
+        from ..extensions.manager import apply_defaults_to_new_profile
+
+        apply_defaults_to_new_profile(profile_id)
+    except Exception as e:  # noqa: BLE001 - never block profile creation
+        log.warning("default extensions not applied to %s: %s", profile_id, e)
+
+
 def create_profile(payload: dict[str, Any]) -> dict[str, Any]:
     _ensure_ready()
     profile = _new_profile(payload)
     # Capacity is enforced here, not only in the bulk endpoint: a cap that a
     # loop of single creates can walk straight past is not a cap.
     db.insert_profiles([_for_storage(profile)], capacity=max_profiles())
+    _apply_default_extensions(profile["id"])
     return profile
 
 

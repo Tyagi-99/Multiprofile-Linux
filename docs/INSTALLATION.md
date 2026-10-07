@@ -1,6 +1,41 @@
 # Installation
 
-## From source — the only path verified on this machine
+See [`TEAM.md`](TEAM.md) for onboarding more than one person, and
+[`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) before you create anything
+you care about.
+
+## Rootless, per-user — the recommended path on Arch and anywhere without a `.deb`
+
+```bash
+bash scripts/install-local.sh
+```
+
+Creates a virtual environment under `~/.local/lib/multiprofile`, a
+`multiprofile` command in `~/.local/bin`, a desktop entry and icons. No sudo,
+nothing outside `$HOME`. It is idempotent -- re-running it is how you upgrade
+-- and it contains no code that writes to the data directory, so an upgrade
+cannot rewrite your profiles.
+
+Verified on Arch/Omarchy with Python 3.14. `scripts/uninstall-local.sh`
+removes the application and deliberately leaves your profiles where they are.
+
+## Verify the install before trusting it with real work
+
+```bash
+multiprofile --version
+multiprofile --doctor
+python3 scripts/smoke-test.py
+```
+
+`--doctor` exits non-zero when something must be fixed first.
+`scripts/smoke-test.py` drives the API the console uses and runs 46 checks --
+create, edit, launch, stop, restart, proxy on and off, backup, restore, and
+the full extension lifecycle including update and rollback -- against a
+**scratch** data directory, so it is safe on a machine that already holds real
+profiles. Browser checks are skipped with a reason if no usable engine is
+present.
+
+## From source, manually
 
 ```bash
 python3 -m venv .venv
@@ -52,6 +87,26 @@ To exercise the whole release process yourself:
 ```bash
 bash scripts/release-lifecycle.sh
 ```
+
+## Keeping the engine predictable
+
+The launcher tries `google-chrome-stable`, `google-chrome`, `chromium`,
+`chromium-browser` in that order. On a machine with more than one, pin the one
+you mean so installing another browser later cannot silently change which
+engine your profiles run on:
+
+```bash
+curl -s -X POST localhost:8765/api/engine/choose \
+     -H 'Content-Type: application/json' \
+     -d '{"binary": "/usr/bin/chromium"}'
+```
+
+The choice persists in `~/.config/multiprofile/engine.json` and
+`MULTIPROFILE_ENGINE_BINARY` overrides it for one run. This matters for
+extensions in particular: **branded Google Chrome 137+ cannot load unpacked
+extensions at all**, so a profile with an extension assigned will refuse to
+launch on it, naming the reason. Chromium and Chrome for Testing both work at
+any version. The product never substitutes a different browser for you.
 
 ## Where your data lives
 

@@ -66,12 +66,41 @@ if not _chrome_available():
 _FIELDS = (
     "p:navigator.platform,hc:navigator.hardwareConcurrency,lang:navigator.language,"
     "dm:navigator.deviceMemory,tz:Intl.DateTimeFormat().resolvedOptions().timeZone,"
+    # userAgent and userAgentData, added after a CreepJS run on this host
+    # found the page claiming Windows and the worker's userAgentData still
+    # saying Linux. The fields above were all agreeing at the time, because
+    # they are the ones the worker script sets; userAgentData is not one of
+    # them, and nothing was measuring it.
+    "ua:navigator.userAgent,"
+    "uap:(navigator.userAgentData?String(navigator.userAgentData.platform):'n/a'),"
+    "uam:(navigator.userAgentData?String(navigator.userAgentData.mobile):'n/a'),"
+    "uab:(navigator.userAgentData?navigator.userAgentData.brands"
+    ".map(b=>b.brand+'/'+b.version).sort().join('|'):'n/a'),"
     "gl:(()=>{try{const c=new OffscreenCanvas(8,8).getContext('webgl');"
     "const d=c.getExtension('WEBGL_debug_renderer_info');"
     "return String(c.getParameter(d.UNMASKED_RENDERER_WEBGL));}catch(e){return 'n/a'}})(),"
+    # Flat shapes, no glyph. This drew `12px serif` text, and a control run
+    # against stock Chromium showed that a glyph makes this hash measure
+    # something else entirely: Chromium's last-resort font family is a
+    # per-process preference, so a page and an own-process worker resolve an
+    # unresolvable family differently. With a family that exists nowhere, in
+    # **stock** Chromium on this host:
+    #
+    #     page / dedicated worker   170.672   (serif)
+    #     shared / service worker   170.625   (sans)
+    #
+    # That is why this assertion passed locally and failed in CI for `shared`
+    # and `service` only: wherever `serif` did not resolve, the two processes
+    # fell back to different families and the glyph pixels differed. Keeping
+    # the glyph would be asserting that the product differs from Chrome.
+    #
+    # The canvas noise is what must agree between realms, and flat shapes
+    # measure exactly that. `tests/test_canvas_noise_live.py` checks it harder
+    # still, against the mask the profile's seed predicts, and covers text
+    # metrics separately and soundly.
     "cv:(()=>{try{const c=new OffscreenCanvas(20,20);const x=c.getContext('2d');"
-    "x.fillStyle='#f30';x.fillRect(0,0,20,20);x.fillStyle='#08f';"
-    "x.font='12px serif';x.fillText('Ab',1,14);"
+    "x.fillStyle='rgb(128,128,128)';x.fillRect(0,0,20,20);"
+    "x.fillStyle='#f30';x.fillRect(2,2,7,11);x.fillStyle='#08f';x.fillRect(11,5,6,9);"
     "const d=x.getImageData(0,0,20,20).data;let h=0;"
     "for(let i=0;i<d.length;i++)h=(h*31+d[i])>>>0;return h;}catch(e){return 'n/a'}})()"
 )
@@ -269,3 +298,86 @@ def test_the_canvas_noise_was_actually_applied(realms):
     """Guards against the agreement being 'nothing is noised anywhere'."""
     assert isinstance(realms["top"]["cv"], int)
     assert realms["top"]["gl"] != "n/a"
+
+
+# --------------------------------------------------------------------------
+# userAgentData — the realm disagreement a CreepJS run found
+# --------------------------------------------------------------------------
+#
+# Measured on this host, product profile, no device preset, direct route,
+# against https://abrahamjuliot.github.io/creepjs/ :
+#
+#     page    userAgentData:  Google Chrome 151 (151.0.7922.173)
+#                             Windows 11 [15.0.0] x86_64
+#     worker  userAgentData:  Chromium 151
+#                             Linux                    <-- the host
+#
+# and that worker reported the *spoofed* GPU (ANGLE NVIDIA GeForce GTX 1660
+# Direct3D11) and the spoofed core count, so the worker script was running --
+# the script simply never set `userAgentData`. Stock Chromium on this host
+# reports exactly what the product's worker reported ("Chromium 151
+# (151.0.7922.173) / Linux x86_64"), which is what identifies the value as
+# the untouched host one rather than a partial override.
+#
+# Asking each realm separately, which is what these tests do, splits it:
+#
+#     worker_blob / worker_url / worker_module   Windows   ok
+#     shared / service                           Linux     leak
+#
+# A dedicated worker runs in its owner document's renderer and inherits the
+# page's `Network.setUserAgentOverride`, so it was right for free. A shared
+# worker and a service worker each get their own target in their own process
+# and inherit nothing. CreepJS reports from a ServiceWorkerGlobalScope where
+# one is available, which is why it saw the leak and a quick Blob-worker
+# check did not.
+
+
+@pytest.mark.parametrize("realm", REALMS)
+def test_the_realm_reports_the_profile_user_agent(realms, realm):
+    """The UA string comes from a process-wide flag, so this one was already
+    right in every realm. It is asserted anyway: it is the half of the pair
+    that made the other half's disagreement a *contradiction* rather than
+    merely a gap."""
+    assert realms[realm]["ua"] == realms["top"]["ua"], realm
+
+
+@pytest.mark.parametrize("realm", REALMS)
+def test_the_realm_reports_the_profile_user_agent_data(realms, realm):
+    """`navigator.userAgentData` must describe the same OS as the page.
+
+    A page can message any of these realms and compare. A service worker is
+    the worst case because it outlives the page: a script that reads
+    `userAgentData.platform` through one gets the host's real OS, beside a
+    `userAgent` claiming another, which is a contradiction no real browser
+    produces.
+    """
+    for key in ("uap", "uam", "uab"):
+        assert realms[realm][key] == realms["top"][key], (
+            realm, key, realms[realm][key], realms["top"][key],
+        )
+
+
+def test_user_agent_data_is_actually_available_to_measure(realms):
+    """Guards against the agreement above being 'n/a everywhere'.
+
+    127.0.0.1 is a secure context, so `navigator.userAgentData` exists in
+    every realm here. If it ever returns 'n/a' the assertions above pass
+    while measuring nothing.
+    """
+    assert realms["top"]["uap"] != "n/a", realms["top"]
+    assert realms["top"]["uab"] != "n/a", realms["top"]
+    assert "/" in realms["top"]["uab"], realms["top"]["uab"]
+
+
+def test_the_user_agent_and_its_metadata_describe_one_os(realms):
+    """The pair, checked against each other rather than against each realm.
+
+    `userAgent: Windows NT 10.0` beside `userAgentData.platform: Linux` is
+    the F1 contradiction, and it is catchable in one line by any page.
+    """
+    ua = realms["top"]["ua"]
+    platform = realms["top"]["uap"]
+    expected = {"Windows": "Windows NT", "macOS": "Mac OS X", "Linux": "Linux"}
+    marker = expected.get(platform)
+    assert marker, f"unhandled userAgentData.platform {platform!r}"
+    assert marker in ua, (platform, ua)

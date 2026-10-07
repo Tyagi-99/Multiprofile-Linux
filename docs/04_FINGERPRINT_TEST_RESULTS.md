@@ -12,17 +12,16 @@ evaluated over CDP in three browsers on the same machine, in the same session:
 Host: Arch Linux, Wayland/Hyprland, **Chromium 151.0.7922.173**, 16 cores,
 16 GB. The control's window is 800×600 headless; the profiles are headful.
 
-**What was not done, and why it matters.** The brief asks for results "per
-checker site, with screenshots" — CreepJS, Pixelscan, BrowserLeaks,
-Iphey and similar. **No third-party checker site was visited.** Two reasons:
-doing so from this machine would send the operator's real IP and a real
-browsing fingerprint to third parties, and a run with no proxy configured
-would measure a configuration nobody ships. The vectors those sites test are
-measured directly below instead, which is reproducible and does not depend on
-someone else's scoring formula — but it is **not a substitute** for a real
-CreepJS trust score, and this document should not be read as one. Running the
-checkers is a half-day of work once a proxy is configured, and it belongs in
-the next pass.
+**Third-party checkers: run on 5 October 2026.** §1–§10 were written when
+none had been visited, and the header used to say so. They have now been
+visited, on one host, with one profile, on a direct route — see **§11**, which
+records what they found and the two contradictions that came out of it. The
+original reasons for not visiting them were real and still constrain what is
+published here: a run from this machine sends the operator's real IP and a
+real fingerprint to a third party, so **§11 is redacted** — no IP addresses,
+no fingerprint IDs, no font hashes. The vectors those sites test are also
+measured directly below, which is reproducible and does not depend on someone
+else's scoring formula.
 
 **Every run in §1–§10 used a profile with a proxy configured.** That was not
 a stated choice, it was an assumption, and it hid a defect for the whole of
@@ -301,7 +300,7 @@ Stated so the gaps are not mistaken for passes:
 |---|---|
 | **TLS / JA3 / JA4** | **No implementation.** A profile claiming Chrome-on-Windows presents Chromium-on-Linux's handshake. Unreachable from JavaScript. |
 | **HTTP/2 SETTINGS / frame order** | **No implementation.** Same category. |
-| CreepJS / Pixelscan / BrowserLeaks / Iphey scores | Not run — see the header |
+| CreepJS / Pixelscan / BrowserLeaks scores | **Run 5 October 2026 — see §11.** One host, one profile, direct route, redacted. Iphey still not run |
 | Behaviour under a real proxy | Not run; geo alignment is tested against synthetic exits. The **no-proxy** path is measured in §10 |
 | Mobile profiles under real conditions | Preset-level only |
 | Long-session drift | Not tested |
@@ -407,11 +406,458 @@ Function.prototype.toString.call(HTMLCanvasElement.prototype.toDataURL)
 ```
 
 **F3 is present and unchanged on this path too.** Nothing in this section
-narrows it. Third-party checkers still have not been run — see the header.
+narrows it. Third-party checkers were run on 5 October 2026 and are recorded in **§11**; they found two contradictions this document had not, both now fixed.
 
 ---
 
-## 11. Summary
+## 11. Third-party checkers — 5 October 2026, one host, one profile
+
+**Redaction.** This section carries no IP addresses, fingerprint IDs, font
+hashes or full vector dumps. The raw captures stay outside the repository.
+Both an IPv4 and an IPv6 address appeared in them and neither is reproduced.
+
+**Setup.** Arch Linux, Wayland/Hyprland, system Chromium 151.0.7922.173, one
+Multiprofile profile with **no device preset** on a **direct route** (no
+proxy), against a clean stock Chromium control with a throwaway profile on
+the same host, same engine build, same session.
+
+### 11.1 The two contradictions, and what they were
+
+| Surface | Product profile | Stock control | Verdict |
+|---|---|---|---|
+| page `userAgentData` | Google Chrome 151, **Windows 11** | Chromium 151, Linux x86_64 | spoof applied |
+| **service worker** `userAgentData` | Chromium 151, **Linux** | Chromium 151, Linux x86_64 | **contradiction** |
+| `screen.width/height` | **1366 × 768** | 2560 × 1600 | spoof applied |
+| **CSS `device-width/height`** | **2560 × 1600** | 2560 × 1600 | **contradiction** |
+
+Both are **fixed**, with regression tests that fail without the fix:
+
+- The worker leak was **not** every worker type. Probing each realm
+  separately (`tests/test_worker_realms_live.py`) splits it: dedicated
+  workers — blob, URL and module — were already correct, because a dedicated
+  worker runs in its owner document's renderer and inherits the page's
+  `Network.setUserAgentOverride`. Shared and service workers are their own
+  targets in their own processes and inherited nothing. CreepJS reports from
+  a `ServiceWorkerGlobalScope` where one is available, which is why it saw
+  this and a Blob-worker spot check did not. Fixed by sending the override to
+  those two target types.
+- The screen contradiction was **every profile without a device preset**.
+  `evasion.js` can only define `screen.*` as getters; CSS `device-width` is
+  resolved by the compositor and no script can reach it. Fixed with
+  `Emulation.setDeviceMetricsOverride` carrying `screenWidth`/`screenHeight`
+  and a zeroed viewport — measured on Chromium 151 to move CSS
+  `device-height` 1600 → 1440 while leaving `innerWidth`, `innerHeight`,
+  `outerWidth` and `outerHeight` byte-identical, which is what makes it safe
+  to apply outside the preset path.
+
+### 11.2 Checker headlines, and why none of them is a gate
+
+| Checker | Product | Stock control |
+|---|---|---|
+| pixelscan.net | "fingerprint is **inconsistent**", "**masking detected**", "no automated behavior detected" | **identical verdict** |
+| creepjs.org/checker | 1 inconsistency; **Fonts 51/100** | — |
+| CreepJS (abrahamjuliot) | 31% "like headless", 0% headless, **20% stealth** | 38% "like headless", 0% headless, **0% stealth** |
+
+**Pixelscan returned the same verdict for clean stock Chromium**, so that
+headline does not discriminate between this product and an unmodified browser
+on this host and cannot be read as a pass or a failure of either. This is the
+single most important line in this section.
+
+The CreepJS numbers are the useful pair: the product scores *better* on
+"like headless" (31% vs 38%) and *worse* on "stealth" (20% vs 0%). That is
+**F3's ceiling as a number rather than an argument** — the spoofing is doing
+its job and is itself visible. It is one run on one host; it is not a trend.
+
+### 11.3 Fonts — the claim is still unbacked, and the product says so
+
+CreepJS loaded **1 of 51** probe fonts for the product and **6 of 51** for
+stock Chromium, so the masking leaves the profile *sparser* than an
+unmodified browser, not more ordinary. The launcher already records this
+without being asked, as identity faults visible in `/api/health`:
+
+```
+font_claim_unbacked   windows fonts with no metric-compatible file on this
+                      host, left absent: Calibri, Cambria, Georgia, Verdana,
+                      Tahoma, Trebuchet MS, Segoe UI, Consolas, Impact,
+                      Microsoft Sans Serif, Palatino Linotype,
+                      Franklin Gothic Medium
+font_backer_name_visible
+                      metric backers remain enumerable under their own names
+                      because Chrome reads the font file's name table:
+                      Liberation Mono, Liberation Sans, Liberation Serif
+```
+
+So the honest statement is the one the fault channel already makes: **a
+Windows profile on this host does not have Windows fonts**, aliases resolve
+but the files' internal name tables do not change, and twelve expected faces
+are absent. Installing metric-compatible files would change the first fault,
+not the second.
+
+### 11.5 Open: two font families the profile's own fontconfig will not match
+
+**Still open. Not fixed, and three hypotheses eliminated rather than one
+asserted.** Investigated 6 October 2026; the characterisation below is much
+sharper than the first version of this section, which only recorded that
+stock showed more fonts than the product.
+
+#### What it is
+
+A profile claiming Linux cannot resolve `Liberation Serif` or
+`Liberation Mono` by name, although both are installed on the host and both
+appear in the profile's own font list. Measured as widths of one string under
+each generic — a family that resolves changes the width, a family that does
+not falls through to the generic:
+
+| requested | product | stock Chromium | reading |
+|---|---|---|---|
+| `Liberation Sans` | `957/957/957` | `957/957/957` | resolves in both |
+| **`Liberation Serif`** | **`821/957/911`** | `911/911/911` | **unresolved** in the product |
+| **`Liberation Mono`** | **`821/957/911`** | `821/821/821` | **unresolved** in the product |
+| `Calibri` (genuinely absent) | `821/957/911` | `821/957/911` | unresolved in both |
+| generics `mono/sans/serif` | `821/957/911` | `821/957/911` | identical baselines |
+
+`821/957/911` *is* the generic triple, so the two families measure exactly
+like `Calibri`, which is not installed at all. The baselines are identical in
+both browsers, which removes the obvious explanation — a face whose metrics
+match the generic it is tested against.
+
+#### What has been ruled out
+
+**The product.** Stock Chromium reproduces it exactly when pointed at the
+profile's own config:
+
+```
+stock Chromium, HOST fontconfig:     Serif resolved,   Mono resolved
+stock Chromium, PROFILE fontconfig:  Serif UNRESOLVED, Mono UNRESOLVED
+```
+
+So nothing else the product does — CDP overrides, the injected script, the
+launch flags — is involved. It is the generated `fonts.conf`.
+
+**Chromium.** `fontconfig` fails the same way on its own, so the browser is
+only reporting it:
+
+```
+$ FONTCONFIG_FILE=<profile>/fonts.conf fc-match 'Liberation Serif'
+  -> Liberation Sans          (fallback, not a match)
+$ ... fc-match 'Liberation Mono'
+  -> Liberation Sans          (fallback, not a match)
+```
+
+**"Matching is broken in general."** It is not. Under the same config:
+
+| requested | matched |
+|---|---|
+| `Liberation Sans` | ✅ |
+| `Noto Color Emoji` | ✅ |
+| `JetBrainsMono Nerd Font` | ✅ |
+| `Noto Naskh Arabic` | ✅ |
+| `Liberation Serif` | ❌ |
+| `Liberation Mono` | ❌ |
+
+**The plan and the file set.** `plan_for_platform` puts 4 of 4 files for each
+of the three Liberation families into the plan, the private directory
+contains all twelve, and `fc-list` under the profile config enumerates all
+three families with their correct primary names. So the files are there and
+fontconfig can *see* them; it will not *match* two of them.
+
+#### Hypotheses tested and rejected
+
+| hypothesis | test | result |
+|---|---|---|
+| the missing host `conf.d` metric-alias rules weaken exact matching | added `30-metric-aliases.conf` to the config | **no change** |
+| a stale or partial per-profile font cache | cleared `<cachedir>` and re-matched | **no change** |
+| the `<rejectfont><glob>/usr/share/fonts/*` rules also match the private directory's **symlink targets**, which do point there | removed the whole `rejectfont` block | **no change** |
+
+The third was the most promising — the private entries really are symlinks
+into `/usr/share/fonts`, and the config really does reject that glob — which
+is exactly why it is recorded as tested rather than left as a plausible
+cause.
+
+#### Why it matters, and why it is not a gate
+
+The three Liberation faces ship in one package, so a Linux desktop with one
+of them is an unusual machine. The restriction may therefore be making the
+**native** claim less ordinary than an unmodified browser, which is the
+opposite of its purpose — and native is now the default.
+
+It is a **divergence, not a contradiction**: nothing here is impossible, and
+`compare_manifests` classifies it that way, so it does not fail the identity
+gate.
+
+#### The next concrete step
+
+`FC_DEBUG=4 fc-match 'Liberation Serif'` under the profile config, to see
+which matching stage discards the candidate. Everything above was reached
+without it; it is the obvious next instrument.
+
+**Reproduction, without the product at all:**
+
+```bash
+FONTCONFIG_FILE=<profile>/fonts.conf fc-match 'Liberation Serif'   # -> Liberation Sans
+FONTCONFIG_FILE=<profile>/fonts.conf fc-list  | grep 'Liberation Serif'  # -> present
+```
+
+---
+
+### 11.6 Resolved: the page applied the canvas noise twice
+
+**Closed 6 October 2026.** Recorded here as *open* the same day; the entry
+below replaces that one and corrects where it pointed.
+
+`tests/test_worker_realms_live.py::test_the_realm_renders_canvas_the_same_way`
+asserts that every worker realm hashes a canvas render identically to its
+page. It failed about one run in six, with the page disagreeing with all five
+workers while the workers agreed with each other.
+
+The previous entry hypothesised a **worker-side** race — a worker given the
+identity script twice, or not at all. That was wrong, and the shape of the
+data already said so: if the five worker realms agree with each other and only
+the page differs, the page is the outlier. What it got right was the final
+sentence: *"double application somewhere remains the leading candidate."*
+
+#### The instrument that settled it
+
+A canvas hash tells you two realms differ. It cannot tell you *how*, which is
+why eight runs of hashes produced three eliminated hypotheses and no cause.
+So the measurement was changed: fill a canvas with a **uniform opaque grey**,
+read it back, and report the **mask** — which pixels moved, on which channel,
+in which direction. No text is drawn, so nothing in the mask comes from the
+engine's font stack.
+
+`pixelHash` is integer arithmetic over canvas position, so the mask can be
+**predicted in Python from the profile's seed** and every realm compared
+against the prediction rather than against each other. The Python port was
+cross-checked against the JavaScript in Node first: for seed 1 at (0,0) both
+give `654898832`, and both select 34 of 400 pixels for seed 12345.
+
+A second application nudges the same pixels on the same channels in the same
+directions, so against a base of 128 it reads **±2 instead of ±1** — which
+makes "applied twice" distinguishable from "wrong seed" and from "not applied"
+in one read, where a hash makes them all look alike.
+
+#### What it found, in one line
+
+```
+settle=0.6  top  cv=885035865  APPLIED TWICE
+```
+
+Bit-exact against the two-pass prediction. Not noise over noise producing
+something unpredictable — one clean second application. Confirmed from the
+other side by a counter appended to the injected script by the harness:
+`runs=2` in one document, 1 of 11 samples at that timing.
+
+#### Two causes, both of them stale comments
+
+**The guard was dead.** `evasion.js` protected against stacking with
+
+```js
+const alreadyShielded = Object.prototype.hasOwnProperty.call(origToDataURL, 'toString');
+```
+
+— true of a hooked function, false of a native one. That held when it was
+written. The **F3 native-masking fix then moved the claimed source into a
+WeakMap precisely so that nothing is written onto the hooked function**, which
+left this check reading a property that no longer exists, constant false, and
+the guard silently disarmed. The comment above it still described the
+mechanism that used to make it work.
+
+**The injector sent both ways of applying the identity to one document.** For
+a page that was already open it sent
+`addScriptToEvaluateOnNewDocument(runImmediately: True)` — which applies the
+script to the document open *now* — **and** `Page.reload`, which replaces that
+document with one that runs the registered copy from its first line. Whether
+both landed in the same document depends on whether the reload commits before
+the immediate evaluation is dispatched, which is exactly why it was
+intermittent. The comment on the reload still read *"addScriptToEvaluateOnNewDocument
+only affects the NEXT document"*, which stopped being true when
+`runImmediately` was added beside it.
+
+This is the **same class as F49, F50, `--host-resolver-rules` and F57** — the
+behaviour claim true, the mechanism cited fiction — with one difference worth
+noting: here the fiction was load-bearing. The guard did not merely describe
+itself wrongly; it stopped working, and nothing said so.
+
+#### The fixes
+
+- The two applications are now **exclusive**: `runImmediately` is sent only
+  when the page will *not* be reloaded. The reload is preferred where it
+  applies, because it runs the page under the identity from document start
+  rather than patching a document that has already run site script.
+- If the reload **fails**, the script is applied to the live document
+  directly, and the status says so. Previously the status appended *"reloaded
+  a pre-existing page to apply identity"* when the command was **sent**, so a
+  failed reload still reported success — the one place an operator would look
+  to find out. It is now recorded when the reload answers.
+- `evasion.js` asks the **behaviour** instead of inspecting a property: draw a
+  known opaque value where `pixelHash` says a nudge lands, read it back, and
+  see whether something already moved it. There is no property left to
+  inspect and that is deliberate — a hook built to be indistinguishable from a
+  native one cannot find itself by looking. A page could run this same probe,
+  so it reveals nothing new.
+
+#### After
+
+24 consecutive samples at the timing that reproduced it: **no** double
+application, **no** `runs=2`, every realm bit-exact against the one-pass
+prediction. 12 consecutive runs of the realm suite and the new suite pass.
+
+The flake rate was 1 in 6, so 24 clean samples is strong evidence and not
+proof; what carries the conclusion is that the mechanism is identified, the
+unit tests pin both halves of it, and the live mask test now checks an
+**absolute** property rather than agreement between realms.
+
+---
+
+### 11.7 Two more worker canvas gaps, found by the same instrument
+
+Both **deterministic**, both invisible to every probe that existed, because
+every probe read from (0,0) and compared realms against each other.
+
+**The worker noised the wrong pixels.** The page keys noise to canvas
+*position*; the worker script always keyed it to (0,0). Reading from (0,0) —
+which all of them did — hides it completely:
+
+| read | page | worker |
+|---|---|---|
+| `getImageData(0,0,20,20)` | noise at (0,0) | noise at (0,0) ✅ |
+| `getImageData(5,7,20,20)` | noise at (5,7) | noise at **(0,0)** ❌ |
+
+12 of 12 runs, all five worker types. A page and a worker reading the same
+rect of the same drawing therefore returned different pixels.
+
+**The worker's PNG export carried no noise at all.** The page hooks
+`OffscreenCanvas.convertToBlob`; the worker script hooked only
+`getImageData`. Three profiles with different seeds, same drawing:
+
+| profile seed | page `convertToBlob` | worker `convertToBlob` |
+|---|---|---|
+| 111111 | 378539371 | **3394833805** |
+| 999999 | 116989659 | **3394833805** |
+| derived | 2291625482 | **3394833805** |
+
+The page's moves with the seed. The worker's is one value for every profile on
+the machine: the host's raw render. That is a **stable cross-profile
+identifier available to any page that asks a worker to export a canvas**, and
+it contradicts the worker's own page in a single comparison — which is worse
+than the divergence it was found alongside.
+
+Both fixed in `build_worker_identity_script`. `tests/test_canvas_noise_live.py`
+covers both, and was confirmed to fail on the pre-fix code with the diagnosis
+in the assertion message rather than a bare hash mismatch.
+
+---
+
+### 11.9 Resolved: a page disagreed with its own iframes, every time
+
+**Closed 6 October 2026.** Not found by a failing test — nothing was failing.
+Found by asking the question §11.6 raised: *which other spoofs are additive,
+and does anything else apply them twice?* No probe in the suite compared a
+page against an iframe on any of these surfaces.
+
+Most spoofs are substitutions and are idempotent. Three are not: audio noise
+nudges every sample, rect noise nudges every coordinate, WebGL `readPixels`
+nudges every pixel, and each copy of the script keeps its own record of what
+it has already nudged.
+
+Two paths reach an iframe — the injector's new-document script in the frame's
+own realm, and the parent walking `contentWindow` (`evasion.js` section 8).
+Section 8 predates the first; its own comment records the measurement that put
+the audio and rect calls there. Both now run:
+
+| surface | page | iframe (srcdoc, about:blank, URL — all three) |
+|---|---|---|
+| audio | 124.043476408231 | **124.043477541301** |
+| rect x | 11.687566983437 | **11.687633966873** |
+| rect y | 3.2967806701… | **3.2966863403…** |
+
+**The noise was causing the contradiction it exists to prevent**, on every
+load rather than one in six.
+
+After the guard:
+
+| surface | page | iframe (all three) |
+|---|---|---|
+| audio | 124.043475512859 | 124.043475512859 ✅ |
+| rect | 11.687041395616 \| 3.2973366818… | identical ✅ |
+
+That the injected script reaches frame realms is measured, not assumed:
+canvas noise is applied only by that script and never by section 8, and it
+was already correct inside all three frame kinds. Section 8 is now a fallback
+that asks whether the frame already carries the identity and stops if it does.
+
+`tests/test_iframe_additive_live.py` checks the rect **absolutely** as well as
+by agreement. The nudge is deterministic in the original coordinate and Blink
+has already quantised that coordinate to 1/64 px — two orders coarser than the
+5e-4 px nudge — so the pre-noise value is recoverable from the read and both
+predictions computable from it. Agreement alone cannot catch two realms being
+wrong together, which is precisely what hid §11.7's two defects.
+
+---
+
+### 11.10 The residual canvas disagreement was the engine's, and a control proved it
+
+**Closed 6 October 2026.** After §11.6, §11.7 and §11.9, CI still failed three
+canvas assertions in `shared` and `service` only, while they passed locally.
+
+The mask instrument settled it immediately: **every mask check passed in CI,
+in all six realms**, so the noise was applied exactly once at the right
+coordinates everywhere, and whatever differed lay underneath it. Every
+surviving failure drew text; every passing check drew flat grey.
+
+Text metrics localised it to one row — a family that exists nowhere:
+
+| family | page / dedicated worker | shared / service |
+|---|---|---|
+| `__NoSuchFontAnywhere__` | 170.672 (serif) | 170.625 (sans) |
+
+Chromium's last-resort family is a per-process preference, and an own-process
+worker does not get the page's. Every divergent family had exactly those two
+values — none resolved, and each process fell back to its own default.
+
+**Stock Chromium, same host, same probe, no profile and no fontconfig
+override, gives the identical split.** Engine behaviour, not a product tell.
+The suite had been asserting the opposite without saying so, and got away with
+it only because `12px serif` resolves on this host and does not in CI.
+
+Two of my own readings were wrong on the way, and both are worth keeping:
+
+- I first read it as the **font restriction leaking past the page** — the F53
+  shape. Disproved: under a Windows claim, every rejected Linux family
+  measured exactly like the absent control in the page, a dedicated worker, a
+  shared worker and a service worker alike.
+- I then wrote a test asserting a restricted family is hidden in every realm,
+  and **removed it as unsound**. "Hidden" was inferred from matching the
+  absent control, and a family that *does* resolve matches that control
+  whenever its metrics match the realm's last-resort font — so `Liberation
+  Sans`, resolved in an own-process worker whose fallback is sans, was
+  reported hidden. Width alone cannot separate the two. Proving the
+  restriction holds needs a channel distinguishing *resolved* from *fell
+  back*; `measureText` is not one. This sits beside §11.5 as a second thing
+  the font surface will not tell us by width probing.
+
+The fix is to the probes. `identity_probe.py` and
+`tests/test_worker_realms_live.py` now hash flat shapes — which is what those
+assertions are about — and keep the text render as `textHash`, recorded and
+not compared. Text metrics are compared separately, only for families that
+resolved in both realms.
+
+---
+
+### 11.8 What this section does not establish
+
+- **One host, one profile, one route.** No proxy, no device preset, no second
+  distro, no second display system.
+- **No account-site evidence.** None of these checkers predicts whether a
+  real site accepts the browser.
+- **No matched cross-OS reference.** A Windows claim was not compared against
+  a genuine Windows browser of the same version; BrowserLeaks recorded a TLS
+  fingerprint with no matched reference trace, so no transport mismatch is
+  proven either way.
+
+---
+
+## 12. Summary
 
 | Area | Verdict |
 |---|---|
@@ -419,8 +865,10 @@ narrows it. Third-party checkers still have not been run — see the header.
 | Timezone / geo / locale | ✅ engine-level, per-exit **and with no proxy** (F43) |
 | GPU / WebGL / WebGPU | ✅ mutually consistent |
 | Canvas / audio / rects noise | ✅ per-profile, plausible magnitude |
+| Canvas noise, applied **once** | ✅ fixed this pass (F60); checked against the seed's predicted mask, not realm agreement |
+| Canvas noise, worker surfaces | ✅ fixed this pass (F59); offset reads and `convertToBlob` were both wrong |
 | OS-shaped APIs | ✅ battery, voices, bluetooth, media |
-| Realm agreement | ✅ all five worker types + iframes |
+| Realm agreement | ✅ all five worker types + iframes; additive surfaces fixed this pass (F61) |
 | Fonts | 🟡 documented residual, product reports it |
 | Config exposure | ✅ fixed this pass (F41) |
 | Hook source and shape | ✅ masked and native-shaped, all realms (F3) |

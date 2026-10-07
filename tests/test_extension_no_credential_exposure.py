@@ -163,13 +163,33 @@ def test_the_launcher_never_writes_a_file_with_the_default_umask():
     )
 
 
-def test_the_extension_is_not_loaded_into_the_browser():
-    """Both flags are gone: Chrome ignored them, Chromium double-injected."""
-    source = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "multiprofile" / "browser" / "launcher.py"
-    ).read_text(encoding="utf-8")
-    for flag in ("--load-extension", "--disable-extensions-except"):
-        assert f'f"{flag}' not in source and f'"{flag}=' not in source, (
-            f"{flag} is passed to the browser again"
-        )
+def test_the_identity_bundle_is_never_loaded_as_an_extension():
+    """The identity bundle must never be handed to ``--load-extension``.
+
+    This asserted that the flag does not appear in the launcher at all, which
+    was the right check while nothing could legitimately use it. The extension
+    manager now can: an operator-assigned extension is loaded by exactly that
+    flag, measured as the only mechanism this browser supports.
+
+    So the check moved to the thing that actually matters. The identity script
+    reaches a page once, over CDP, and the bundle it comes from is not an
+    extension the browser loads. Checked where it can be enforced rather than
+    by grepping for a flag name: the only producer of ``--load-extension``
+    paths is the extension manager's payload list, every path in it lives
+    under the managed extensions directory, and the identity bundle does not.
+    """
+    from multiprofile.browser.launcher import (
+        _assigned_extension_payloads,
+        extension_src,
+    )
+    from multiprofile.storage.xdg import extensions_dir
+
+    bundle = str(extension_src().resolve())
+    managed = str(extensions_dir().resolve())
+    assert not bundle.startswith(managed), (
+        "the identity bundle now lives inside managed extension storage, so a "
+        "payload path could point at it"
+    )
+    # A profile with nothing assigned contributes no paths at all, so the
+    # flag is not even built for it.
+    assert _assigned_extension_payloads("profile_that_does_not_exist") == []

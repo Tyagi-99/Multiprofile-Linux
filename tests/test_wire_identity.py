@@ -478,20 +478,54 @@ def test_a_profile_with_no_preset_and_no_ua_is_still_launched_with_one(launcher_
 
     Before the fix this profile -- the one the quick-create button makes --
     got no ``--user-agent`` flag at all.
-    """
-    from multiprofile.storage.profiles import create_profile
 
-    prof = create_profile({"name": "f1-default", "proxyType": "none", "os": "windows"})
+    The quick-create profile now claims the *host's* platform, because a
+    Windows claim on this Linux host is contradicted by fonts in both
+    directions (``fingerprint/identity_matrix.py``). That makes "the UA says
+    Linux" useless as an assertion here: the host's own UA says Linux too,
+    which is exactly the F1 failure this test exists to catch. So the
+    assertion is that the flag is **present and equal to the profile's own
+    derived identity** -- deliberate rather than inherited.
+    """
+    from multiprofile.fingerprint import build_fingerprint
+    from multiprofile.storage.profiles import create_profile, get_profile
+
+    prof = create_profile({"name": "f1-default", "proxyType": "none"})
     assert not prof.get("deviceId")
-    assert not prof.get("userAgent")
 
     res = launcher_sandbox.launch_profile(prof["id"], url="about:blank", direct=True)
     try:
         ua = _ua_flag(res["cmd"])
         assert ua, "launched with no --user-agent: the wire carries the host identity"
-        assert "Windows NT" in ua
-        assert "Linux" not in ua
+        expected = build_fingerprint(get_profile(prof["id"]) or prof).get("userAgent")
+        assert expected, "the profile derived no User-Agent to put on the wire"
+        assert ua == expected, (
+            "the flag does not carry the profile's own identity, so it may be "
+            f"the host's by omission: flag={ua!r} fingerprint={expected!r}"
+        )
         assert any("User-Agent flag" in n for n in res["notes"])
+    finally:
+        launcher_sandbox.stop_profile(prof["id"])
+
+
+def test_an_explicitly_windows_profile_is_launched_as_windows(launcher_sandbox):
+    """The half of the old test that the default change took away.
+
+    A cross-OS claim is experimental, not refused, so asking for one must
+    still put it on the wire -- and on a Linux host "Windows NT" in the flag
+    cannot have come from the host by omission, which makes this the sharper
+    of the two directions.
+    """
+    from multiprofile.storage.profiles import create_profile
+
+    prof = create_profile({"name": "f1-windows", "proxyType": "none",
+                           "userAgentId": "win_chrome"})
+    res = launcher_sandbox.launch_profile(prof["id"], url="about:blank", direct=True)
+    try:
+        ua = _ua_flag(res["cmd"])
+        assert ua, "launched with no --user-agent"
+        assert "Windows NT" in ua, ua
+        assert "Linux" not in ua, ua
     finally:
         launcher_sandbox.stop_profile(prof["id"])
 

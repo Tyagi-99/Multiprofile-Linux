@@ -207,11 +207,39 @@ def register_request_guard(app) -> None:
         if request.content_length:
             ctype = (request.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
             if not any(ctype == t or ctype.endswith("+json") for t in _JSON_TYPES):
-                return _forbidden(
-                    "bad_content_type",
-                    "Request bodies must be sent as application/json.",
-                )
+                # The JSON requirement is a CSRF defence, not a style rule: a
+                # cross-origin HTML form can POST multipart/form-data and
+                # urlencoded bodies, and cannot POST application/json. One
+                # route genuinely needs multipart -- uploading an extension
+                # archive -- so it is allowed only when the request also
+                # carries a header no HTML form can set. A custom header
+                # forces a CORS preflight, which puts that route back behind
+                # exactly the protection this check was providing.
+                if not (path in _MULTIPART_ROUTES
+                        and ctype == "multipart/form-data"
+                        and request.headers.get(_FETCH_ONLY_HEADER)):
+                    return _forbidden(
+                        "bad_content_type",
+                        "Request bodies must be sent as application/json."
+                        + (
+                            f" This route also accepts multipart/form-data when "
+                            f"the request carries {_FETCH_ONLY_HEADER}."
+                            if path in _MULTIPART_ROUTES else ""
+                        ),
+                    )
         return None
+
+
+#: Routes allowed to send multipart/form-data, and only with
+#: ``_FETCH_ONLY_HEADER`` present. Uploading an extension archive is the one
+#: operation that cannot be expressed as JSON without base64-inflating a file
+#: that may be tens of megabytes.
+_MULTIPART_ROUTES = frozenset({"/api/extensions/upload"})
+
+#: A header an HTML form cannot set. Sending it forces a CORS preflight, so a
+#: cross-origin page cannot reach the route even with a permissive
+#: content type.
+_FETCH_ONLY_HEADER = "X-Multiprofile-Upload"
 
 
 def _forbidden_scope(needed: str, held: list[str]):

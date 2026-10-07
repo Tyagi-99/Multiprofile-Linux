@@ -31,7 +31,24 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-multiprofile = ["../static/*", "../extension/*"]
+# Recursive. These were `../static/*` and `../extension/*`, single-level
+# globs, and the console is a Next.js static export whose entire JavaScript
+# and CSS payload lives under `static/_next/static/chunks/`. So a
+# `pip install` shipped `static/index.html` and none of its assets: the page
+# served HTTP 200, every script and stylesheet it referenced answered 404,
+# and the console rendered blank.
+#
+# The .deb was never affected -- build-deb.sh copies src/static wholesale to
+# /usr/share/multiprofile/static -- which is why this survived: the packaged
+# path is the one CI exercises, and the from-source path is the one humans
+# use. Both are checked now (scripts/smoke-test.py fetches a real asset off
+# the served page, and the release lifecycle does the same against the .deb).
+multiprofile = [
+    "../static/*",
+    "../static/**/*",
+    "../extension/*",
+    "../extension/**/*",
+]
 
 [dependency-groups]
 dev = [

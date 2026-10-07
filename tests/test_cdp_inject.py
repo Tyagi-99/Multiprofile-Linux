@@ -159,6 +159,69 @@ def test_a_page_that_was_already_open_is_reloaded():
     assert "Runtime.runIfWaitingForDebugger" not in methods
 
 
+def test_a_reloaded_page_is_not_also_given_the_script_immediately():
+    """The two ways of reaching a document that already exists are exclusive.
+
+    `runImmediately` applies the identity to the document open now; the reload
+    replaces that document with one that runs the registered copy from its
+    first line. Sending both put two copies of the script in one document, and
+    every additive spoof then stacked -- measured as canvas noise nudging the
+    seed's own pixels by +-2 instead of +-1, so the page contradicted its own
+    worker realms about one launch in six.
+    """
+    inj, ws = _injector(script="X")
+    _attach(inj, waiting=False)
+
+    assert "Page.reload" in ws.methods("s1")
+    params = ws.params_for("Page.addScriptToEvaluateOnNewDocument")
+    assert params.get("runImmediately") is False, params
+
+
+def test_a_frozen_page_is_given_the_script_immediately_because_it_is_not_reloaded():
+    inj, ws = _injector(script="X")
+    _attach(inj, waiting=True)
+
+    assert "Page.reload" not in ws.methods("s1")
+    params = ws.params_for("Page.addScriptToEvaluateOnNewDocument")
+    assert params.get("runImmediately") is True, params
+
+
+def _reload_id(ws) -> int:
+    return next(m["id"] for m in ws.sent if m.get("method") == "Page.reload")
+
+
+def test_the_reload_is_only_claimed_once_it_has_answered():
+    """The status used to say "reloaded a pre-existing page to apply identity"
+    the moment the command was *sent*, so a reload that failed still reported
+    success -- in the one place an operator looks to find out."""
+    inj, ws = _injector(script="X")
+    _attach(inj, waiting=False)
+
+    note = "reloaded a pre-existing page to apply identity"
+    assert note not in inj.status.detail
+
+    inj._handle({"id": _reload_id(ws), "result": {}})
+    assert note in inj.status.detail
+
+
+def test_a_failed_reload_is_reported_and_the_identity_applied_anyway():
+    """The reload is the only thing applying the identity to that document
+    now, so a failure leaves it unmasked unless something else acts."""
+    inj, ws = _injector(script="X")
+    _attach(inj, waiting=False)
+
+    inj._handle({"id": _reload_id(ws), "error": {"message": "no"}})
+
+    assert "reloaded a pre-existing page to apply identity" not in inj.status.detail
+    assert any("reload failed" in d for d in inj.status.detail), inj.status.detail
+    assert inj.status.ok is False
+    evaluated = [m for m in ws.sent
+                 if m.get("method") == "Runtime.evaluate"
+                 and (m.get("params") or {}).get("expression") == "X"]
+    assert len(evaluated) == 1, ws.sent
+    assert evaluated[0].get("sessionId") == "s1"
+
+
 def test_the_same_target_is_not_installed_twice():
     """setAutoAttach and our explicit attachToTarget both fire for the start
     page; hooking canvas twice is the bug loader.js used to cause."""

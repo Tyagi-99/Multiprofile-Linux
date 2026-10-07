@@ -78,10 +78,40 @@ def _flag_literals() -> list[str]:
     return out
 
 
-def test_the_browser_is_not_told_to_load_an_extension():
-    flags = _flag_literals()
-    assert not any(f.startswith("--load-extension") for f in flags), flags
-    assert not any(f.startswith("--disable-extensions-except") for f in flags), flags
+def test_the_identity_script_is_not_also_delivered_as_an_extension():
+    """One route into the page, which is what this module is about.
+
+    This asserted that ``--load-extension`` appears nowhere in the launcher.
+    That was the right check while nothing could legitimately use the flag.
+    The extension manager now does -- an operator-assigned extension is loaded
+    by exactly that flag, which is the only mechanism this browser supports --
+    so the check moved to the invariant that has not changed: the identity
+    script arrives over CDP and the bundle is never also loaded as an
+    extension.
+
+    The enforcement point is the payload list, not the flag name. Every path
+    that can reach ``--load-extension`` comes from the extension manager and
+    lives under the managed extensions directory; the identity bundle does
+    not, and a profile with nothing assigned produces no paths at all.
+    """
+    from multiprofile.browser.launcher import (
+        _assigned_extension_payloads,
+        extension_src,
+    )
+    from multiprofile.storage.xdg import extensions_dir
+
+    assert not str(extension_src().resolve()).startswith(
+        str(extensions_dir().resolve())
+    )
+    assert _assigned_extension_payloads("profile_that_does_not_exist") == []
+
+
+def test_exclusivity_is_still_the_default_for_a_profile_with_no_extensions():
+    """The flag is only built when something is assigned, so a profile that
+    was never given an extension is launched exactly as before."""
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert "if assigned_extensions:" in source
+    assert 'cmd.append("--disable-extensions")' in source
 
 
 def test_exclusivity_now_means_no_extensions_at_all():
