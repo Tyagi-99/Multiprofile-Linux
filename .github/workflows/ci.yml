@@ -160,36 +160,23 @@ jobs:
           sysctl kernel.apparmor_restrict_unprivileged_userns
       - name: Chrome for Testing must actually launch headful here
         # A preflight, because the last attempt to give this job a capable
-        # engine pinned a Chromium snapshot that could not start headful on
-        # this image, and the result was 29 failures and 192 errors -- a
-        # cascade that said nothing about the real problem. This fails at the
-        # engine, with the engine's own stderr, before any test runs.
+        # engine pinned a browser that could not start headful on this image,
+        # and the result was 29 failures and 192 errors -- a cascade that said
+        # nothing about the real problem. This fails at the engine, with the
+        # engine's own stderr, before any test runs.
+        #
+        # The script lives in the repository rather than inline here so it can
+        # be run on a developer's machine, in both directions. The first inline
+        # version used --dump-dom as its success signal, which is a headless
+        # facility: asked for it headful, Chrome opened a window, never exited,
+        # and the check timed out having proved nothing.
         env:
           MULTIPROFILE_ENGINE_BINARY: ${{ steps.cft.outputs.binary }}
           PYTHONPATH: src
         run: |
-          set -euo pipefail
           xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             dbus-run-session -- \
-              uv run python - <<'PY'
-          import os, subprocess, sys, tempfile
-          from multiprofile.engine_choice import resolve
-          cap = resolve()
-          print(f"resolved: binary={cap.binary} brand={cap.brand} "
-                f"version={cap.version} unpacked={cap.unpacked} origin={cap.origin}")
-          if not cap.unpacked:
-              sys.exit(f"this engine cannot load unpacked extensions: {cap.reason}")
-          with tempfile.TemporaryDirectory() as d:
-              p = subprocess.run(
-                  [cap.binary, f"--user-data-dir={d}", "--ozone-platform=x11",
-                   "--no-first-run", "--no-default-browser-check",
-                   "--remote-debugging-port=0", "--dump-dom", "about:blank"],
-                  capture_output=True, text=True, timeout=120)
-          if p.returncode != 0:
-              sys.exit(f"headful launch failed rc={p.returncode}\n"
-                       f"stdout={p.stdout[-2000:]}\nstderr={p.stderr[-2000:]}")
-          print("headful launch ok")
-          PY
+              uv run python scripts/engine-preflight.py
       - name: Isolation and live launch tests
         env:
           PYTHONPATH: src

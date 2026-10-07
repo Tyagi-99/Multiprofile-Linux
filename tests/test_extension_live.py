@@ -320,6 +320,58 @@ def test_an_update_changes_the_version_and_keeps_the_identity(env, tmp_path):
     assert after.get("id") == before.get("id"), "identity changed across update"
 
 
+def test_a_rollback_puts_the_previous_version_back_in_the_browser(env, tmp_path):
+    """Rollback was tested at the manager and never in a browser.
+
+    test_extension_manager.py asserts that an update retains the previous
+    version and that rollback restores the recorded row. Neither says the
+    browser then *runs* the old code -- which is the only thing an operator
+    rolling back actually wants. The payload directory is replaced in place by
+    an update, so "the row says 1.0.0" and "the content script on the page is
+    1.0.0" are genuinely separate claims, and only the second one is the
+    feature.
+
+    The version is read from the marker the content script writes into a page,
+    so this is the extension's own code reporting itself.
+    """
+    from multiprofile.extensions import manager
+    from multiprofile.storage.profiles import create_profile
+
+    ext = manager.import_zip(_zip_fixture(tmp_path))
+    pid = create_profile({"name": "roll", "proxyType": "none",
+                          "startUrl": env.url})["id"]
+    manager.assign(ext["id"], [pid])
+
+    _out, port = env.launch(pid)
+    first = _read_marker(port)
+    assert first.get("version") == "1.0.0", first
+    original_id = first.get("id")
+    env.stop(pid)
+
+    manager.update_extension(
+        ext["id"], zip_path=_zip_fixture(tmp_path, "v2.zip", version="3.1.0"))
+    _out, port = env.launch(pid)
+    assert _read_marker(port).get("version") == "3.1.0"
+    env.stop(pid)
+
+    rolled = manager.rollback(ext["id"])
+    assert rolled["version"] == "1.0.0", rolled
+
+    _out, port = env.launch(pid)
+    after = _read_marker(port)
+    assert after.get("version") == "1.0.0", (
+        "the row rolled back but the browser still ran the new version: "
+        f"{after}")
+    assert after.get("marker") is True, after
+    # An unpacked extension's id is derived from its install path, so a
+    # rollback that rebuilt the payload somewhere else would silently hand the
+    # profile a different extension -- new id, empty chrome.storage.local, any
+    # host permission grant gone.
+    assert after.get("id") == original_id, (
+        "the extension identity changed across the rollback: "
+        f"{original_id} -> {after.get('id')}")
+
+
 # ---------------------------------------------------------------------------
 # removal
 # ---------------------------------------------------------------------------
