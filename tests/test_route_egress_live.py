@@ -279,6 +279,59 @@ ROUTES = (
 )
 
 
+def _navigate_in_page(port: int, url: str, timeout: float = 25.0) -> None:
+    """Re-drive the start-URL navigation over CDP."""
+    import websocket
+
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/json", headers={"Host": f"localhost:{port}"}
+    )
+    targets = json.loads(urllib.request.urlopen(request, timeout=5).read())
+    target = next(t for t in targets if t.get("type") == "page")
+    ws = websocket.create_connection(
+        target["webSocketDebuggerUrl"], timeout=timeout, suppress_origin=True
+    )
+    try:
+        ws.send(json.dumps({"id": 1, "method": "Page.navigate",
+                            "params": {"url": url}}))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if json.loads(ws.recv()).get("id") == 1:
+                return
+    finally:
+        ws.close()
+
+
+def _ensure_navigation_arrived(destination, tag: str, port: int, url: str,
+                               attempts: int = 3, settle: float = 4.0) -> None:
+    """Make sure the start-URL navigation actually reached the destination.
+
+    The fetch below is already retried; the **navigation** was not, and that
+    was the remaining gap. Measured on Chrome for Testing 155: the browser
+    pushes its own traffic through whatever proxy it is given, enough of it to
+    crowd the page's first request out of Chrome's small per-proxy socket
+    pool, so the navigation lands on ``chrome-error://chromewebdata/`` and the
+    destination sees nothing. 2 of 5 runs failed that way, where Chromium 151
+    -- quieter -- passed every time.
+
+    Retrying the navigation tolerates exactly that: the browser's own startup
+    chatter losing a race for a socket. It does not tolerate anything these
+    tests are about. Every source assertion still runs afterwards and still
+    fails if a request arrives from the wrong hop, and if the navigation never
+    arrives at all the caller's assertion still fires.
+    """
+    for _ in range(attempts):
+        deadline = time.time() + settle
+        while time.time() < deadline:
+            if destination.sources_for(tag):
+                return
+            time.sleep(0.25)
+        try:
+            _navigate_in_page(port, url)
+        except Exception:  # noqa: BLE001 - the caller's assertion reports it
+            return
+
+
 @pytest.mark.parametrize("name,fields,expected_source", ROUTES)
 def test_the_destination_sees_the_intended_hop(lab, name, fields, expected_source):
     """The Phase 3 gate: measured egress, not a health response."""
@@ -295,9 +348,11 @@ def test_the_destination_sees_the_intended_hop(lab, name, fields, expected_sourc
     nav = f"http://127.0.0.1:{destination.port}/dest?route={name}"
     profile_id, port = _launch(payload, nav)
     try:
-        # The navigation already happened; a same-origin fetch adds a second
-        # request through the same route, so a one-off is distinguishable
-        # from the steady state.
+        # The navigation is retried if the browser's own startup traffic cost
+        # it a socket; see _ensure_navigation_arrived. A same-origin fetch then
+        # adds a second request through the same route, so a one-off is
+        # distinguishable from the steady state.
+        _ensure_navigation_arrived(destination, f"route={name}", port, nav)
         result = _fetch_in_page(port, f"/dest?route={name}&fetch=1")
         assert result.get("ok") is True, _route_evidence(lab, name, result)
         sources = destination.sources_for(f"route={name}")

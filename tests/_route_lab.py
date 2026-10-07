@@ -169,6 +169,11 @@ class _BaseProxy:
         #: means "a request for the test destination that could not be
         #: delivered", which is the only number the assertions should weigh.
         self.offtest_requests: list[str] = []
+        #: The first line of each request, so "the browser asked for the
+        #: destination" can be told apart from *how* it asked. A CONNECT to a
+        #: plain-HTTP destination means the browser decided to speak TLS to
+        #: it, which a bare authority string cannot show.
+        self.request_lines: list[str] = []
         #: Why each rejection happened. ``rejected`` alone was a bare integer,
         #: which is how the authenticated-proxy failure stayed unattributed for
         #: as long as it did: CI reported ``rejected=4`` and there was nothing
@@ -259,21 +264,54 @@ class _BaseProxy:
         return True
 
     def _record_rejection(self, host: str, error: BaseException) -> None:
-        """File a failed upstream connect as either the product's or not.
-
-        Classify, never refuse. An earlier version of this refused off-test
-        hosts outright, before ``_note_authority`` could record them -- which
-        broke the IPv6 leak test, whose entire point is that an IPv4-only
-        proxy is *asked* for an unreachable IPv6 destination and the ask is
-        the measurement. Behaviour here is now identical to before this
-        accounting existed; only which counter moves has changed.
-        """
+        """File a failed upstream connect as either the product's or not."""
         if self._is_offtest(host):
             self.offtest_requests.append(host)
             return
         self.rejected += 1
         self.rejected_reasons.append(
             str(getattr(error, "strerror", None) or error))
+
+    def _short_circuit_offtest(self, client: socket.socket, host: str,
+                               reply: bytes) -> bool:
+        """Answer an off-test host immediately, after recording the ask.
+
+        Order matters and both halves were learned the hard way.
+
+        **Record first.** An earlier version returned before
+        ``_note_authority`` ran, which broke the IPv6 leak test: that test
+        points an IPv4-only proxy at an unreachable IPv6 destination
+        deliberately, and the *ask* is the measurement.
+
+        **Then short-circuit.** Measured on Chrome for Testing 155, the
+        browser pushes a lot of its own traffic through whatever proxy it is
+        given -- in one run: clients2.google.com/time, redirector.gvt1.com,
+        update.googleapis.com, accounts.google.com and www.google.com. None
+        can succeed here, because this proxy binds a loopback source address.
+        Letting each one run the full path (407, retry, bind, connect, fail,
+        502) holds a connection from Chrome's per-proxy socket pool for two
+        round trips, and with enough of them in flight the page's own request
+        queues behind them and the navigation ends at
+        ``chrome-error://chromewebdata/`` with the destination never reached.
+
+        That is what made the authenticated-proxy test fail on CI and pass
+        locally on Chromium 151, which is quieter: it is a race against the
+        browser's own chatter, which is why it was intermittent rather than
+        constant. Answering immediately frees the socket and leaves the pool
+        for the request under test.
+
+        Returns True when the caller should stop handling this request.
+        """
+        self.offtest_requests.append(host)
+        try:
+            client.sendall(reply)
+        except OSError:
+            pass
+        try:
+            client.close()
+        except OSError:
+            pass
+        return True
 
     def _connect_upstream(self, host: str, port: int) -> socket.socket:
         """Connect to the destination from this hop's own source address.
@@ -380,6 +418,25 @@ class HttpConnectProxy(_BaseProxy):
         head, _, rest = request.partition(b"\r\n\r\n")
         return head, rest
 
+    @staticmethod
+    def _authority_host(method: str, target: str, headers: dict) -> str | None:
+        """The host this request is for, from either request form.
+
+        Shared by the pre-auth off-test check and the serving path, so the two
+        cannot disagree about what was asked for.
+        """
+        if method.upper() == "CONNECT":
+            host, _, _port = target.rpartition(":")
+            return host or None
+        if "://" in target:
+            authority = target.split("://", 1)[1].partition("/")[0]
+        else:
+            authority = headers.get("host", "")
+        if not authority:
+            return None
+        host, _, _port = authority.rpartition(":")
+        return host or authority
+
     def _handle(self, client: socket.socket) -> None:
         carry = b""
         challenges = 0
@@ -395,10 +452,36 @@ class HttpConnectProxy(_BaseProxy):
             lines = head.decode("latin-1").split("\r\n")
             method, _, target = lines[0].partition(" ")
             target = target.split(" ")[0]
+            self.request_lines.append(lines[0][:120])
             headers = {}
             for line in lines[1:]:
                 name, _, value = line.partition(":")
                 headers[name.strip().lower()] = value.strip()
+
+            # Off-test BEFORE authentication, deliberately.
+            #
+            # The auth check does not depend on the host, and putting it first
+            # made every one of the browser's own requests cost two round
+            # trips through this proxy -- 407, then the retry carrying
+            # credentials, and only then the 502 it was always going to get.
+            # Chrome's per-proxy socket pool is small, and on Chrome for
+            # Testing 155 the browser generates enough of this traffic
+            # (clients2.google.com/time, redirector.gvt1.com,
+            # update.googleapis.com, accounts.google.com, www.google.com) to
+            # crowd out the request under test. Answering on the first round
+            # trip halves the pressure.
+            #
+            # It also makes `auth_failures` mean something: it now counts only
+            # challenges issued for traffic this lab is actually serving.
+            offtest_host = self._authority_host(method, target, headers)
+            if offtest_host and self._is_offtest(offtest_host):
+                self._note_authority(offtest_host)
+                if challenges:
+                    self.challenges_per_connection.append(challenges)
+                self._short_circuit_offtest(
+                    client, offtest_host,
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                return
 
             if not self.username:
                 break
@@ -433,6 +516,10 @@ class HttpConnectProxy(_BaseProxy):
         if method.upper() == "CONNECT":
             host, _, port_text = target.rpartition(":")
             self._note_authority(host)
+            if self._is_offtest(host) and self._short_circuit_offtest(
+                    client, host,
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"):
+                return
             try:
                 upstream = self._connect_upstream(host, int(port_text or 443))
             except OSError as e:
@@ -456,6 +543,10 @@ class HttpConnectProxy(_BaseProxy):
         if not host:
             host, port_text = authority, "80"
         self._note_authority(host)
+        if self._is_offtest(host) and self._short_circuit_offtest(
+                client, host,
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"):
+            return
         try:
             upstream = self._connect_upstream(host, int(port_text or 80))
         except OSError as e:
@@ -532,6 +623,9 @@ class Socks5Proxy(_BaseProxy):
             client.close()
             return
         port = struct.unpack("!H", client.recv(2))[0]
+        if self._is_offtest(host) and self._short_circuit_offtest(
+                client, host, b"\x05\x04\x00\x01" + b"\x00" * 6):
+            return
         try:
             upstream = self._connect_upstream(host, port)
         except OSError as e:
