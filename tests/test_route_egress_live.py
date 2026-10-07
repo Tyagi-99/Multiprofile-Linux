@@ -212,7 +212,8 @@ def _launch(payload: dict, start_url: str) -> tuple[str, int]:
     return profile_id, get_runtime(profile_id).cdp_port
 
 
-def _route_evidence(lab, name: str, result: dict | None = None) -> str:
+def _route_evidence(lab, name: str, result: dict | None = None,
+                    tag: str | None = None) -> str:
     """What the proxy and the destination actually saw.
 
     The authenticated-HTTP cases fail in CI and not here, with
@@ -255,7 +256,8 @@ def _route_evidence(lab, name: str, result: dict | None = None) -> str:
         challenges = getattr(proxy, "challenges_per_connection", None)
         if challenges:
             bits.append(f"challenges_per_connection={challenges}")
-    bits.append(f"destination_sources={destination.sources_for(f'route={name}')}")
+    bits.append(
+        f"destination_sources={destination.sources_for(tag or f'route={name}')}")
     return " ".join(bits)
 
 
@@ -334,11 +336,15 @@ def test_a_proxied_profile_never_reaches_the_destination_directly(lab, name):
         sources = destination.sources_for(f"leak={name}")
         assert sources, (
             f"{name}: no request arrived, so nothing was proven. "
-            f"fetch={result} proxy[connections={proxy.connections}, "
-            f"auth_failures={getattr(proxy, 'auth_failures', '?')}, "
-            f"rejected={proxy.rejected}, "
-            f"authenticated={bool(proxy.username)}] -- connections=0 means "
-            f"the browser never reached the proxy at all."
+            # Through _route_evidence rather than hand-rolled: this assertion
+            # built its own message, so when it fired in CI it reported
+            # `rejected=4` with no reason -- the exact gap the rejection
+            # reasons were added to close, missed because the message was
+            # duplicated instead of shared.
+            + _route_evidence(lab, name, result, tag=f"leak={name}")
+            + " -- connections=0 means the browser never reached the proxy "
+            "at all; rejected>0 with connections>0 means it authenticated and "
+            "the proxy could not reach the destination."
         )
         assert "127.0.0.1" not in sources, (
             f"{name}: the host address reached the destination: {sources}"

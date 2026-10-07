@@ -197,6 +197,13 @@ jobs:
         # live suite went missing from a run without anything going red. A
         # suite that silently stops running is worse than one that fails.
       - name: Extension acceptance tests (Chrome for Testing)
+        # Runs even if the step above failed. Without this, one unrelated live
+        # failure skips this step entirely -- which is what happened on the
+        # first run that had a working engine: two http_auth failures in the
+        # other step, and the twenty-one extension tests this job exists to
+        # run never executed. A step that hides the coverage it was added to
+        # provide is worse than no step.
+        if: success() || failure()
         env:
           PYTHONPATH: src
           MULTIPROFILE_ENGINE_BINARY: ${{ steps.cft.outputs.binary }}
