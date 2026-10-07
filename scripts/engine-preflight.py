@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -66,7 +67,15 @@ def main() -> int:
         return 1
 
     port = free_port()
-    with tempfile.TemporaryDirectory() as data_dir:
+    # Not TemporaryDirectory. Chrome's child processes keep writing to the
+    # user-data directory for a moment after the browser process exits, so
+    # the context manager's rmtree raced them and the preflight died with
+    #     OSError: [Errno 39] Directory not empty: 'Default'
+    # *after* printing "headful CDP ok" -- reporting failure for an engine it
+    # had just proven healthy. A cleanup race must never be able to do that,
+    # so the directory is removed best-effort at the end instead.
+    data_dir = tempfile.mkdtemp(prefix="mp-preflight-")
+    try:
         proc = subprocess.Popen(
             [cap.binary,
              f"--user-data-dir={data_dir}",
@@ -116,6 +125,11 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=10)
+    finally:
+        # Best-effort: whether the scratch directory could be removed says
+        # nothing about the engine, which is the only thing this script is
+        # here to report on.
+        shutil.rmtree(data_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

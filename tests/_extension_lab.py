@@ -14,6 +14,7 @@ inside the extension's own popup.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.request
@@ -274,8 +275,25 @@ def require_unpacked_support(module: str) -> object:
     pytest.skip(detail, allow_module_level=True)
     return cap
 
+#: How long to wait for Chromium to commit a localStorage write.
+#:
+#: Measured, not picked: on an Arch host with Chromium 151 the value lands in
+#: ``Local Storage/leveldb/000003.log`` after ~5.3s on Chromium's own timer,
+#: with no navigation needed, and it survives SIGTERM. A GitHub runner with
+#: Chrome for Testing 155 did not manage it within 20s, which is the slower
+#: machine rather than a different behaviour -- so the budget is generous and
+#: the wait exits as soon as the bytes appear.
+#:
+#: Cookies were measured as the alternative and are **worse**: the marker
+#: never appeared on disk at all, not after 40s and not after a clean stop.
+#: Chromium holds them longer and the store is encrypted at rest, so there is
+#: nothing to find by searching. localStorage is the probe that works.
+LOCAL_STORAGE_COMMIT_TIMEOUT = float(
+    os.environ.get("MP_STORAGE_COMMIT_TIMEOUT", "60"))
+
+
 def wait_for_local_storage_on_disk(profile_id: str, marker: str,
-                                   timeout: float = 20.0) -> bool:
+                                   timeout: float | None = None) -> bool:
     """Wait until a localStorage value is actually durable on disk.
 
     ``stop_profile`` is SIGTERM plus a wait for the pid, which is the right
@@ -300,6 +318,8 @@ def wait_for_local_storage_on_disk(profile_id: str, marker: str,
 
     from multiprofile.storage.xdg import chrome_profile_dir
 
+    if timeout is None:
+        timeout = LOCAL_STORAGE_COMMIT_TIMEOUT
     needle = marker.encode()
     deadline = _time.time() + timeout
     root = chrome_profile_dir(profile_id)
