@@ -431,3 +431,60 @@ profile, and the fingerprint cost of that is unmeasured.
 - **Assigning an extension turns exclusivity off for that profile**, and the
   fingerprint consequences of running an extension have not been measured. The
   launch note states the trade; no claim is made about detectability.
+
+## Known limitations, stated plainly
+
+These are not pending work items with dates. They are the current shape of the
+feature, and an operator should know them before relying on it.
+
+**An update is fleet-wide. Per-profile versions do not exist.** The payload
+directory is shared by every profile an extension is assigned to, so replacing
+it reaches all of them at once. The console says so before you confirm, lists
+the affected profiles and labels the button `Update all N assigned
+profile(s)`; the API refuses a `profileIds` argument on update with
+`update_scope_is_fleet_wide` rather than quietly applying it to everyone.
+Keeping one profile on an older version is not available.
+
+**Only one previous version is retained.** A rollback goes back exactly one
+step. A rollback with no retained version is refused rather than
+approximated.
+
+**A controlled restart does not restore open tabs.** Assigning, updating,
+disabling or removing an extension on a running profile is recorded as
+`pending restart` and applied on the next launch -- nothing is ever
+terminated underneath an operator. But when the restart happens, the open
+tabs are gone. Cookies, logins, `chrome.storage.local` and all profile data
+survive; the tab list does not. The confirmation dialog says this outright.
+Tab restoration is not implemented.
+
+**Branded Google Chrome 137+ cannot do this at all.** `--load-extension` was
+removed from branded builds. The capability gate detects it from the brand
+string in `--version` and refuses to launch a profile with an extension
+assigned, naming the binary and the remedy. Chromium and Chrome for Testing
+work at any version. The product never substitutes a different browser.
+
+Note that the build published on the Chrome for Testing dashboard reports
+itself as **"Google Chrome for Testing"**. The brand parser used to match the
+leading `Google Chrome` first and refuse it as branded Chrome, which made the
+remediation text impossible to follow; that is fixed, and regression-tested
+against the real version string with branded Chrome of the same version as
+the control.
+
+**A profile with an extension assigned launches without
+`--disable-extensions`.** That flag is the anti-detect exclusivity setting and
+it *wins* over `--load-extension`, so the two cannot both apply. This is a
+real change to that profile's posture and is reported in its launch notes
+rather than done quietly.
+
+**CRX is not supported.** Arbitrary CRX extraction is not a supported Chrome
+installation method and is not relabelled as one. Imports are ZIP or folder;
+a CRX is refused with an explanation and the supported alternative. No
+third-party "CRX downloader" service is used and no Web Store restriction is
+bypassed.
+
+**An extension's own cloud account is outside this product's isolation.** Per
+profile, `chrome.storage.local` is isolated and that is verified in a real
+browser. But if the extension signs into its vendor's service, that data is
+synchronised by the vendor under whatever account you use, and this product
+has no visibility into or control over it. No isolation claim is made about
+it.

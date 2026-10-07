@@ -6,5 +6,5 @@ Exec=multiprofile
 Icon=multiprofile
 StartupWMClass=multiprofile-native
 Terminal=false
-Categories=Network;Utility;
+Categories=Network;
 StartupNotify=true
