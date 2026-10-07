@@ -258,14 +258,22 @@ class _BaseProxy:
                 return False
         return True
 
-    def _refuse_offtest(self, client: socket.socket, host: str,
-                        reply: bytes) -> None:
-        self.offtest_requests.append(host)
-        try:
-            client.sendall(reply)
-        except OSError:
-            pass
-        client.close()
+    def _record_rejection(self, host: str, error: BaseException) -> None:
+        """File a failed upstream connect as either the product's or not.
+
+        Classify, never refuse. An earlier version of this refused off-test
+        hosts outright, before ``_note_authority`` could record them -- which
+        broke the IPv6 leak test, whose entire point is that an IPv4-only
+        proxy is *asked* for an unreachable IPv6 destination and the ask is
+        the measurement. Behaviour here is now identical to before this
+        accounting existed; only which counter moves has changed.
+        """
+        if self._is_offtest(host):
+            self.offtest_requests.append(host)
+            return
+        self.rejected += 1
+        self.rejected_reasons.append(
+            str(getattr(error, "strerror", None) or error))
 
     def _connect_upstream(self, host: str, port: int) -> socket.socket:
         """Connect to the destination from this hop's own source address.
@@ -424,19 +432,11 @@ class HttpConnectProxy(_BaseProxy):
 
         if method.upper() == "CONNECT":
             host, _, port_text = target.rpartition(":")
-            if self._is_offtest(host):
-                # The browser's own business, not the product's. Refused
-                # without touching `rejected`.
-                self._refuse_offtest(
-                    client, host,
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-                return
             self._note_authority(host)
             try:
                 upstream = self._connect_upstream(host, int(port_text or 443))
             except OSError as e:
-                self.rejected += 1
-                self.rejected_reasons.append(str(e.strerror or e))
+                self._record_rejection(host, e)
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 client.close()
                 return
@@ -455,17 +455,11 @@ class HttpConnectProxy(_BaseProxy):
         host, _, port_text = authority.rpartition(":")
         if not host:
             host, port_text = authority, "80"
-        if self._is_offtest(host):
-            self._refuse_offtest(
-                client, host,
-                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
-            return
         self._note_authority(host)
         try:
             upstream = self._connect_upstream(host, int(port_text or 80))
         except OSError as e:
-            self.rejected += 1
-            self.rejected_reasons.append(str(e.strerror or e))
+            self._record_rejection(host, e)
             client.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
             client.close()
             return
@@ -538,16 +532,10 @@ class Socks5Proxy(_BaseProxy):
             client.close()
             return
         port = struct.unpack("!H", client.recv(2))[0]
-        if self._is_offtest(host):
-            # 0x04 = host unreachable. Refused without touching `rejected`.
-            self._refuse_offtest(
-                client, host, b"\x05\x04\x00\x01" + b"\x00" * 6)
-            return
         try:
             upstream = self._connect_upstream(host, port)
         except OSError as e:
-            self.rejected += 1
-            self.rejected_reasons.append(str(e.strerror or e))
+            self._record_rejection(host, e)
             client.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
             client.close()
             return

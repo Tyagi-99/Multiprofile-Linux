@@ -258,3 +258,74 @@ def test_socks5_authentication_is_accepted_by_the_lab():
     finally:
         proxy.stop()
         dest.close()
+
+def test_an_offtest_host_is_not_counted_against_the_product(auth_lab):
+    """Chrome's own traffic must not inflate `rejected`.
+
+    This is the accounting that made CI's `rejected=4` unreadable: all four
+    were the browser's connectivity and account requests to Google hosts,
+    which cannot succeed because this proxy binds a loopback source address
+    and they are public. They are recorded, separately, and the number the
+    assertions weigh is left alone.
+    """
+    dest, proxy = auth_lab
+    status = _get_through(proxy, dest, "ctl_offtest_unused",
+                          auth_up_front=True, retry_same_connection=False)
+    assert "200" in status, status
+
+    before_rejected = proxy.rejected
+    sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+    try:
+        sock.sendall((
+            "GET http://www.google.com/generate_204 HTTP/1.1\r\n"
+            "Host: www.google.com\r\n"
+            f"Proxy-Authorization: Basic {_creds(proxy)}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode())
+        # Whatever it answers, the accounting is the assertion.
+        try:
+            sock.recv(4096)
+        except OSError:
+            pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    assert proxy.rejected == before_rejected, (
+        "an off-test host moved the product's rejection count: "
+        f"reasons={proxy.rejected_reasons}")
+    assert "www.google.com" in proxy.offtest_requests, (
+        f"offtest={proxy.offtest_requests}")
+
+
+def test_an_offtest_host_is_still_handed_to_the_proxy(auth_lab):
+    """Classified, never refused before it is recorded.
+
+    An earlier version refused off-test hosts outright, which returned before
+    `_note_authority` ran. That broke the IPv6 leak test, whose whole point is
+    that an IPv4-only proxy is *asked* for an unreachable IPv6 destination --
+    the ask being the measurement. So the host must still be recorded.
+    """
+    dest, proxy = auth_lab
+    sock = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+    try:
+        sock.sendall((
+            "CONNECT www.google.com:443 HTTP/1.1\r\n"
+            "Host: www.google.com:443\r\n"
+            f"Proxy-Authorization: Basic {_creds(proxy)}\r\n\r\n"
+        ).encode())
+        try:
+            sock.recv(4096)
+        except OSError:
+            pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    assert "www.google.com" in proxy.requested_hostnames, (
+        "the proxy did not record a host it was asked for: "
+        f"hostnames={proxy.requested_hostnames}")
+
