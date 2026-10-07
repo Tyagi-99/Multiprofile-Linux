@@ -235,8 +235,22 @@ def test_socks5_authentication_is_accepted_by_the_lab():
                 + dest.port.to_bytes(2, "big")
             )
             reply = sock.recv(10)
+            # An empty reply means the handler went away without answering,
+            # and indexing into it raises IndexError -- which hides the
+            # recorded cause behind an unrelated exception. That happened:
+            # a helper added to the wrong class raised AttributeError inside
+            # `_guard`, which recorded it faithfully, and this assertion threw
+            # IndexError before anything read it.
+            assert reply, (
+                "the proxy closed the connection without replying; "
+                f"handler_errors={proxy.handler_errors} "
+                f"offtest={proxy.offtest_requests} "
+                f"reasons={proxy.rejected_reasons}"
+            )
             assert reply[1] == 0x00, (
                 f"SOCKS5 CONNECT failed: reply={reply!r} "
+                f"handler_errors={proxy.handler_errors} "
+                f"offtest={proxy.offtest_requests} "
                 f"reasons={proxy.rejected_reasons}"
             )
         finally:

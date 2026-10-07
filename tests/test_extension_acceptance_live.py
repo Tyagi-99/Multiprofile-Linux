@@ -73,6 +73,7 @@ from _extension_lab import (  # noqa: E402
     _evaluate,
     _extension_storage,
     _Site,
+    wait_for_local_storage_on_disk,
 )
 from _extension_lab import (
     read_marker as _read_marker,
@@ -233,14 +234,42 @@ def test_profile_data_survives_the_restart_that_applies_an_extension(lab):
     assert wrote.get("set") == "kept", wrote
     lab.mark_running(pid, port)
 
+    # Force the commit, then confirm it, rather than sleeping and hoping.
+    #
+    # `stop_profile` is SIGTERM, and Chromium's localStorage LevelDB write is
+    # asynchronous with no shutdown flush on a signal -- so without this the
+    # test measures that race instead of the product. It won the race on every
+    # developer machine and lost it the first time it ran on a loaded CI
+    # runner, reporting "profile data lost on restart" when nothing had been
+    # lost and nothing was wrong with the product.
+    #
+    # Navigating away releases the origin's storage area, which is what makes
+    # Chromium commit it promptly; the poll then turns the wait into a
+    # measurement of durability instead of a guess about timing.
+    _evaluate(port, "(() => { location.href = 'about:blank';"
+                    " return JSON.stringify({navigatedAway: true}); })()")
+    time.sleep(1.0)
+    committed = wait_for_local_storage_on_disk(pid, "mp-acceptance")
+    assert committed, (
+        "Chromium never wrote the value to the profile's Local Storage within "
+        "the timeout, so a restart cannot be expected to preserve it and this "
+        "test would be measuring the flush, not the product"
+    )
+
     manager.assign(ext["id"], [pid])
     lab.stop(pid)
     time.sleep(1.0)
     _out, port = lab.launch(pid)
 
+    # The relaunch navigates back to the test page, which is the same origin
+    # the value was written under -- localStorage is keyed by origin, so
+    # reading it from about:blank would return null for a reason that has
+    # nothing to do with persistence.
     after = _evaluate(port, (
-        "JSON.stringify({kept: localStorage.getItem('mp-acceptance')})"))
-    assert after.get("kept") == "kept", (after, "profile data lost on restart")
+        "JSON.stringify({kept: localStorage.getItem('mp-acceptance'),"
+        " origin: location.origin})"))
+    assert after.get("kept") == "kept", (
+        after, "profile data lost on restart")
     assert _read_marker(port).get("marker") is True
 
 

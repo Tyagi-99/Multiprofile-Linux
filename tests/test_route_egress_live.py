@@ -256,6 +256,13 @@ def _route_evidence(lab, name: str, result: dict | None = None,
         challenges = getattr(proxy, "challenges_per_connection", None)
         if challenges:
             bits.append(f"challenges_per_connection={challenges}")
+        offtest = getattr(proxy, "offtest_requests", None)
+        if offtest:
+            # The browser's own connectivity and account traffic, which a
+            # runner with real internet access produces and a developer
+            # machine behind a warm cache may not. Named so it is never again
+            # read as a product failure.
+            bits.append(f"offtest_hosts={sorted(set(offtest))}")
     bits.append(
         f"destination_sources={destination.sources_for(tag or f'route={name}')}")
     return " ".join(bits)

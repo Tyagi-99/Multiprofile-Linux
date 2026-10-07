@@ -154,6 +154,21 @@ class _BaseProxy:
         self.connections = 0
         self.auth_failures = 0
         self.rejected = 0
+        #: Requests for a host that is not this lab's destination, with the
+        #: host recorded. A browser makes its own connectivity, Safe Browsing
+        #: and account requests through whatever proxy it is given, and on a
+        #: runner with real internet access those arrive here. They cannot
+        #: succeed by construction: this proxy binds its outbound socket to a
+        #: loopback alias to make the hop measurable, and connecting from a
+        #: loopback source to a public address is invalid (EINVAL).
+        #:
+        #: They used to land in ``rejected``, which is what made CI read
+        #: `rejected=4` on a run where the product had done nothing wrong --
+        #: the four were www.google.com, accounts.google.com and
+        #: android.clients.google.com. Counted separately so ``rejected``
+        #: means "a request for the test destination that could not be
+        #: delivered", which is the only number the assertions should weigh.
+        self.offtest_requests: list[str] = []
         #: Why each rejection happened. ``rejected`` alone was a bare integer,
         #: which is how the authenticated-proxy failure stayed unattributed for
         #: as long as it did: CI reported ``rejected=4`` and there was nothing
@@ -215,6 +230,42 @@ class _BaseProxy:
     def _track(self, *sockets: socket.socket) -> None:
         with self._live_lock:
             self._live.extend(sockets)
+
+    def _is_offtest(self, host: str) -> bool:
+        """Is this a host the lab is not here to serve?
+
+        The lab's destination is always reachable on loopback, so the test is
+        "does this resolve to loopback", not "is this a literal". It cannot be
+        the latter: ``test_the_proxy_resolved_the_hostname_not_the_browser``
+        deliberately navigates to ``http://localhost:<port>`` precisely so the
+        browser hands the proxy a **name** rather than an address -- that is
+        the DNS property being measured. A rule that refused every name broke
+        that test and four others.
+
+        Resolving here is also the correct behaviour for a proxy, and is the
+        thing that test asserts a proxy does.
+
+        A name that does not resolve is off-test too: it cannot be served
+        either way, and saying so is more useful than a bare connect failure.
+        """
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return True
+        for info in infos:
+            address = info[4][0]
+            if address.startswith("127.") or address in ("::1", "0:0:0:0:0:0:0:1"):
+                return False
+        return True
+
+    def _refuse_offtest(self, client: socket.socket, host: str,
+                        reply: bytes) -> None:
+        self.offtest_requests.append(host)
+        try:
+            client.sendall(reply)
+        except OSError:
+            pass
+        client.close()
 
     def _connect_upstream(self, host: str, port: int) -> socket.socket:
         """Connect to the destination from this hop's own source address.
@@ -373,6 +424,13 @@ class HttpConnectProxy(_BaseProxy):
 
         if method.upper() == "CONNECT":
             host, _, port_text = target.rpartition(":")
+            if self._is_offtest(host):
+                # The browser's own business, not the product's. Refused
+                # without touching `rejected`.
+                self._refuse_offtest(
+                    client, host,
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+                return
             self._note_authority(host)
             try:
                 upstream = self._connect_upstream(host, int(port_text or 443))
@@ -397,6 +455,11 @@ class HttpConnectProxy(_BaseProxy):
         host, _, port_text = authority.rpartition(":")
         if not host:
             host, port_text = authority, "80"
+        if self._is_offtest(host):
+            self._refuse_offtest(
+                client, host,
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            return
         self._note_authority(host)
         try:
             upstream = self._connect_upstream(host, int(port_text or 80))
@@ -475,6 +538,11 @@ class Socks5Proxy(_BaseProxy):
             client.close()
             return
         port = struct.unpack("!H", client.recv(2))[0]
+        if self._is_offtest(host):
+            # 0x04 = host unreachable. Refused without touching `rejected`.
+            self._refuse_offtest(
+                client, host, b"\x05\x04\x00\x01" + b"\x00" * 6)
+            return
         try:
             upstream = self._connect_upstream(host, port)
         except OSError as e:

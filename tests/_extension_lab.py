@@ -273,3 +273,45 @@ def require_unpacked_support(module: str) -> object:
         )
     pytest.skip(detail, allow_module_level=True)
     return cap
+
+def wait_for_local_storage_on_disk(profile_id: str, marker: str,
+                                   timeout: float = 20.0) -> bool:
+    """Wait until a localStorage value is actually durable on disk.
+
+    ``stop_profile`` is SIGTERM plus a wait for the pid, which is the right
+    way to stop a browser, but Chromium commits its localStorage LevelDB
+    asynchronously and does not run a full shutdown flush on a signal. So
+    "the page says the value is set" and "the value survives the process" are
+    different claims, and the gap between them is a race against a background
+    writer.
+
+    On a developer machine that race is almost always won, which is why
+    ``test_profile_data_survives_the_restart_that_applies_an_extension``
+    passed locally for the whole life of the feature and failed the first time
+    it ran on a loaded CI runner -- reporting "profile data lost on restart"
+    when nothing had been lost and nothing was wrong with the product.
+
+    Polling the on-disk store turns the sleep into a measurement: once the
+    bytes are there, a restart genuinely must preserve them, and that is the
+    claim worth testing. Returns False on timeout so the caller can say
+    "Chromium never committed it" rather than "the data was lost".
+    """
+    import time as _time
+
+    from multiprofile.storage.xdg import chrome_profile_dir
+
+    needle = marker.encode()
+    deadline = _time.time() + timeout
+    root = chrome_profile_dir(profile_id)
+    while _time.time() < deadline:
+        for candidate in root.rglob("Local Storage/leveldb/*"):
+            if candidate.suffix.lower() not in (".ldb", ".log"):
+                continue
+            try:
+                if needle in candidate.read_bytes():
+                    return True
+            except OSError:
+                continue
+        _time.sleep(0.5)
+    return False
+
