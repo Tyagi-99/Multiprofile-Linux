@@ -305,12 +305,17 @@ function ResultsDialog({
               onClick={() => {
                 // A restart closes whatever the operator had open, so it is
                 // confirmed here and never done as a side effect of
-                // assigning.
+                // assigning. The tab loss is stated outright: there is no tab
+                // restoration yet, and "closes their windows" left an operator
+                // free to assume the session comes back.
                 if (
                   window.confirm(
                     `Restart ${pending.length} running profile(s) now?\n\n` +
                       pending.map((r) => r.profileName || r.profileId).join(", ") +
-                      `\n\nThis closes their current browser windows.`,
+                      `\n\nThis closes their current browser windows and their ` +
+                      `open tabs are NOT reopened. Cookies, logins and ` +
+                      `extension storage are kept. Anything unsaved in a tab ` +
+                      `is lost, so finish what is open first.`,
                   )
                 ) {
                   onRestart(pending.map((r) => r.profileId));
