@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 
+from . import __version__
 from .app import open_ui, run_server, start_background_server
 from .logging_setup import setup_logging
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Multiprofile Native (Linux)")
+    # There was no way to ask an installed copy what it was. `--doctor` reports
+    # the version among much else and exits non-zero when something is wrong,
+    # so it is the wrong thing to put in a bug report template or to compare
+    # across two machines. This prints one line and always exits 0.
+    parser.add_argument(
+        "--version", action="version", version=f"multiprofile {__version__}",
+        help="print the version and exit")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--server-only", action="store_true", help="Run API/UI HTTP server without desktop window")

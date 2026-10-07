@@ -24,3 +24,6 @@ frontend/*.tsbuildinfo
 .coverage
 coverage.xml
 .ruff_cache/
+
+# Left by `pip install .` and `build-deb.sh` staging.
+build/
