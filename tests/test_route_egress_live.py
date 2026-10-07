@@ -394,6 +394,7 @@ def test_a_proxied_profile_never_reaches_the_destination_directly(lab, name):
     nav = f"http://127.0.0.1:{destination.port}/dest?leak={name}"
     profile_id, port = _launch(payload, nav)
     try:
+        _ensure_navigation_arrived(destination, f"leak={name}", port, nav)
         result = _fetch_in_page(port, f"/dest?leak={name}&fetch=1")
         sources = destination.sources_for(f"leak={name}")
         assert sources, (
@@ -432,6 +433,7 @@ def test_an_authenticated_proxy_was_actually_challenged(lab):
         "proxyUser": proxy.username, "proxyPass": proxy.password,
     }, nav)
     try:
+        _ensure_navigation_arrived(destination, "auth=1", port, nav)
         result = _fetch_in_page(port, "/dest?auth=1&fetch=1")
         assert result.get("ok") is True, (
             "the browser could not fetch through the authenticated proxy. "
@@ -472,6 +474,7 @@ def test_the_proxy_resolved_the_hostname_not_the_browser(lab):
         "proxyHost": "127.0.0.1", "proxyPort": proxy.port,
     }, nav)
     try:
+        _ensure_navigation_arrived(destination, "dns=1", port, nav)
         result = _fetch_in_page(port, "/dest?dns=1&fetch=1")
         assert result.get("ok") is True, result
         assert "localhost" in proxy.requested_hostnames, (
@@ -588,6 +591,7 @@ def test_a_mid_session_proxy_drop_does_not_fall_back_to_the_host(
     }, nav)
     try:
         # Precondition: the route works at all, or the rest proves nothing.
+        _ensure_navigation_arrived(destination, f"drop={name}", port, nav)
         before = _fetch_in_page(port, f"/dest?drop={name}&phase=before2")
         assert before.get("ok") is True, (name, before)
         assert set(destination.sources_for(f"drop={name}")) == {expected_source}
