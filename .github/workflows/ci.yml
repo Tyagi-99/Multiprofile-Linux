@@ -137,6 +137,27 @@ jobs:
           "$BIN" --version
       - name: Install the project
         run: uv sync --all-extras --dev
+      - name: Allow the Chromium namespace sandbox
+        # Measured, with the exact stderr, by the preflight below:
+        #
+        #   FATAL ... zygote_host_impl_linux.cc:130] No usable sandbox! If you
+        #   are running on Ubuntu 23.10+ ... that has disabled unprivileged
+        #   user namespaces with AppArmor ...
+        #
+        # The runner image's own branded Chrome is installed where an AppArmor
+        # profile covers it; a Chrome for Testing unpacked into $HOME is not,
+        # so its zygote cannot create a user namespace and it aborts with
+        # SIGTRAP before doing anything.
+        #
+        # The restriction is relaxed on the runner rather than passing
+        # --no-sandbox to the browser. --no-sandbox would make these tests pass
+        # while measuring a browser configured differently from the one
+        # operators run, and the sandbox is part of the posture this product
+        # reports on (`multiprofile --doctor` has a line for it). The runner is
+        # an ephemeral VM; an operator's machine is not touched.
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sysctl kernel.apparmor_restrict_unprivileged_userns
       - name: Chrome for Testing must actually launch headful here
         # A preflight, because the last attempt to give this job a capable
         # engine pinned a Chromium snapshot that could not start headful on
