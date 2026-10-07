@@ -284,7 +284,58 @@ def check_install(app: App, binary: str) -> dict:
     engine = (health or {}).get("engine") or {}
     note(f"engine: {engine.get('detail') or engine.get('binary')}")
     note(f"data dir: {(health or {}).get('data_dir')}")
+    _check_console(app, health or {})
     return health or {}
+
+
+def _check_console(app: App, health: dict) -> None:
+    """The console, not just the API -- including its assets.
+
+    An index.html that serves while its scripts 404 is a blank page, and that
+    is exactly what a `pip install` shipped: the package-data globs were
+    single-level (`../static/*`), so `static/index.html` was included and the
+    entire `static/_next/static/chunks/` payload was not. Every API check
+    stayed green. Fetching the page was not enough either -- the page answered
+    200 the whole time. Only fetching what the page references finds it.
+    """
+    import re
+
+    record("health says the console is installed", health.get("static_ok") is True,
+           f"static_ok={health.get('static_ok')}")
+    status, _ = app.get("/api/health")  # keep the shape of the call uniform
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{app.port}/", timeout=30) as r:
+            page = r.read().decode("utf-8", "replace")
+            served = r.status
+    except Exception as e:  # noqa: BLE001 - reported as the failure it is
+        record("the console page serves", False, repr(e)[:200])
+        return
+    record("the console page serves", served == 200 and "_next/static/" in page,
+           f"status={served} bytes={len(page)}")
+
+    # The backslash is excluded because these paths also appear inside JS
+    # string literals with escaped quotes, where it would be captured as part
+    # of the path and produce a false 404.
+    assets = list(dict.fromkeys(
+        re.findall(r'(/_next/static/[^"\'()\s\\]+)', page)))
+    if not assets:
+        record("the console's assets serve", False,
+               "the page references no build assets at all")
+        return
+    broken = []
+    for asset in assets:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{app.port}{asset}", timeout=30) as r:
+                if r.status != 200:
+                    broken.append(f"{asset} -> {r.status}")
+        except Exception as e:  # noqa: BLE001
+            broken.append(f"{asset} -> {type(e).__name__}")
+    record("every asset the console references serves", not broken,
+           f"{len(assets) - len(broken)}/{len(assets)} ok; broken={broken[:4]}")
+    note(f"console: {len(page)} bytes, {len(assets)} assets, all serving"
+         if not broken else f"console: {len(broken)} broken assets")
 
 
 def check_profiles(app: App, browser_ok: bool) -> App:
