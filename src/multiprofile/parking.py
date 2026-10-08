@@ -136,9 +136,19 @@ def _disk_runtime_state() -> dict[str, dict[str, Any]]:
 def is_profile_running(profile_id: str) -> bool:
     """True if the profile is running per the runtime state.
 
-    Checks the on-disk runtime state (storage.set_runtime) and, best-effort,
-    the in-memory launch-state registry.
+    The control database is the record. ``runtime.json`` is consulted only
+    when that profile has no row, which is the path that records a run
+    without going through the state machine. Trusting the file first counted
+    deleted profiles as running.
     """
+    try:
+        from .storage.db import get_profile_runtime
+
+        row = get_profile_runtime(str(profile_id))
+    except Exception:  # noqa: BLE001 - fall through to the cache
+        row = None
+    if row is not None:
+        return str(row.get("state") or "") == "running"
     entry = _disk_runtime_state().get(str(profile_id))
     if entry and str(entry.get("status")) == "running":
         return True

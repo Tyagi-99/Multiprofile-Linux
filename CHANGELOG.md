@@ -1,5 +1,14 @@
 ## Unreleased
 
+- **A deleted profile can no longer stay "running".** `runtime.json` and
+  `profiles_runtime` both kept rows after the profile was gone — 151 JSON
+  entries and 42 runtime rows against 5 live profiles on the machine where
+  the landing screen was found disagreeing with itself. Metrics already
+  reads the database. The profile list, the parking check and the reaper
+  now do too, a delete or trash drops the runtime row in the same
+  transaction, and startup deletes the rows that are already there and
+  rewrites the JSON cache from what remains.
+
 - **The claimed Chrome version now comes from the installed engine** (audit
   finding F5, new `engine.py`, `fingerprint/_core.py`, `browser/launcher.py`,
   `browser/cdp_identity.py`, `devices/*`, `api/user_agents.py`): every UA pool,

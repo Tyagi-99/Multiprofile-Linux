@@ -62,6 +62,18 @@ def prepare_data_dir() -> None:
         log.debug("legacy extension purge skipped: %s", e)
 
     try:
+        from .storage.profiles import prune_stale_runtime
+
+        # runtime.json and profiles_runtime both kept rows for profiles that
+        # had been deleted. The console reads the database; this drops the
+        # rows that can no longer match it, including the ones already there.
+        pruned = prune_stale_runtime()
+        if any(pruned.values()):
+            log.warning("pruned stale runtime state: %s", pruned)
+    except Exception as e:  # noqa: BLE001 - never block startup
+        log.debug("runtime prune skipped: %s", e)
+
+    try:
         from .secrets import backend, migrate_plaintext_secrets
 
         moved = migrate_plaintext_secrets()

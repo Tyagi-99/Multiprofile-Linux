@@ -38,7 +38,7 @@ from ..network import (
     unsupported_route_reason,
 )
 from ..storage import db as _db
-from ..storage.profiles import get_profile, set_runtime, update_profile
+from ..storage.profiles import get_profile, mirror_runtime_cache, set_runtime, update_profile
 from ..storage.state import InvalidStateTransition, ProfileState
 from ..storage.xdg import chrome_profile_dir, purge_legacy_extension_staging
 from . import fontconfig, identity_faults
@@ -95,6 +95,10 @@ def _record_state(    profile_id: str,
         )
         if fields:
             _db.upsert_profile_runtime(profile_id, **fields)
+        try:
+            mirror_runtime_cache(profile_id)
+        except Exception:  # noqa: BLE001 - the cache is not the record
+            log.debug("runtime cache mirror failed for %s", profile_id, exc_info=True)
     except Exception:  # noqa: BLE001 - bookkeeping must not break launch
         log.debug("launcher: durable state write failed for %s", profile_id, exc_info=True)
 

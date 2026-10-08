@@ -233,8 +233,9 @@ def running_profile_ids() -> list[str]:
     counting profiles that no longer exist.
 
     The database is the right source because it is pruned with the profile and
-    every transition goes through the state machine. That the two can still
-    drift apart at all is a separate problem, recorded rather than fixed here.
+    every transition goes through the state machine. The file is rewritten
+    from that table (``storage.profiles.prune_stale_runtime``) so a reader
+    that still opens it sees the same answer.
     """
     from .storage import db
 

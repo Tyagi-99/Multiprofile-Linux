@@ -537,6 +537,28 @@ def get_profile_runtime(profile_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def prune_orphan_profile_runtimes() -> list[str]:
+    """Delete runtime rows whose profile is gone. Returns the ids removed.
+
+    Deleting and trashing a profile now drop the row in the same transaction.
+    This sweep is for the rows already left behind, and for any writer that
+    removes a profile without going through those two functions.
+    """
+    conn = _connect()
+    with _lock, conn:
+        rows = conn.execute(
+            "SELECT profile_id FROM profiles_runtime "
+            "WHERE profile_id NOT IN (SELECT id FROM profiles)"
+        ).fetchall()
+        ids = [str(row["profile_id"]) for row in rows]
+        if ids:
+            conn.execute(
+                "DELETE FROM profiles_runtime "
+                "WHERE profile_id NOT IN (SELECT id FROM profiles)"
+            )
+    return ids
+
+
 def list_profile_runtimes(state: str | None = None) -> list[dict[str, Any]]:
     conn = _connect()
     with _lock:
@@ -1536,6 +1558,12 @@ def delete_profile_row(profile_id: str) -> bool:
     conn = _connect()
     with _lock, conn:
         cur = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        # The runtime row is the process, not the profile. Leaving it behind
+        # is how a deleted profile stays "running" for anything that lists
+        # the table instead of the profiles.
+        conn.execute(
+            "DELETE FROM profiles_runtime WHERE profile_id = ?", (profile_id,)
+        )
         return cur.rowcount > 0
 
 
@@ -1554,6 +1582,10 @@ def replace_all_profiles(profiles: list[dict[str, Any]]) -> None:
             "INSERT INTO profiles (id, name, client_id, created_at, updated_at,"
             " data_json) VALUES (?, ?, ?, ?, ?, ?)",
             [_profile_row(p) for p in profiles],
+        )
+        conn.execute(
+            "DELETE FROM profiles_runtime "
+            "WHERE profile_id NOT IN (SELECT id FROM profiles)"
         )
 
 
@@ -1613,6 +1645,9 @@ def trash_profile_row(profile_id: str, *, disk_bytes: int = 0) -> dict[str, Any]
              row["updated_at"], _utcnow(), int(disk_bytes), row["data_json"]),
         )
         conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+        conn.execute(
+            "DELETE FROM profiles_runtime WHERE profile_id = ?", (profile_id,)
+        )
         try:
             return json.loads(row["data_json"])
         except (ValueError, TypeError):
