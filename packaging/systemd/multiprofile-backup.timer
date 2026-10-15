@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily verified backup of the Multiprofile store
+
+[Timer]
+# Daily, with a window, because every machine running this does not need to
+# wake at the same second. Persistent so a laptop that was asleep at the
+# scheduled time backs up once it is awake rather than skipping the day.
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

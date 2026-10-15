@@ -16,8 +16,61 @@ Two different things get backed up, and they are not interchangeable:
 
 ## 1. Whole-store backup
 
+### The short version
+
+```bash
+multiprofile-backup          # take one now, verified
+```
+
+Daily, unattended:
+
+```bash
+systemctl --user enable --now multiprofile-backup.timer
+systemctl --user list-timers multiprofile-backup.timer
+```
+
+`scripts/install-local.sh` installs the command and the timer but **does not
+enable the timer** — writing hundreds of megabytes on a schedule is your
+decision. It prints whether it is on.
+
+**Two kinds of backup, and it tells you which it took.** `chrome-profiles/`
+is written continuously by every live Chromium, so copying it under a running
+profile can capture a torn cookie jar. A timer cannot stop your browsers, and
+nothing in this product auto-parks an idle profile, so:
+
+| Kind | When | Contains |
+|---|---|---|
+| **full** | nothing is running | everything, including cookies and sessions |
+| **metadata** | a profile is running | profile definitions, **identity seeds**, proxy settings, extension assignments — *not* cookies or sessions |
+
+A metadata backup is not a consolation prize: the seed is the identity, so a
+profile restored from one presents the same browser. What it cannot give back
+is logged-in sessions. Every backup carries a `MANIFEST` recording which kind
+it is, so a restore is never a surprise.
+
+Browser caches are excluded from both (the same directory names
+`backup._SKIP_DIR_NAMES` excludes from a per-profile backup). They are large,
+they rebuild themselves, and nobody restores for them.
+
+**Retention:** `KEEP=7` by default; `multiprofile-backup --keep N` changes it.
+Only backups this tool made are ever pruned — they are identified by their
+`MANIFEST`, so anything you put in that directory by hand is left alone
+whatever it is called.
+
+**Size:** a full backup of 5 profiles is about 400 MB here, so seven of them
+is roughly 2.8 GB. Check `du -sh ~/multiprofile-backups` before raising
+`KEEP`, and note this grows with the number of profiles.
+
+**It writes to `$HOME`, which is the same disk as your data.** Copy
+`~/multiprofile-backups/` somewhere else, or point
+`MULTIPROFILE_BACKUP_DIR` at removable or network storage.
+
+### Doing it by hand
+
 The data lives in `~/.local/share/multiprofile/` (or `$XDG_DATA_HOME`) and
-`~/.config/multiprofile/`.
+`~/.config/multiprofile/`. `multiprofile-backup` runs exactly these steps —
+they are written out here so the script is auditable, not so you have to type
+them.
 
 **Stop the application first.** SQLite is safe to copy while running only
 through its own backup API, which is what the command below uses, but the
@@ -235,10 +288,12 @@ do not. Finish what is open first. Tab restoration is not implemented.
 
 ## 6. What is not covered
 
-* **No automatic backups.** Nothing runs on a schedule. If you want that, put
-  the step-1 commands in a cron job or systemd timer yourself.
-* **No off-machine copy.** The commands above write to `$HOME`, which is the
-  same disk as the data. Copy `~/multiprofile-backups/` somewhere else.
+* **No off-machine copy.** Backups are written to `$HOME`, the same disk as
+  the data, so a disk failure takes both. Copy `~/multiprofile-backups/`
+  elsewhere or set `MULTIPROFILE_BACKUP_DIR`.
+* **A metadata backup cannot restore a session.** If your profiles are always
+  running, every automatic backup will be the metadata kind. Stop them
+  occasionally and run `multiprofile-backup` for a full one.
 * **No signed update channel in practice.** The repository tooling, delta
   channel, updater and rollback all exist and are exercised end to end in a
   clean Debian container on every push, but there is no published host or

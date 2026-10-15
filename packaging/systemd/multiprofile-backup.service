@@ -1,0 +1,12 @@
+[Unit]
+Description=Verified backup of the Multiprofile store
+Documentation=file://%h/.local/lib/multiprofile/docs/BACKUP_AND_RESTORE.md
+
+[Service]
+Type=oneshot
+# --quiet because the interesting output is the failure, and journald already
+# timestamps what is left.
+ExecStart=%h/.local/bin/multiprofile-backup --quiet
+# A backup is not worth degrading an interactive session for.
+Nice=10
+IOSchedulingClass=idle
