@@ -4,20 +4,20 @@
     "@tanstack/react-table": "^8.21.3",
     "cmdk": "^1.1.1",
     "lucide-react": "^1.47.0",
-    "next": "^16.3.6",
+    "next": "^16.4.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "sonner": "^2.0.8",
     "zustand": "^5.0.15"
   },
-  "description": "Multiprofile Linux \u2014 premium desktop console frontend (Next.js static export, served by the Flask backend)",
+  "description": "Multiprofile Linux — premium desktop console frontend (Next.js static export, served by the Flask backend)",
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.12",
     "@types/node": "^24.3.1",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "eslint": "^9.39.5",
-    "eslint-config-next": "^16.3.6",
+    "eslint-config-next": "^16.4.1",
     "tailwindcss": "^4.1.12",
     "typescript": "^5.9.2"
   },

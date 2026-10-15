@@ -264,16 +264,55 @@ def import_legacy_json() -> int:
     return len(clean)
 
 
+def _status_for_state(state: str, stored: str | None) -> str:
+    """Console status word for a ``profiles_runtime`` state.
+
+    ``parked`` is a catalogue flag on the profile, not a process state, so a
+    stopped profile keeps it. Everything else the console counts — running,
+    idle, failed — comes from the state machine.
+    """
+    if state == "running":
+        return "running"
+    if state == "error":
+        return "failed"
+    if state in ("starting", "stopping"):
+        return state
+    if str(stored or "").lower() == "parked":
+        return "parked"
+    return "idle"
+
+
 def _decorate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Attach the live runtime view the console expects."""
+    """Attach the live runtime view the console expects.
+
+    The database row wins when one exists. ``runtime.json`` is only the
+    fallback for a profile the state machine has never recorded, which is
+    how a handful of callers still mark a run. Reading the file first is
+    how the profile list and the Resources card disagreed: the file keeps
+    entries the database has already dropped.
+    """
     runtime = _read_json(runtime_state_path(), {})
     if not isinstance(runtime, dict):
         runtime = {}
+    try:
+        rows = {r["profile_id"]: r for r in db.list_profile_runtimes()}
+    except Exception as e:  # noqa: BLE001 - the JSON cache is the fallback
+        log.debug("runtime table unreadable, using the JSON cache: %s", e)
+        rows = {}
     for p in items:
         _normalize_fields(p)
-        st = runtime.get(p.get("id"), {})
-        p["status"] = st.get("status", p.get("status", "idle"))
-        p["pid"] = st.get("pid")
+        row = rows.get(p.get("id") or "")
+        if row is not None:
+            p["status"] = _status_for_state(
+                str(row.get("state") or "stopped"), p.get("status")
+            )
+            p["pid"] = row.get("pid")
+        else:
+            st = runtime.get(p.get("id"), {})
+            if not isinstance(st, dict):
+                st = {}
+            p["status"] = st.get("status", p.get("status", "idle"))
+            p["pid"] = st.get("pid")
         # SPA compatibility: isRunning
         p["isRunning"] = p.get("status") == "running" and bool(p.get("pid"))
         p["isQueued"] = p.get("status") == "queued"
@@ -369,8 +408,94 @@ def save_profiles(items: list[dict[str, Any]]) -> None:
 def set_runtime(profile_id: str, status: str, pid: int | None = None) -> None:
     with _lock:
         runtime = _read_json(runtime_state_path(), {})
+        if not isinstance(runtime, dict):
+            runtime = {}
         runtime[profile_id] = {"status": status, "pid": pid}
         _write_json(runtime_state_path(), runtime)
+
+
+def mirror_runtime_cache(profile_id: str) -> None:
+    """Copy one profile's database runtime row into ``runtime.json``.
+
+    Called after a state-machine write. The JSON file is a cache of that
+    row, not a second place a status can be decided. No row means the cache
+    entry is left as it is: a caller that only uses :func:`set_runtime` has
+    not been through the state machine, and wiping its entry would hide the
+    run it just recorded.
+    """
+    try:
+        row = db.get_profile_runtime(profile_id)
+    except Exception as e:  # noqa: BLE001 - the cache is not the record
+        log.debug("runtime cache mirror skipped for %s: %s", profile_id, e)
+        return
+    if not row:
+        return
+    status = _status_for_state(str(row.get("state") or "stopped"), None)
+    with _lock:
+        runtime = _read_json(runtime_state_path(), {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        runtime[str(profile_id)] = {"status": status, "pid": row.get("pid")}
+        _write_json(runtime_state_path(), runtime)
+
+
+def prune_stale_runtime() -> dict[str, int]:
+    """Drop runtime state for profiles that no longer exist, and resync the rest.
+
+    On the machine this was found, ``runtime.json`` held 151 entries, 42 of
+    them marked running, and ``profiles_runtime`` held 42 rows for 5 live
+    profiles. Deleting a profile removed the profile and, later, that one
+    JSON key. It did not remove the database row, and nothing ever walked
+    the entries already there. Metrics stopped reading the file. The file
+    and the orphan rows were still what the profile list and the parking
+    check could fall back to.
+
+    Returns counts, and never raises past a logged failure of one half: a
+    startup sweep that cannot rewrite a cache file must not refuse to boot,
+    and a sweep that cannot see the database must not delete the cache on
+    a guess.
+    """
+    _ensure_ready()
+    removed_rows = db.prune_orphan_profile_runtimes()
+    live_ids = {str(p["id"]) for p in db.list_profiles() if p.get("id")}
+    rows = {r["profile_id"]: r for r in db.list_profile_runtimes()}
+    dropped = 0
+    rewritten = 0
+    with _lock:
+        runtime = _read_json(runtime_state_path(), {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        new: dict[str, Any] = {}
+        for pid, entry in runtime.items():
+            if str(pid) not in live_ids:
+                dropped += 1
+                continue
+            row = rows.get(str(pid))
+            if row is None:
+                new[str(pid)] = entry if isinstance(entry, dict) else {}
+                continue
+            projected = {
+                "status": _status_for_state(str(row.get("state") or "stopped"), None),
+                "pid": row.get("pid"),
+            }
+            if entry != projected:
+                rewritten += 1
+            new[str(pid)] = projected
+        for pid, row in rows.items():
+            if pid not in live_ids or pid in new:
+                continue
+            new[pid] = {
+                "status": _status_for_state(str(row.get("state") or "stopped"), None),
+                "pid": row.get("pid"),
+            }
+            rewritten += 1
+        if new != runtime:
+            _write_json(runtime_state_path(), new)
+    return {
+        "runtimeRows": len(removed_rows),
+        "jsonDropped": dropped,
+        "jsonRewritten": rewritten,
+    }
 
 
 #: Catalogue id per platform claim, for the create-time default below.
@@ -848,10 +973,11 @@ def duplicate_profile(profile_id: str) -> dict[str, Any] | None:
 def _matches_status(profile: dict[str, Any], status: str) -> bool:
     """The status predicate, kept in one place.
 
-    Status is not stored -- it is synthesised on read from the runtime
-    registry -- so it cannot be a WHERE clause without the database
-    disagreeing with the live process table. It stays a Python filter, and
-    this is the only definition of it.
+    Status is not stored on the profile row. It is read from
+    ``profiles_runtime`` (the JSON cache only when that profile has no row),
+    so it cannot be a WHERE clause without a second copy of the state
+    machine in SQL. It stays a Python filter, and this is the only
+    definition of it.
     """
     st = status.lower().strip()
     if st == "running":
@@ -961,14 +1087,45 @@ def reap_orphans() -> list[dict[str, Any]]:
 
     reaped: list[dict[str, Any]] = []
     for p in load_profiles():
-        if p.get("status") == "running":
-            pid = p.get("pid")
-            if not pid_alive(pid):
-                set_runtime(p["id"], "idle", None)
-                if browser_manager is not None:
-                    try:
-                        browser_manager.release_slot(p["id"])
-                    except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
-                        pass
-                reaped.append({"profileId": p["id"], "oldPid": pid})
+        if p.get("status") != "running":
+            continue
+        pid = p.get("pid")
+        if pid_alive(pid):
+            continue
+        if browser_manager is not None:
+            try:
+                browser_manager.release_slot(p["id"])
+            except Exception:  # noqa: BLE001,S110 - nothing here can be acted on; the caller's result is unchanged
+                pass
+        # A database row still in `running` belongs to the supervisor: it
+        # restarts an unexpected exit from RUNNING, and marking the JSON
+        # cache idle underneath it is the drift this function used to write
+        # on every pass. With the supervisor off, nothing else will ever
+        # move the row, so the reaper records the death itself.
+        row = None
+        try:
+            row = db.get_profile_runtime(p["id"])
+        except Exception as e:  # noqa: BLE001 - fall through to the JSON cache
+            log.debug("reaper could not read runtime for %s: %s", p["id"], e)
+        if row is not None and str(row.get("state") or "") == "running":
+            try:
+                from ..config import get_settings
+
+                supervisor_on = get_settings().supervisor_enabled
+            except Exception:  # noqa: BLE001 - leave the row for the supervisor
+                supervisor_on = True
+            if supervisor_on:
+                continue
+            try:
+                db.set_profile_state(
+                    p["id"], "error", note="reaped: process gone, supervisor disabled"
+                )
+                db.upsert_profile_runtime(p["id"], pid=None)
+                mirror_runtime_cache(p["id"])
+            except Exception as e:  # noqa: BLE001 - reported, not swallowed silently
+                log.warning("reaper could not record %s as dead: %s", p["id"], e)
+                continue
+        else:
+            set_runtime(p["id"], "idle", None)
+        reaped.append({"profileId": p["id"], "oldPid": pid})
     return reaped

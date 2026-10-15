@@ -181,11 +181,30 @@ def test_measure_profile_without_pid_is_unavailable(xdg_tmp):
     assert payload["cpu_percent"] is None
 
 
+def _launcher_marks_running(profile_id: str, pid: int) -> None:
+    """Record a running profile the way the launcher does: both stores.
+
+    The launcher calls `set_runtime` (which writes runtime.json) *and* drives
+    the profile through the state machine into `profiles_runtime`. This test
+    used to do only the first, which was enough while metrics read the JSON
+    file and became not enough when it moved to the database -- the source
+    that is pruned and transition-checked. The assertions below are unchanged;
+    only the setup now matches what actually happens on a launch.
+    """
+    from multiprofile.storage import db
+
+    set_runtime(profile_id, "running", pid)
+    db.upsert_profile_runtime(profile_id, pid=pid)
+    db.set_profile_state(profile_id, "starting")
+    db.set_profile_state(profile_id, "running")
+    db.upsert_profile_runtime(profile_id, pid=pid)
+
+
 def test_summary_totals_counts_running(xdg_tmp):
     p1 = create_profile({"name": "sum-1"})
     p2 = create_profile({"name": "sum-2"})
-    set_runtime(p1["id"], "running", 999991)  # dead pids -> UNAVAILABLE
-    set_runtime(p2["id"], "running", 999992)
+    _launcher_marks_running(p1["id"], 999991)  # dead pids -> UNAVAILABLE
+    _launcher_marks_running(p2["id"], 999992)
     summary = proc_metrics.summary_totals()
     assert summary["running_profiles"] == 2
     assert summary["unavailable"] == 2

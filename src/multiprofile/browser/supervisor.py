@@ -435,6 +435,12 @@ class Supervisor:
                 "note": note,
             },
         )
+        try:
+            from ..storage.profiles import mirror_runtime_cache
+
+            mirror_runtime_cache(profile_id)
+        except Exception:  # noqa: BLE001 - the cache is not the record
+            log.debug("runtime cache mirror failed for %s", profile_id, exc_info=True)
 
 
 # Module-level singleton for the running process (started by app wiring).

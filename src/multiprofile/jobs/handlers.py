@@ -66,6 +66,12 @@ def _transition(record: dict[str, Any], to: ProfileState | str, note: str | None
         log.warning("job %s: state write failed: %s", record.get("id"), e)
         return
     _publish_profile_status(profile_id, change["old"], change["new"], note)
+    try:
+        from ..storage.profiles import mirror_runtime_cache
+
+        mirror_runtime_cache(profile_id)
+    except Exception:  # noqa: BLE001 - the cache is not the record
+        log.debug("runtime cache mirror failed for %s", profile_id, exc_info=True)
 
 
 def _launch_fn(ctx: HandlerContext) -> Callable[..., dict[str, Any]]:

@@ -42,8 +42,33 @@ PYEOF
 
 say "creating the virtual environment"
 mkdir -p "$APP_DIR"
+# --system-site-packages, deliberately.
+#
+# The desktop window is pywebview on GTK, and pywebview needs PyGObject plus
+# the WebKit2GTK typelibs. Those cannot be pip-installed in any reliable way:
+# they are distro packages (python-gobject / python3-gi, webkit2gtk). An
+# isolated venv therefore cannot see them, pywebview's GTK import fails, and
+# `open_ui` silently falls back to `webbrowser.open` -- so `multiprofile`
+# opens a TAB IN THE OPERATOR'S OWN BROWSER instead of its own window.
+#
+# That is not a cosmetic difference for this product. The console ends up in
+# the operator's personal browsing session, beside their own tabs, which is
+# the one place a profile manager should not be.
+#
+# Measured on this machine before the flag was added:
+#   system python   gi + Gtk 3.0 + WebKit2 4.1   OK
+#   venv python     ModuleNotFoundError: No module named 'gi'
+#   log             [pywebview] GTK cannot be loaded -> system browser
+#
+# Project dependencies still install into the venv and still take precedence
+# over anything with the same name outside it.
+if [ -x "$VENV/bin/python" ] && \
+   ! grep -q 'include-system-site-packages = true' "$VENV/pyvenv.cfg" 2>/dev/null; then
+  say "rebuilding the virtual environment so the GTK bindings are visible"
+  rm -rf "$VENV"
+fi
 if [ ! -x "$VENV/bin/python" ]; then
-  "$PY" -m venv "$VENV"
+  "$PY" -m venv --system-site-packages "$VENV"
 fi
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
 # Not editable: an installed copy must not break because the checkout moved.
@@ -94,6 +119,24 @@ if "$BIN" --doctor; then
   echo "  doctor: ok"
 else
   echo "  doctor reported something to fix (above). The install itself is fine."
+fi
+# Stated, not assumed: without GTK the desktop window silently becomes a tab
+# in whatever browser the system opens, and the operator should know which
+# they have before they rely on it.
+if "$VENV/bin/python" - <<'PYCHECK' 2>/dev/null
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk  # noqa: F401
+import webview  # noqa: F401
+PYCHECK
+then
+  echo "  desktop window: GTK available, 'multiprofile' opens its own window"
+else
+  echo "  desktop window: GTK bindings NOT available -- 'multiprofile' will open"
+  echo "                  a tab in your system browser instead. Install them with:"
+  echo "                    Arch:          sudo pacman -S python-gobject webkit2gtk"
+  echo "                    Debian/Ubuntu: sudo apt install python3-gi gir1.2-webkit2-4.1"
+  echo "                  then re-run this script."
 fi
 
 cat <<EOF
