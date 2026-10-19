@@ -166,15 +166,15 @@ def test_a_browser_that_dies_late_is_still_caught(monkeypatch):
 # 3. Bulk launch runs in parallel and keeps its contract
 # --------------------------------------------------------------------------
 
-def _run_bulk(monkeypatch, n, *, launch_delay=0.2, fail=(), ids=None):
+def _run_bulk(monkeypatch, n, *, launch_delay=0.2, fail=(), ids=None, spans=None):
     """Drive a bulk batch with a stubbed launch, so this measures the loop.
 
     Rewritten for F20: the batch now runs on the durable queue's workers
-    rather than a thread pool inside the job record. **Every assertion below
-    is unchanged** -- overlap, exactly-once, operator ordering, the
-    concurrency ceiling and partial failure are properties of bulk launch,
-    not of which queue implements it, and the point of porting rather than
-    deleting these is that the migration had to keep all five.
+    rather than a thread pool inside the job record. Exactly-once, operator
+    ordering, the concurrency ceiling and partial failure are unchanged.
+    Overlap is judged on ``spans`` when the caller passes a list: each entry
+    is the start and end of one stubbed launch, so the sequential cost is
+    measured in the same run as the overlap.
     """
     from multiprofile.browser import manager as browser_manager
     from multiprofile.jobs import batches, create_job, get_job, start_workers, stop_workers
@@ -194,12 +194,15 @@ def _run_bulk(monkeypatch, n, *, launch_delay=0.2, fail=(), ids=None):
         with lock:
             concurrent += 1
             peak = max(peak, concurrent)
+        started = time.monotonic()
         try:
             time.sleep(launch_delay)
             if pid in fail:
                 return {"ok": False, "error": "nope"}
             return {"ok": True}
         finally:
+            if spans is not None:
+                spans.append((started, time.monotonic()))
             with lock:
                 concurrent -= 1
 
@@ -229,12 +232,29 @@ def _run_bulk(monkeypatch, n, *, launch_delay=0.2, fail=(), ids=None):
 
 
 def test_bulk_launch_overlaps_instead_of_queueing(monkeypatch):
-    """The measurement in the module docstring, as an assertion."""
+    """Overlap is a ratio against the durations measured in this run.
+
+    A fixed ceiling does not survive a shared runner. Eight sleeps of 0.25s
+    were required to finish in under 1.2s; one CI run took 4.79s and the
+    same commit passed when that job was re-run. The sequential cost is the
+    sum of the eight launch durations recorded here, so a stall stretches
+    the budget and the measurement together. ``peak > 1`` still requires
+    that two launches were in flight at once. 0.6 is the old 1.2s / 2.0s
+    line. A cap of 1 lands near 1.0 and fails it.
+    """
     monkeypatch.setenv("MAX_CONCURRENT_PROFILES", "8")
-    job, ids, elapsed, peak = _run_bulk(monkeypatch, 8, launch_delay=0.25)
+    spans: list[tuple[float, float]] = []
+    _job, _ids, _elapsed, peak = _run_bulk(
+        monkeypatch, 8, launch_delay=0.25, spans=spans,
+    )
     assert peak > 1, "launches never overlapped"
-    # Sequential would be 8 * 0.25 = 2.0s.
-    assert elapsed < 1.2, f"{elapsed:.2f}s for 8 launches of 0.25s"
+    assert len(spans) == 8
+    sequential = sum(end - start for start, end in spans)
+    overlapped = max(end for _start, end in spans) - min(start for start, _end in spans)
+    assert sequential > 0
+    assert overlapped < sequential * 0.6, (
+        f"overlapped {overlapped:.2f}s vs sequential {sequential:.2f}s"
+    )
 
 
 def test_every_profile_is_launched_exactly_once(monkeypatch):
