@@ -69,6 +69,11 @@ That creates a virtual environment under `~/.local/lib/multiprofile`, a
 `multiprofile` command in `~/.local/bin`, a desktop entry and icons. It never
 writes to the data directory, so re-running it is how you upgrade.
 
+**Ubuntu — follow [`UBUNTU_INSTALL.md`](UBUNTU_INSTALL.md).** It is the same
+rootless script with the four Ubuntu-specific things spelled out: the Python
+version gate, `python3-venv`, the GTK typelib, and the snap Chromium hazard
+below. The rest of this section is the short version.
+
 **Debian or Ubuntu — use the same rootless script.** There is a `.deb`, and
 it installs, but it is the weaker path for a teammate: it is unsigned and has
 no update channel (**F12**), so upgrading means rebuilding and `dpkg -i` by

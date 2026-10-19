@@ -1,8 +1,9 @@
 # Installation
 
-See [`TEAM.md`](TEAM.md) for onboarding more than one person, and
-[`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) before you create anything
-you care about.
+See [`TEAM.md`](TEAM.md) for onboarding more than one person,
+[`UBUNTU_INSTALL.md`](UBUNTU_INSTALL.md) for a step-by-step Ubuntu install,
+and [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) before you create
+anything you care about.
 
 ## Rootless, per-user — the recommended path on every distribution
 
