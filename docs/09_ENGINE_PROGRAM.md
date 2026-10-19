@@ -169,20 +169,53 @@ yet.
 
 ## 6. Gates — what must be measured before any parity claim
 
-None of these is passed. They are listed so that "we have a core" is never
-mistaken for "we match the competition".
+**No gate is passed.** One has now been half *run*, and a run is not a pass.
+They are listed so that "we have a core" is never mistaken for "we match the
+competition".
 
 | gate | what it needs | status |
 |---|---|---|
 | **T1** Cross-OS transport reference | A genuine same-version Chrome on a real Windows host, captured through the same destination and route | **not started** — needs a Windows machine or VM |
-| **T2** HTTP/2 + HTTP/3 behaviour | A completed handshake, so a trusted certificate; then SETTINGS, frame order, priority and QUIC transport parameters | **not started** |
+| **T2** HTTP/2 + HTTP/3 behaviour | A completed handshake, so a trusted certificate; then SETTINGS, frame order, priority and QUIC transport parameters | **h2 run** 19 Oct 2026 (§6a) — product adds no artefact. **HTTP/3 not started**: needs a QUIC server |
 | **T3** Font coherence on a claimed OS | The claimed OS's font files, with name tables, and a probe that reads metadata rather than widths | **not started** (E2) |
 | **T4** Third-party checker delta | Re-run the 5 October captures against a core build and publish the difference | **not started** |
 | **T5** Account-site acceptance | The only gate that measures the thing customers care about, and the hardest to run ethically and legally | **not started** |
 
-**A `supported` engine verdict is a supply-chain property, not a fingerprint
-property.** It means the build is one this product vouches for and the
-operator can be told which. It says nothing about detection.
+### 6a. T2, the HTTP/2 half — measured, matched, no product artefact
+
+Measured 19 October 2026 on Chromium 154.0.8037.97, product against stock on
+the same host in the same session
+([`h2_probe`](../src/multiprofile/diagnostics/h2_probe.py),
+`tests/test_h2_identity_live.py`). Both sides completed a TLS 1.3 handshake
+against a per-run lab certificate and negotiated h2 by ALPN.
+
+| | product | stock |
+|---|---|---|
+| `HEADER_TABLE_SIZE` | 65536 | 65536 |
+| `ENABLE_PUSH` | 0 | 0 |
+| `INITIAL_WINDOW_SIZE` | 6291456 | 6291456 |
+| `MAX_HEADER_LIST_SIZE` | 262144 | 262144 |
+| connection `WINDOW_UPDATE` | 15663105 | 15663105 |
+| first three frames | `SETTINGS`, `WINDOW_UPDATE`, `HEADERS` | identical |
+| priority scheme | none observed | none observed |
+
+**Identical on every comparable field.** As at the TLS layer, the product's
+machinery sits above the network stack and does not perturb what a
+destination sees. Neither side sent RFC 7540 `PRIORITY` frames, an RFC 9218
+`PRIORITY_UPDATE`, or `SETTINGS_NO_RFC7540_PRIORITIES`, so a single-request
+load signals no priority at all; a multi-stream page would be a separate
+measurement.
+
+Two things this does **not** say. It says nothing about whether these values
+match Chrome on a *claimed* foreign OS — that is T1, unchanged. And it says
+nothing about HTTP/3: QUIC transport parameters need a QUIC server, which is
+a different protocol stack rather than more of this one, and guessing them
+from the h2 result would be exactly the move §6 exists to prevent.
+
+The certificate was not installed into anyone's trust store. The engine was
+pinned to a wrapper adding `--ignore-certificate-errors` and the control was
+given the identical flag, so what was compared is the browser and not the
+flag.
 
 ---
 

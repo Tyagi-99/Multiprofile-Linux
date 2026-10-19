@@ -380,15 +380,18 @@ directory. **Nothing was installed. The install click is blocked on a human.**
 
 T1–T5 are defined in [`09_ENGINE_PROGRAM`](09_ENGINE_PROGRAM.md) §6 and are
 **detection-parity** gates for the browser-engine programme, not extension
-gates. Their status is unchanged by any of this work:
+gates. Their status is unchanged by any of this work, and §6 there is the one
+place that tracks it:
 
 | gate | scope | status |
 |---|---|---|
 | T1 Cross-OS transport reference | same-version Chrome on a real Windows host | **not started** |
-| T2 HTTP/2 + HTTP/3 behaviour | SETTINGS, frame order, QUIC parameters | **not started** |
+| T2 HTTP/2 + HTTP/3 behaviour | SETTINGS, frame order, QUIC parameters | **h2 run**, no product artefact; HTTP/3 not started |
 | T3 Font coherence on a claimed OS | the claimed OS's font files and metadata probes | **not started** |
 | T4 Third-party checker delta | re-run captures against a core build | **not started** |
 | T5 Account-site acceptance | whether real sites accept the browser | **not started** |
+
+No gate is passed.
 
 Three claims are kept apart deliberately. **Extension functionality** is
 measured and reported above. **Browser-identity regression** is covered by the
