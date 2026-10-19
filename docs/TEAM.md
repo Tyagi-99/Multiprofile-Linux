@@ -109,10 +109,25 @@ multiprofile --server-only     # API + console on http://127.0.0.1:8765/
 
 Or launch **Multiprofile** from the application menu.
 
-### 4. Know where your data is
+### 4. Turn on backups before you create anything you care about
 
-`~/.local/share/multiprofile/`. It is yours, it is local, and nobody else can
-see it. **Set up a backup before you create anything you care about** —
+`~/.local/share/multiprofile/` is yours, it is local, and nobody else can see
+it — which also means nobody else has a copy of it.
+
+```bash
+systemctl --user enable --now multiprofile-backup.timer   # daily, verified
+multiprofile-backup                                       # or one right now
+```
+
+Each backup is checksummed and its database is integrity-checked before it
+counts as one. Seven are kept. If a profile is running when the timer fires
+it takes a *metadata* backup — definitions, identity seeds, proxy and
+extension settings, but not cookies or sessions — and records that in the
+backup's `MANIFEST`. Stop your profiles now and then so a full one gets
+taken.
+
+Backups land in `$HOME`, the same disk as the data. Copy them elsewhere, or
+set `MULTIPROFILE_BACKUP_DIR`. See
 [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md).
 
 ---
