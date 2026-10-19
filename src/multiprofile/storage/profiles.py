@@ -268,8 +268,7 @@ def import_legacy_json() -> int:
         if not isinstance(item, dict) or not item.get("id"):
             continue
         record = dict(item)
-        record.pop("pid", None)
-        record.pop("isRunning", None)
+        _strip_stored_runtime(record)
         record["status"] = "idle"
         _normalize_fields(record)
         _encrypt_profile_secrets(record)
@@ -353,8 +352,10 @@ def _decorate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
                 p["cdpPort"] = rt.cdp_port
             else:
-                p.setdefault("launchState", None)
-                p.setdefault("cdpPort", None)
+                # Same rule as the list projection: a launchState stored on
+                # the profile is not a live browser. Only the registry is.
+                p["launchState"] = None
+                p["cdpPort"] = None
         except Exception:  # noqa: BLE001 - the failure is recorded in the value this assigns
             p.setdefault("launchState", None)
             p.setdefault("cdpPort", None)
@@ -420,8 +421,7 @@ def save_profiles(items: list[dict[str, Any]]) -> None:
         clean = []
         for p in items:
             q = dict(p)
-            q.pop("pid", None)
-            q.pop("isRunning", None)
+            _strip_stored_runtime(q)
             q["status"] = "idle"
             _normalize_fields(q)
             _encrypt_profile_secrets(q)
@@ -618,9 +618,24 @@ def _new_profile(payload: dict[str, Any]) -> dict[str, Any]:
     return profile
 
 
+# Process facts. They describe a browser that may already be gone, and a
+# read-modify-write of a list row used to save them back onto the profile.
+# The list then treated that copy as live. The registry and control.db own
+# them; the profile document must not.
+_STORED_RUNTIME_LEFTOVERS = (
+    "pid", "isRunning", "isQueued", "isFailed",
+    "launchState", "launchError", "launchErrorCode", "cdpPort",
+)
+
+
+def _strip_stored_runtime(profile: dict[str, Any]) -> None:
+    for key in _STORED_RUNTIME_LEFTOVERS:
+        profile.pop(key, None)
+
+
 def _for_storage(profile: dict[str, Any]) -> dict[str, Any]:
     stored = dict(profile)
-    stored.pop("pid", None)
+    _strip_stored_runtime(stored)
     _encrypt_profile_secrets(stored)
     return stored
 
@@ -691,8 +706,7 @@ def update_profile(profile_id: str, payload: dict[str, Any]) -> dict[str, Any] |
         merged = {**current, **payload, "id": profile_id}
         _normalize_fields(merged)
         _attach_fingerprint(merged)
-        merged.pop("pid", None)
-        merged.pop("isRunning", None)
+        _strip_stored_runtime(merged)
         _encrypt_profile_secrets(merged)
         return merged
 

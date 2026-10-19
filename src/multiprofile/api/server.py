@@ -390,10 +390,15 @@ def _with_launch_state(profiles: list) -> list:
             q["egressIp"] = rt.egress_ip
             q["lastProxyCheck"] = rt.last_proxy_check
         else:
-            q.setdefault("launchState", None)
-            q.setdefault("cdpPort", None)
-            q.setdefault("launchError", None)
-            q.setdefault("launchErrorCode", None)
+            # A launchState saved on the profile document is a previous
+            # process's leftover. With no live registry entry it is not a
+            # browser, and it must not outrank the control.db row. setdefault
+            # left RUNNING and VERIFY_FAILED in place, so Stop could record
+            # stopped and the table still painted running or error.
+            q["launchState"] = None
+            q["cdpPort"] = None
+            q["launchError"] = None
+            q["launchErrorCode"] = None
             q.setdefault("proxyOk", None)
             q.setdefault("egressIp", None)
             q.setdefault("lastProxyCheck", None)

@@ -211,6 +211,45 @@ def test_never_launched_profile_is_stopped(xdg_isolated, clean_runtimes):
     assert row["state"] == "stopped"
 
 
+def test_a_saved_launch_state_cannot_override_a_stopped_row(xdg_isolated, clean_runtimes):
+    """A launchState left inside the profile document is not a running browser.
+
+    The live registry is empty and control.db says stopped. The list used to
+    keep the document's RUNNING or VERIFY_FAILED via setdefault, so Stop
+    could record stopped and the table still painted running or error.
+    """
+    from multiprofile.storage import db as control_db
+
+    control_db.upsert_profile_runtime("p1", state="stopped", note="user stop")
+    [row] = _with_launch_state([{
+        "id": "p1",
+        "name": "One",
+        "status": "idle",
+        "launchState": "RUNNING",
+        "cdpPort": 46315,
+        "launchError": "leftover",
+        "launchErrorCode": "verify",
+    }])
+    assert row["state"] == "stopped"
+    assert row["launchState"] is None
+    assert row["cdpPort"] is None
+    assert row["launchError"] is None
+    assert row["launchErrorCode"] is None
+
+
+def test_a_saved_verify_failure_does_not_paint_error(xdg_isolated, clean_runtimes):
+    from multiprofile.storage import db as control_db
+
+    control_db.upsert_profile_runtime("p1", state="stopped")
+    [row] = _with_launch_state([{
+        "id": "p1",
+        "name": "One",
+        "launchState": "VERIFY_FAILED",
+    }])
+    assert row["state"] == "stopped"
+    assert row["launchState"] is None
+
+
 # --------------------------------------------------------------------------
 # through the route
 # --------------------------------------------------------------------------

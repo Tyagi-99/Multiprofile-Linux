@@ -143,6 +143,25 @@ def test_the_runtime_view_is_still_attached():
                 "launchState", "cdpPort"):
         assert key in p, key
     assert p["isRunning"] is False
+    assert p["launchState"] is None
+
+
+def test_an_edit_forgets_a_launch_state_saved_on_the_profile():
+    """A later edit must not keep a launchState an older build wrote in."""
+    from multiprofile.storage.profiles import update_profile
+
+    pid = create_profile({"name": "stale"})["id"]
+    db.mutate_profile(
+        pid, lambda current: {**current, "launchState": "RUNNING", "cdpPort": 9},
+    )
+    assert db.get_profile_row(pid)["launchState"] == "RUNNING"
+    updated = update_profile(pid, {"notes": "kept"})
+    stored = db.get_profile_row(pid)
+    assert "launchState" not in stored
+    assert "cdpPort" not in stored
+    assert stored["notes"] == "kept"
+    assert updated["launchState"] is None
+    assert updated["notes"] == "kept"
 
 
 def test_save_profiles_replaces_the_whole_set():
