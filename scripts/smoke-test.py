@@ -24,6 +24,7 @@ launching anything. Exit status is 0 only if every check that ran passed.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import json
 import os
@@ -206,6 +207,42 @@ def host_timezone() -> str:
         return os.path.realpath("/etc/localtime").split("zoneinfo/")[-1]
     except Exception:  # noqa: BLE001 - absence is reported, not guessed
         return ""
+
+
+def cdp_dependency_error() -> str | None:
+    """Why the CDP checks cannot run, or None if they can.
+
+    ``websocket-client`` is a declared dependency of the product, so the
+    interpreter that runs an install always has it. The interpreter that runs
+    *this script* is whatever the operator typed, and the documented command
+    was ``python3 scripts/smoke-test.py`` -- the system Python, which on a
+    rootless install is a different interpreter from the app's venv.
+
+    Measured on this machine, system Python 3.14.8 against the same install:
+
+        python3 scripts/smoke-test.py    43 passed, 3 failed
+        venv/bin/python  same script     49 passed, 0 failed
+
+    The three failures were all ``No module named 'websocket'``, and the run
+    ended with "This installation is NOT ready for daily use" -- a verdict
+    about the product, caused by a missing dependency of the harness. A
+    teammate following the install docs would have read that as a broken
+    install on day one. Fail as a setup error instead, before any check runs.
+    """
+    if importlib.util.find_spec("websocket") is not None:
+        return None
+    return (
+        "This script reads a profile's identity over CDP, which needs the\n"
+        "`websocket` module (websocket-client). This interpreter lacks it:\n"
+        f"    {sys.executable}\n\n"
+        "websocket-client is a dependency of multiprofile itself, so the\n"
+        "interpreter behind your install has it. Use that one -- for a\n"
+        "rootless install:\n"
+        "    ~/.local/lib/multiprofile/venv/bin/python scripts/smoke-test.py\n\n"
+        "or add it to this interpreter: pip install websocket-client\n\n"
+        "Refusing to run: without it three checks fail for a reason that has\n"
+        "nothing to do with the installation being tested."
+    )
 
 
 def cdp_identity(port: int, timeout: float = 30.0) -> dict:
@@ -675,6 +712,10 @@ def main() -> int:
         print(f"The extension fixture is missing: {FIXTURE}\n"
               "Run this from a checkout -- it needs tests/fixtures/extensions.",
               file=sys.stderr)
+        return 2
+    dep_error = cdp_dependency_error()
+    if dep_error:
+        print(dep_error, file=sys.stderr)
         return 2
 
     data_dir = args.data_dir or tempfile.mkdtemp(prefix="multiprofile-smoke-")

@@ -29,11 +29,17 @@ removes the application and deliberately leaves your profiles where they are.
 ```bash
 multiprofile --version
 multiprofile --doctor
-python3 scripts/smoke-test.py
+~/.local/lib/multiprofile/venv/bin/python scripts/smoke-test.py
 ```
 
+Run it with **the interpreter behind your install**, not the system
+`python3`: the script talks CDP and so needs `websocket-client`, which
+the app's environment has and a bare system Python generally does not.
+With the wrong interpreter it now refuses to start and says so, rather
+than reporting three product failures for a missing test dependency.
+
 `--doctor` exits non-zero when something must be fixed first.
-`scripts/smoke-test.py` drives the API the console uses and runs 46 checks --
+`scripts/smoke-test.py` drives the API the console uses and runs 49 checks --
 create, edit, launch, stop, restart, proxy on and off, backup, restore, and
 the full extension lifecycle including update and rollback -- against a
 **scratch** data directory, so it is safe on a machine that already holds real

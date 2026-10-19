@@ -13,7 +13,7 @@ checking.
 To check a whole installation rather than one symptom:
 
 ```bash
-python3 scripts/smoke-test.py
+~/.local/lib/multiprofile/venv/bin/python scripts/smoke-test.py
 ```
 
 49 checks against a **scratch** data directory, so it is safe to run on a
@@ -54,7 +54,7 @@ bash scripts/install-local.sh
 and confirm:
 
 ```bash
-python3 scripts/smoke-test.py   # "every asset the console references serves"
+~/.local/lib/multiprofile/venv/bin/python scripts/smoke-test.py   # "every asset the console references serves"
 ```
 
 ### A launch was refused with `extension_runtime_unsupported`

@@ -143,14 +143,20 @@ which engine your profiles run on.
 ```bash
 multiprofile --version
 multiprofile --doctor
-python3 scripts/smoke-test.py
+~/.local/lib/multiprofile/venv/bin/python scripts/smoke-test.py
 ```
 
+Run it with **the interpreter behind your install**, not the system
+`python3`: the script talks CDP and so needs `websocket-client`, which
+the app's environment has and a bare system Python generally does not.
+With the wrong interpreter it now refuses to start and says so, rather
+than reporting three product failures for a missing test dependency.
+
 `--doctor` exits non-zero if something must be fixed first. `smoke-test.py`
-runs 46 checks — create, edit, launch, stop, restart, proxy on and off,
+runs 49 checks — create, edit, launch, stop, restart, proxy on and off,
 backup, restore, and the whole extension lifecycle — against a **scratch**
 data directory, so it is safe on a machine that already holds real profiles.
-Expect `46 passed, 0 failed, 0 skipped`. Checks that need a browser are
+Expect `49 passed, 0 failed, 0 skipped`. Checks that need a browser are
 skipped with a reason on a headless box, and then it is not evidence about
 launching.
 

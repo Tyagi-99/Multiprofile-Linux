@@ -189,7 +189,7 @@ version** (see below). Then verify:
 ```bash
 multiprofile --version
 multiprofile --doctor
-python3 scripts/smoke-test.py     # 46 checks against a scratch store
+~/.local/lib/multiprofile/venv/bin/python scripts/smoke-test.py   # 49 checks, scratch store
 ```
 
 ---
