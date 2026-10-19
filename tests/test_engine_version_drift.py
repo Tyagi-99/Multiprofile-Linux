@@ -330,3 +330,17 @@ def test_the_picker_still_refuses_to_touch_a_pasted_ua(engine_at):
     _resolve_user_agent_id(profile)
     assert profile["userAgent"] == PASTED
 
+
+def test_the_api_can_clear_a_user_agent():
+    """Otherwise the OS picker has no way to unjam a profile.
+
+    `_resolve_user_agent_id` only resolves a picked id when the UA is empty,
+    and the validator required at least one character, so a profile whose UA
+    the picker had written could never be moved to another OS through the
+    API. Measured: 400 "must be at least 1 character(s)".
+    """
+    from multiprofile.api.validation import ValidationError, validate_profile_payload
+
+    validate_profile_payload({"userAgent": "", "userAgentId": "linux_chrome"})
+    with pytest.raises(ValidationError):
+        validate_profile_payload({"userAgent": "x" * 5000})

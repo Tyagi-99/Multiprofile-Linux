@@ -363,7 +363,17 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
     if "name" in payload:
         v_str(payload["name"], "name", min_len=1, max_len=120)
     if "userAgent" in payload:
-        v_str(payload["userAgent"], "userAgent", min_len=1, max_len=4096)
+        # An empty string clears the field, and has to be allowed to.
+        # ``_normalize_fields`` already treats a falsy UA as "use the pool
+        # default", and ``_resolve_user_agent_id`` only resolves a picked id
+        # when the UA is empty -- so with ``min_len=1`` there was no way
+        # through the API to move a profile onto another OS once the picker
+        # had written a UA that no longer matches the catalogue exactly.
+        # Measured: PUT {"userAgent": "", "userAgentId": "linux_chrome"} on
+        # such a profile returned 400 "must be at least 1 character(s)",
+        # leaving the console's OS picker with nothing it could do.
+        if payload["userAgent"] not in ("", None):
+            v_str(payload["userAgent"], "userAgent", min_len=1, max_len=4096)
     if "userAgentId" in payload and payload["userAgentId"] is not None:
         v_str(payload["userAgentId"], "userAgentId", min_len=1, max_len=128)
         # Rejected rather than ignored. An unrecognised id used to be stored
