@@ -387,11 +387,11 @@ place that tracks it:
 |---|---|---|
 | T1 Cross-OS transport reference | same-version Chrome on a real Windows host | **not started** |
 | T2 HTTP/2 + HTTP/3 behaviour | SETTINGS, frame order, QUIC parameters | **h2 run**, no product artefact; HTTP/3 not started |
-| T3 Font coherence on a claimed OS | the claimed OS's font files and metadata probes | **not started** |
+| T3 Font coherence on a claimed OS | the claimed OS's font files and metadata probes | **run, and failed** for cross-OS claims |
 | T4 Third-party checker delta | re-run captures against a core build | **not started** |
 | T5 Account-site acceptance | whether real sites accept the browser | **not started** |
 
-No gate is passed.
+No gate is passed. T3 was run and failed, which is a result and not a pass.
 
 Three claims are kept apart deliberately. **Extension functionality** is
 measured and reported above. **Browser-identity regression** is covered by the

@@ -169,17 +169,17 @@ yet.
 
 ## 6. Gates — what must be measured before any parity claim
 
-**No gate is passed.** One has now been half *run*, and a run is not a pass.
-They are listed so that "we have a core" is never mistaken for "we match the
-competition".
+**No gate is passed.** Two have now been *run*, and one of those two
+**failed**, which is a result rather than a pass. They are listed so that
+"we have a core" is never mistaken for "we match the competition".
 
 | gate | what it needs | status |
 |---|---|---|
 | **T1** Cross-OS transport reference | A genuine same-version Chrome on a real Windows host, captured through the same destination and route | **not started** — needs a Windows machine or VM |
 | **T2** HTTP/2 + HTTP/3 behaviour | A completed handshake, so a trusted certificate; then SETTINGS, frame order, priority and QUIC transport parameters | **h2 run** 19 Oct 2026 (§6a) — product adds no artefact. **HTTP/3 not started**: needs a QUIC server |
-| **T3** Font coherence on a claimed OS | The claimed OS's font files, with name tables, and a probe that reads metadata rather than widths | **not started** (E2) |
-| **T4** Third-party checker delta | Re-run the 5 October captures against a core build and publish the difference | **not started** |
-| **T5** Account-site acceptance | The only gate that measures the thing customers care about, and the hardest to run ethically and legally | **not started** |
+| **T3** Font coherence on a claimed OS | The claimed OS's font files, with name tables, and a probe that reads metadata rather than widths | **run 19 Oct 2026 and FAILED for cross-OS claims** (§6b) |
+| **T4** Third-party checker delta | Re-run the 5 October captures against a core build and publish the difference | **not started** — needs a decision about exposing a profile to third-party checkers |
+| **T5** Account-site acceptance | The only gate that measures the thing customers care about, and the hardest to run ethically and legally | **not started**, and not run by tooling — see §6c |
 
 ### 6a. T2, the HTTP/2 half — measured, matched, no product artefact
 
@@ -216,6 +216,60 @@ The certificate was not installed into anyone's trust store. The engine was
 pinned to a wrapper adding `--ignore-certificate-errors` and the control was
 given the identical flag, so what was compared is the browser and not the
 flag.
+
+### 6b. T3 — run, and the cross-OS font view fails
+
+Measured 19 October 2026 on a scratch store, two profiles on this Linux host,
+width-based detection (what a checker actually uses):
+
+| profile claims | `navigator.platform` | Windows fonts found | Linux fonts found |
+|---|---|---|---|
+| Windows (`win_chrome`) | `Win32` | **none** | `Liberation Sans` |
+| Linux (`linux_chrome`) | `Linux x86_64` | none | `Liberation Sans`, `Noto Sans` |
+
+A profile claiming Windows exposes no Windows font and does expose a Linux
+one. The font view therefore contradicts the claimed OS, and the
+contradiction is trivially readable by any page that measures text.
+
+This is not a defect in the font code; it is the gate's own precondition
+being absent. [`fingerprint/fonts.py`](../src/multiprofile/fingerprint/fonts.py)
+states the policy plainly — *"surface host font enumeration as-is; no
+per-profile override"* — because Chromium exposes the host's fonts and Linux
+offers no per-profile override. There are **zero** Windows font files on this
+host, so no amount of spoofing can produce one; T3 needs the claimed OS's
+font files, which is why it is written that way.
+
+The product already reports this rather than hiding it. Launching the
+Windows-claiming profile recorded two identity faults by itself:
+
+    font_claim_unbacked      windows fonts with no metric-compatible file on
+                             this host, left absent: Calibri, Cambria,
+                             Georgia, Verdana, Tahoma, Trebuchet MS, Segoe UI,
+                             Consolas, Impact, Comic Sans MS, Microsoft Sans
+                             Serif, Palatino Linotype
+    font_backer_name_visible metric backers remain enumerable under their own
+                             names because Chrome reads the font file's name
+                             table: Liberation Mono, Liberation Sans,
+                             Liberation Serif
+
+**Consequence for an operator, stated once and not softened:** on Linux, a
+profile that claims Windows or macOS is detectable by fonts alone. The
+`linux` identity is the one this product supports; `windows`, `macos`,
+`android` and `iphone` are reported as experimental, and this is one of the
+reasons.
+
+### 6c. T5 is not a gate tooling should run
+
+T5 asks whether real account sites accept the browser. Running it means
+driving synthetic identities at live third-party anti-fraud systems, which is
+not a measurement this repository's tooling will perform. If it is run at
+all, it is run by the operator, on their own accounts, under their own
+judgement and their own agreements — and the result belongs in their records,
+not in a test suite that would re-run it on every push.
+
+**A `supported` engine verdict is a supply-chain property, not a fingerprint
+property.** It means the build is one this product vouches for and the
+operator can be told which. It says nothing about detection.
 
 ---
 
