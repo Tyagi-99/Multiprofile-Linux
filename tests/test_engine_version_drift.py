@@ -294,3 +294,39 @@ def test_an_id_whose_ua_was_then_overwritten_is_theirs(engine_at):
     profile["fingerprint"] = stored
     assert operator_pinned_user_agent(profile)
     assert effective_fingerprint(profile)["userAgent"] == PASTED
+
+
+def test_the_ua_picker_still_works_after_an_engine_upgrade(engine_at):
+    """`_resolve_user_agent_id` had the same version-sensitive comparison.
+
+    Its own docstring says treating a derived UA as operator-chosen "would
+    make the picker work exactly once per profile and then jam". It jammed on
+    an engine upgrade instead: found by setting `userAgentId: linux_chrome`
+    on a profile whose UA the catalogue had written at 151, which stored the
+    id and left the Windows UA in place.
+    """
+    engine_at(OLD)
+    from multiprofile.api.user_agents import user_agent_catalog
+    from multiprofile.storage.profiles import _resolve_user_agent_id
+
+    win = next(e["ua"] for e in user_agent_catalog() if e["id"] == "win_chrome")
+    assert "Windows" in win and "151" in win
+
+    engine_at(NEW)
+    profile = {"id": "p1", "seed": 7, "userAgent": win,
+               "userAgentFromId": "win_chrome", "userAgentId": "linux_chrome"}
+    _resolve_user_agent_id(profile)
+    assert "X11; Linux" in profile["userAgent"], (
+        "the picker must replace a UA it wrote itself, whatever engine wrote it"
+    )
+    assert profile["userAgentFromId"] == "linux_chrome", "provenance follows the pick"
+
+
+def test_the_picker_still_refuses_to_touch_a_pasted_ua(engine_at):
+    engine_at(NEW)
+    from multiprofile.storage.profiles import _resolve_user_agent_id
+
+    profile = {"id": "p1", "seed": 7, "userAgent": PASTED, "userAgentId": "linux_chrome"}
+    _resolve_user_agent_id(profile)
+    assert profile["userAgent"] == PASTED
+

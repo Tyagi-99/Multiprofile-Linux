@@ -92,6 +92,9 @@ PROFILE_FIELDS_SERVER_OWNED = frozenset({
     "proxyOk", "egressIp", "lastLaunch", "lastProxyCheck",
     # written by the launch and network paths, never by a client
     "allocatedIp", "lastNetworkDiagnostics", "noteEntries", "geoAuto",
+    # provenance: which catalogue id produced this profile's UA, written by
+    # `_resolve_user_agent_id`. A client sets `userAgentId` and reads this.
+    "userAgentFromId",
 })
 
 # 3. Recognised, and honoured by nothing. These are sent by our own wizard

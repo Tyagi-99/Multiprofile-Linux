@@ -136,15 +136,27 @@ def operator_pinned_user_agent(profile: dict) -> bool:
     of having been derived, and it is already the field
     ``_resolve_user_agent_id`` trusts for the same decision on update.
 
-    So: an id present, and a UA that is still the one that id resolves to
-    (compared without versions, because an engine upgrade moves the
-    catalogue) means derived, and derived claims track the engine. Anything
-    else the operator owns.
+    So: ``userAgentFromId`` present means this product wrote the UA and may
+    keep its version current. Failing that marker -- profiles created before
+    it existed -- an id present plus a UA that is still the one that id
+    resolves to, compared without versions because an engine upgrade moves
+    the catalogue, means the same thing. Anything else the operator owns.
+
+    The threshold here is deliberately looser than the one in
+    ``_resolve_user_agent_id``, and the asymmetry is the point: being wrong
+    here moves a version number, while being wrong there replaces a whole
+    identity and would break a fingerprint pairing someone paid for. Being
+    wrong in the *other* direction here is what left five profiles
+    announcing Chrome 151 on a 154 engine.
     """
     if not isinstance(profile, dict):
         return False
     ua = (profile.get("userAgent") or "").strip()
     if not ua:
+        return False
+    # Recorded provenance wins over any inference from the string.
+    # ``_resolve_user_agent_id`` writes this whenever it resolves a UA.
+    if (profile.get("userAgentFromId") or "").strip():
         return False
     uaid = (profile.get("userAgentId") or "").strip()
     if not uaid:

@@ -110,6 +110,26 @@ def _resolve_user_agent_id(profile: dict[str, Any]) -> None:
     this" would make the picker work exactly once per profile and then jam.
     A UA that matches a catalogue entry was derived, so a newer id replaces
     it.
+
+    **Provenance is recorded rather than guessed.** ``userAgentFromId`` is
+    written whenever this function resolves a UA, and it is the signal a
+    later pick reads. Guessing from the string cannot work in either
+    direction: an exact catalogue match decays, because
+    ``user_agent_catalog()`` realigns to the installed engine and a UA
+    written at 151 stops matching after an upgrade to 154 -- which jams the
+    picker in exactly the way this docstring says it must not, just on an
+    upgrade rather than on the second pick. Found by setting
+    ``userAgentId: linux_chrome`` on a profile whose UA the catalogue had
+    written at 151: the id was stored and the Windows UA stayed. And
+    comparing without the version is worse, because a plain Linux-Chrome
+    string is both what ``linux_chrome`` resolves to and something an
+    operator may well paste; ``test_an_explicit_user_agent_is_not_overwritten``
+    is that case, and it must keep passing.
+
+    Profiles created before the marker existed fall back to the exact match,
+    which is conservative in the direction that matters here: it may decline
+    to replace a UA this product wrote, and the operator can clear the field
+    to get what they asked for. It will not overwrite one they chose.
     """
     uaid = (profile.get("userAgentId") or "").strip()
     if not uaid:
@@ -118,7 +138,8 @@ def _resolve_user_agent_id(profile: dict[str, Any]) -> None:
     try:
         from ..api.user_agents import is_catalogue_user_agent, resolve_user_agent_id
 
-        if existing and not is_catalogue_user_agent(existing):
+        ours = (profile.get("userAgentFromId") or "").strip()
+        if existing and not ours and not is_catalogue_user_agent(existing):
             return
         entry = resolve_user_agent_id(uaid)
     except Exception as e:  # noqa: BLE001 - a catalogue failure must not block a create
@@ -133,6 +154,9 @@ def _resolve_user_agent_id(profile: dict[str, Any]) -> None:
         return
     profile["userAgent"] = entry.get("ua") or ""
     profile["isMobile"] = bool(entry.get("isMobile"))
+    # The record that this UA is ours, so neither the picker nor the version
+    # aligner has to infer it from the string later.
+    profile["userAgentFromId"] = uaid
 
 
 def _normalize_fields(profile: dict[str, Any]) -> dict[str, Any]:
