@@ -344,3 +344,37 @@ def test_the_api_can_clear_a_user_agent():
     validate_profile_payload({"userAgent": "", "userAgentId": "linux_chrome"})
     with pytest.raises(ValidationError):
         validate_profile_payload({"userAgent": "x" * 5000})
+
+
+# --------------------------------------------------------------------------
+# 4. Fields whose empty value means "automatic" must be emptiable
+# --------------------------------------------------------------------------
+
+def test_the_api_can_clear_the_fields_that_geoauto_is_derived_from():
+    """`geoAuto` is server-owned, so clearing is the only way back to auto.
+
+    `_normalize_fields` sets `geoAuto` True when `timezone` or `language` is
+    blank and False when the operator picked one, and the validator required
+    at least one character on both. So a profile that had ever been given a
+    timezone could never return to following its exit -- and the creation
+    default is America/New_York. Measured on a real profile: it announced
+    America/New_York while egressing from Asia/Kolkata.
+    """
+    from multiprofile.api.validation import ValidationError, validate_profile_payload
+
+    validate_profile_payload({"timezone": ""})
+    validate_profile_payload({"language": ""})
+    with pytest.raises(ValidationError):
+        validate_profile_payload({"timezone": "x" * 100})
+
+
+def test_clearing_the_timezone_turns_auto_geo_back_on():
+    from multiprofile.storage.profiles import _normalize_fields
+
+    pinned = _normalize_fields({"id": "p1", "timezone": "America/New_York",
+                                "language": "en-US"})
+    assert pinned["geoAuto"] is False, "an operator's own choice is respected"
+
+    freed = _normalize_fields({"id": "p1", "timezone": "", "language": "en-US",
+                               "geoAuto": False})
+    assert freed["geoAuto"] is True, "blank means follow the exit"

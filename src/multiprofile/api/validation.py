@@ -404,9 +404,20 @@ def validate_profile_payload(payload: dict[str, Any], *, partial: bool = False) 
         v_str_list(payload["tags"], "tags", max_items=50, item_max_len=64)
     if "seed" in payload and payload["seed"] is not None:
         v_int(payload["seed"], "seed", min=0, max=2**63 - 1)
-    if "timezone" in payload:
+    # Empty clears, for the same reason it does on `userAgent`: these two
+    # fields are where `geoAuto` comes from. `_normalize_fields` sets
+    # `geoAuto` True when either is blank and False when the operator picked
+    # a value, so an empty string is how "go back to automatic" is spelled --
+    # and `geoAuto` itself is server-owned, so it is the ONLY way to spell it.
+    # With `min_len=1` there was none: a profile that had ever been given a
+    # timezone was pinned to it for good, and the creation default is
+    # America/New_York. Measured on a real profile: it claimed
+    # America/New_York while egressing from Asia/Kolkata, a 10.5-hour
+    # contradiction on the most routinely checked pair there is, and the API
+    # had no way to undo it.
+    if "timezone" in payload and payload["timezone"] not in ("", None):
         v_str(payload["timezone"], "timezone", min_len=1, max_len=64)
-    if "language" in payload:
+    if "language" in payload and payload["language"] not in ("", None):
         v_str(payload["language"], "language", min_len=1, max_len=32)
     if "webrtcMode" in payload:
         # Accept both vocabularies and store the canonical one. This field
