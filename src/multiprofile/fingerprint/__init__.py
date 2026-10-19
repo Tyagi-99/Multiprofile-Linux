@@ -45,6 +45,7 @@ __all__ = [
     # legacy public API (identical behaviour)
     "normalize_seed",
     "build_fingerprint",
+    "effective_fingerprint",
     "fingerprint_report",
     "_ua_platform_mismatch",
     # new API
@@ -57,6 +58,42 @@ __all__ = [
     "inspector", "media", "mobile", "navigator", "network_info",
     "plugins", "screen", "touch", "webgl",
 ]
+
+
+def effective_fingerprint(
+    profile: dict[str, Any], fingerprint: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """This profile's fingerprint as it should appear on the wire today.
+
+    The stored fingerprint, with its Chromium version claims rewritten to the
+    engine that is installed now. Everything seed-derived is untouched: the
+    identity is the same identity, it simply stops announcing a browser build
+    the host has not had for a month.
+
+    One function so the console and the wire cannot disagree. The launcher
+    reads this for ``Network.setUserAgentOverride``; the fingerprint report
+    behind ``GET /api/profiles/<id>/fingerprint`` reads it so the operator is
+    shown what will actually be claimed.
+
+    A UA the operator pinned themselves is returned unaligned, version and
+    all. See ``api.user_agents.operator_pinned_user_agent`` for why that
+    distinction is version-insensitive.
+    """
+    fp = fingerprint
+    if not isinstance(fp, dict) or not fp:
+        stored = profile.get("fingerprint")
+        fp = stored if isinstance(stored, dict) and stored else build_fingerprint(profile)
+    try:
+        from ..api.user_agents import operator_pinned_user_agent
+
+        pinned = operator_pinned_user_agent(profile)
+    except Exception:  # noqa: BLE001 - never renumber on a catalogue failure
+        pinned = bool((profile.get("userAgent") or "").strip())
+    if pinned:
+        return dict(fp)
+    from ..engine import align_fingerprint
+
+    return align_fingerprint(fp)
 
 
 def fingerprint_report(profile: dict[str, Any]) -> dict[str, Any]:
@@ -73,9 +110,7 @@ def fingerprint_report(profile: dict[str, Any]) -> dict[str, Any]:
     Runtime values require a live CDP session; with none running every
     component reports UNKNOWN — values are never invented.
     """
-    fp = profile.get("fingerprint") if isinstance(profile.get("fingerprint"), dict) else None
-    if not fp:
-        fp = build_fingerprint(profile)
+    fp = effective_fingerprint(profile)
 
     # Legacy mismatch warnings (kept for the API surface).
     warnings = _ua_platform_mismatch(

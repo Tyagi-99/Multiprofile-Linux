@@ -305,3 +305,83 @@ def align_ua_metadata(metadata: Any, engine: EngineVersion | None = None) -> Any
         if key in out:
             out[key] = align_brands(out.get(key), engine, full=True)
     return out
+
+
+def strip_ua_versions(ua: str) -> str:
+    """``ua`` with every Chromium version token reduced to a placeholder.
+
+    Lets two UA strings be compared for *which browser and platform they
+    describe* rather than for which build. That is the comparison that tells
+    a UA the operator pasted apart from one this product derived and then had
+    the engine move underneath -- and the version-sensitive comparison is
+    exactly what made a derived UA start looking operator-chosen the moment
+    Chromium was upgraded.
+    """
+    if not ua:
+        return ""
+    return _UA_VERSION_RE.sub(lambda m: f"{m.group(1)}/*", ua)
+
+
+def align_fingerprint(fingerprint: Any, engine: EngineVersion | None = None) -> dict[str, Any]:
+    """Rewrite every Chromium version claim in a fingerprint to the engine's.
+
+    A fingerprint is built once and stored on the profile, which is what
+    makes a profile's identity stable -- the seed-derived parts of it *must*
+    not move, or the product's central promise breaks. The announced browser
+    version is not one of those parts. It is a fact about the environment the
+    identity has to agree with, and it goes stale the moment the engine is
+    upgraded:
+
+        engine (CDP Browser)  Chrome/154.0.8037.97
+        announced UA          Chrome/151.0.0.0
+        Sec-CH-UA brands      151
+
+    Measured on this host after 151 -> 154. Nothing reported it, because
+    ``engine_choice`` watches which *binary* answers and never which version,
+    so the contradiction was both live and silent.
+
+    So alignment happens on read rather than in storage. Storing it would
+    rewrite five profiles to say 154 today and leave the same staleness
+    waiting for 155; doing it here is idempotent, needs no migration, and
+    keeps one fact in one place. ``engineVersion.alignedFrom`` records the
+    build the fingerprint was derived against, so the rewrite is visible
+    rather than silent.
+
+    Only the version numerals move. Seed-derived entropy -- canvas, screen,
+    cores, GPU, media device ids -- is not touched, so an aligned profile is
+    the same profile.
+
+    A no-op when the engine version is unknown: a guess about what the
+    browser is would be worse than the stale truth.
+    """
+    if not isinstance(fingerprint, dict):
+        return {}
+    engine = engine or detect_engine_version()
+    out = dict(fingerprint)
+    if not engine.known:
+        return out
+
+    if out.get("userAgent"):
+        out["userAgent"] = align_ua_string(str(out["userAgent"]), engine)
+    if "ch_brands" in out:
+        out["ch_brands"] = align_brands(out.get("ch_brands"), engine)
+    if "ch_full_version_list" in out:
+        out["ch_full_version_list"] = align_brands(out.get("ch_full_version_list"), engine, full=True)
+
+    hints = out.get("clientHints")
+    if isinstance(hints, dict):
+        new_hints = dict(hints)
+        if "brands" in new_hints:
+            new_hints["brands"] = align_brands(new_hints.get("brands"), engine)
+        if new_hints.get("uaFullVersion"):
+            new_hints["uaFullVersion"] = engine.full
+        out["clientHints"] = new_hints
+
+    previous = fingerprint.get("engineVersion")
+    record = engine.to_dict()
+    if isinstance(previous, dict):
+        was = previous.get("full")
+        if was and was != engine.full:
+            record = dict(record, alignedFrom=was)
+    out["engineVersion"] = record
+    return out

@@ -88,16 +88,73 @@ def known_user_agent_ids() -> list[str]:
     return [str(e["id"]) for e in USER_AGENTS]
 
 
-def is_catalogue_user_agent(user_agent: str) -> bool:
+def is_catalogue_user_agent(user_agent: str, *, ignore_version: bool = False) -> bool:
     """Whether this UA string is one this catalogue produced.
 
     Lets a caller tell a UA it derived from a picked id apart from one the
     operator pasted, which is the difference between "changing the picker may
     replace this" and "leave it alone".
+
+    ``ignore_version`` compares the strings with their Chromium version
+    tokens blanked. Without it the answer decays: ``user_agent_catalog()``
+    aligns its entries to the installed engine, so a UA this catalogue
+    produced on Chromium 151 stops matching the catalogue the moment the host
+    upgrades to 154, and a derived UA then reads as operator-chosen. That is
+    how five profiles came to announce a browser version the engine had not
+    been for a month. Identity -- the platform, the model, the token names --
+    is what decides provenance here, not the build number.
     """
     if not user_agent:
         return False
     wanted = str(user_agent).strip()
+    if ignore_version:
+        from ..engine import strip_ua_versions
+
+        key = strip_ua_versions(wanted)
+        return any(
+            strip_ua_versions(str(e.get("ua", "")).strip()) == key
+            for e in list(user_agent_catalog()) + list(USER_AGENTS)
+        )
     return any(str(e.get("ua", "")).strip() == wanted for e in user_agent_catalog()) or any(
         str(e.get("ua", "")).strip() == wanted for e in USER_AGENTS
     )
+
+
+def operator_pinned_user_agent(profile: dict) -> bool:
+    """Did the operator choose this profile's UA string themselves?
+
+    True for a UA that did not come from this product: one pasted in, usually
+    to match a fingerprint bought elsewhere, where renumbering it would break
+    the pairing it was bought for. Such a UA is left exactly as given and the
+    disagreement with the engine is recorded instead.
+
+    The signal is ``userAgentId``, not the shape of the string. Provenance
+    cannot be read out of the UA itself: a plain Windows-Chrome string is
+    both what ``win_chrome`` resolves to and the single most common UA on the
+    web, so an operator who pastes one would have it silently renumbered if a
+    catalogue match were enough. ``userAgentId`` is the profile's own record
+    of having been derived, and it is already the field
+    ``_resolve_user_agent_id`` trusts for the same decision on update.
+
+    So: an id present, and a UA that is still the one that id resolves to
+    (compared without versions, because an engine upgrade moves the
+    catalogue) means derived, and derived claims track the engine. Anything
+    else the operator owns.
+    """
+    if not isinstance(profile, dict):
+        return False
+    ua = (profile.get("userAgent") or "").strip()
+    if not ua:
+        return False
+    uaid = (profile.get("userAgentId") or "").strip()
+    if not uaid:
+        return True
+    try:
+        from ..engine import strip_ua_versions
+
+        entry = resolve_user_agent_id(uaid)
+        if not entry:
+            return True
+        return strip_ua_versions(str(entry.get("ua") or "").strip()) != strip_ua_versions(ua)
+    except Exception:  # noqa: BLE001 - an unreadable catalogue must not renumber an operator's UA
+        return True

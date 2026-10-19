@@ -619,6 +619,22 @@ def _cdp_cookies(stored: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _ua_is_operator_pinned(profile: dict[str, Any]) -> bool:
+    """Whether this profile's UA was chosen by the operator rather than derived.
+
+    Wraps ``api.user_agents.operator_pinned_user_agent`` so a catalogue that
+    cannot be read does not silently renumber a UA someone pasted in. A
+    failure answers "pinned", which is the conservative direction: it leaves
+    the claim exactly as the operator left it.
+    """
+    try:
+        from ..api.user_agents import operator_pinned_user_agent
+
+        return operator_pinned_user_agent(profile)
+    except Exception:  # noqa: BLE001 - never renumber on a catalogue failure
+        return bool((profile.get("userAgent") or "").strip())
+
+
 def _resolve_wire_identity(
     profile: dict[str, Any],
     fingerprint: dict[str, Any],
@@ -648,9 +664,11 @@ def _resolve_wire_identity(
     run the profile (F5). Pool UAs are aligned in ``build_fingerprint``;
     a preset UA and the preset's own brand lists are aligned here, so the
     catalogue's Chrome-131 literals do not reach the wire on a 151 engine.
-    An explicit operator UA is never renumbered — and when it is present
-    its version also governs the hints, so the two cannot be aligned to
-    different browsers.
+    A UA the operator pinned themselves is never renumbered — and when one
+    is present its version also governs the hints, so the two cannot be
+    aligned to different browsers. A UA this product derived (from a pool
+    default, a device preset, or a ``userAgentId`` the operator picked) is
+    ours to keep current, and tracks the engine.
     """
     from ..engine import align_ua_metadata, align_ua_string
     from .cdp_identity import build_ua_override_params
@@ -675,8 +693,16 @@ def _resolve_wire_identity(
             )
     preset_ua = (preset_cfg.get("user_agent") or "").strip()
 
-    if explicit_ua:
+    pinned = bool(explicit_ua) and _ua_is_operator_pinned(profile)
+    if explicit_ua and pinned:
         ua = explicit_ua
+    elif explicit_ua:
+        # Ours, not theirs: a UA resolved from ``userAgentId`` is this
+        # product's claim and tracks the engine, exactly as a pool default
+        # does. Before this it was treated as explicit and frozen, so
+        # picking "Linux - Chrome" pinned that profile to whatever Chromium
+        # was installed on the day it was created.
+        ua = align_ua_string(explicit_ua, engine)
     elif preset_ua:
         ua = align_ua_string(preset_ua, engine)
     else:
@@ -702,7 +728,7 @@ def _resolve_wire_identity(
                 where="browser.launcher._resolve_wire_identity",
                 profile_id=profile_id,
             )
-        if metadata is not None and not explicit_ua:
+        if metadata is not None and not pinned:
             metadata = align_ua_metadata(metadata, engine)
 
     return ua, build_ua_override_params(fingerprint, ua, metadata=metadata)
@@ -1385,6 +1411,27 @@ def launch_profile(
                 where="browser.launcher",
                 profile_id=profile_id,
             )
+
+    # The stored fingerprint is the profile's identity and must not move --
+    # except for the one part of it that is not identity. The announced
+    # Chromium version is a fact about the engine that will run this launch,
+    # and a fingerprint built on 151 goes on claiming 151 on a 154 engine
+    # until something re-reads it. Aligned here, on the way to the wire, so
+    # the rewrite is idempotent and no profile row has to be migrated.
+    # An operator's own UA is never renumbered; see
+    # ``operator_pinned_user_agent``.
+    from ..fingerprint import effective_fingerprint
+
+    aligned = effective_fingerprint(profile, fingerprint)
+    _was = fingerprint.get("engineVersion")
+    was = _was.get("full") if isinstance(_was, dict) else None
+    now = (aligned.get("engineVersion") or {}).get("full")
+    if was and now and was != now:
+        notes.append(
+            f"Identity: version claims aligned {was} -> {now} "
+            "(the engine was upgraded since this profile was created)"
+        )
+    fingerprint = aligned
 
     # ------------------------------------------------------------------
     # Chrome binary + identity-script bundle
