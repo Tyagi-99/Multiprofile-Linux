@@ -120,9 +120,14 @@ Comprehensive architecture and engineering specifications:
 ## Quick Start
 
 ### Prerequisites
-- Linux (Ubuntu 20.04+, Debian 11+, Fedora, Arch)
+- Linux. Developed and verified on Arch/Omarchy; the install path is distro
+  agnostic, but no other distribution has been tested end to end. On Ubuntu
+  read [`docs/TEAM.md`](docs/TEAM.md#the-engine-which-is-where-ubuntu-differs)
+  first — `apt install chromium` there gives you a snap, and the interaction
+  with per-profile `--user-data-dir` is unmeasured.
 - Python 3.11+
-- System Chromium or Google Chrome installed
+- System Chromium, or a pinned Chrome for Testing. Branded Google Chrome 137+
+  works for browsing but cannot load unpacked extensions.
 - Optional: `uv` package manager (recommended)
 - Recommended: `python3-keyring`, so the key that encrypts proxy passwords
   lives in the OS keychain rather than a `0600` file. Without it the app

@@ -4,7 +4,7 @@ See [`TEAM.md`](TEAM.md) for onboarding more than one person, and
 [`BACKUP_AND_RESTORE.md`](BACKUP_AND_RESTORE.md) before you create anything
 you care about.
 
-## Rootless, per-user — the recommended path on Arch and anywhere without a `.deb`
+## Rootless, per-user — the recommended path on every distribution
 
 ```bash
 bash scripts/install-local.sh
@@ -16,7 +16,12 @@ nothing outside `$HOME`. It is idempotent -- re-running it is how you upgrade
 -- and it contains no code that writes to the data directory, so an upgrade
 cannot rewrite your profiles.
 
-Verified on Arch/Omarchy with Python 3.14. `scripts/uninstall-local.sh`
+Verified on Arch/Omarchy with Python 3.14; it is also the path to use on
+Debian and Ubuntu, where the `.deb` is the weaker option -- see
+[`TEAM.md`](TEAM.md#1-install). For the desktop window there, pywebview needs
+GTK bindings, which are distro packages and cannot come from pip:
+`sudo apt install python3-gi gir1.2-webkit2-4.1`. The script tests for the
+window and says which you have. `scripts/uninstall-local.sh`
 removes the application and deliberately leaves your profiles where they are.
 
 ## Verify the install before trusting it with real work
@@ -50,8 +55,19 @@ want when driving it from a script or over SSH.
 
 Requires **Python 3.11+** and a Chromium or Chrome on `PATH`. The launcher tries
 `google-chrome-stable`, `google-chrome`, `chromium`, `chromium-browser` in that
-order and uses the first it finds. On Arch: `pacman -S chromium`. On Debian or
-Ubuntu: `apt install chromium`.
+order and uses the first it finds. On Arch: `pacman -S chromium`. On Debian:
+`apt install chromium`, which is a real `.deb`.
+
+**On Ubuntu that command installs the snap**, and the snap `home` interface
+does not reach hidden directories in `$HOME` -- which is where profiles live
+(`~/.local/share/multiprofile/chrome-profiles/`), so every `--user-data-dir`
+we pass sits in a dot-directory the confinement excludes. That is predicted
+from the code and snap's rules and **has not been measured on a real Ubuntu
+machine**; the failure to watch for is not a crash but a Chromium that
+ignores the flag and shares one profile directory. Pin Chrome for Testing
+instead and the question does not arise -- see
+[`TEAM.md`](TEAM.md#the-engine-which-is-where-ubuntu-differs) and
+"Keeping the engine predictable" below.
 
 Optional extras, all included by `[all]`:
 
@@ -70,7 +86,14 @@ Optional extras, all included by `[all]`:
 Produces `dist/multiprofile-native_<version>_all.deb` and its `.sha256`.
 The package is architecture-independent — it ships Python, a static
 export and icons — so the same file installs on amd64 and arm64.
-This runs anywhere, including on Arch: it prefers `dpkg-deb` when that exists
+It is the right thing to hand someone who wants a package, and the wrong
+thing to install yourself: it is unsigned with no update channel (below), so
+upgrading is a manual rebuild, and its `Recommends` names `python3-webview`,
+which does not appear to exist on Ubuntu -- an unavailable *Recommends* is
+skipped silently, so the desktop window degrades with nothing said. Prefer
+`scripts/install-local.sh`.
+
+Building runs anywhere, including on Arch: it prefers `dpkg-deb` when that exists
 and falls back to [`scripts/build_deb.py`](../scripts/build_deb.py), which
 writes the same archive from the standard library. CI diffs the two on every
 build.

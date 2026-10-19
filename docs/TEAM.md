@@ -69,7 +69,14 @@ That creates a virtual environment under `~/.local/lib/multiprofile`, a
 `multiprofile` command in `~/.local/bin`, a desktop entry and icons. It never
 writes to the data directory, so re-running it is how you upgrade.
 
-**Debian or Ubuntu — the package:**
+**Debian or Ubuntu — use the same rootless script.** There is a `.deb`, and
+it installs, but it is the weaker path for a teammate: it is unsigned and has
+no update channel (**F12**), so upgrading means rebuilding and `dpkg -i` by
+hand, and its `Recommends` names `python3-webview`, which does not appear to
+be a real package on Ubuntu. An unavailable *Recommends* is skipped silently,
+so the desktop window degrades to a browser tab with nothing said about it.
+`install-local.sh` tests for the window and tells you. Build the `.deb` when
+you want a package to hand someone, not as your own install:
 
 ```bash
 ./build-deb.sh
@@ -77,12 +84,59 @@ sudo dpkg -i dist/multiprofile-native_1.9.0_all.deb
 sudo apt-get install -f     # only if dpkg reports missing dependencies
 ```
 
-Both paths need **Python 3.11+** and a Chromium on `PATH`:
+For the desktop window on Debian or Ubuntu, pywebview needs the GTK bindings,
+which are distro packages and cannot come from pip:
+
+```bash
+sudo apt install python3-gi gir1.2-webkit2-4.1
+```
+
+Every path needs **Python 3.11+** and a Chromium or Chrome on `PATH`.
+
+#### The engine, which is where Ubuntu differs
 
 ```bash
 sudo pacman -S chromium      # Arch / Omarchy
-sudo apt install chromium    # Debian / Ubuntu
+sudo apt install chromium    # Debian — a real .deb, nothing further to do
 ```
+
+On **Ubuntu** that same command installs the **snap**, and two things follow
+from the code:
+
+1. `shutil.which("chromium")` returns `/snap/bin/chromium` and the resolver
+   accepts it — `engine.py` walks `PATH` and does not ask what kind of
+   package answered.
+2. The snap `home` interface does not reach hidden directories in `$HOME`.
+   Profiles live under `~/.local/share/multiprofile/chrome-profiles/`, so
+   every `--user-data-dir` we pass sits inside a dot-directory the confinement
+   excludes.
+
+**This is predicted from the code and from snap's confinement rules. It has
+not been measured — nobody has installed on a real Ubuntu machine yet.** The
+good outcome is a launch that fails naming a permission error. The bad one is
+a Chromium that ignores the flag and uses its own profile directory, which
+would be profiles sharing an identity: an isolation failure, and much worse
+than a crash. Check which you have before trusting it — launch a profile and
+confirm `~/.local/share/multiprofile/chrome-profiles/<id>/` is actually
+written.
+
+**The way around the question entirely** is to pin Chrome for Testing. It is
+a plain tarball with no confinement, it is the engine CI proves against on
+every push, and the capability gate accepts it for unpacked extensions:
+
+```bash
+npx @puppeteer/browsers install chrome@stable
+curl -s -X POST localhost:8765/api/engine/choose \
+     -H 'Content-Type: application/json' \
+     -d '{"binary": "/absolute/path/to/chrome"}'
+```
+
+**Pin on any machine that also has Google Chrome.** `google-chrome-stable` is
+first in `BROWSER_BINARIES`, and Chrome from Google's own `.deb` is common on
+Ubuntu desktops. Branded Chrome 137+ cannot load unpacked extensions at all,
+so a profile with an extension assigned will refuse to launch, naming the
+reason. Pinning is what stops a browser installed months later from changing
+which engine your profiles run on.
 
 ### 2. Verify before trusting it with real work
 
